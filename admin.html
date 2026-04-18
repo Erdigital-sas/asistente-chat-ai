@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IA Chat · Panel administrativo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg: #08111f;
+      --panel: #0f172a;
+      --panel-2: #111827;
+      --line: rgba(255,255,255,0.08);
+      --text: #e5eefb;
+      --muted: #94a3b8;
+      --blue: #38bdf8;
+      --green: #22c55e;
+      --green-dark: #16a34a;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --red-dark: #dc2626;
+      --shadow: 0 18px 42px rgba(0,0,0,0.35);
+      --radius: 22px;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 22%),
+        radial-gradient(circle at top left, rgba(34, 197, 94, 0.06), transparent 18%),
+        linear-gradient(180deg, #06101c 0%, #08111f 100%);
+      color: var(--text);
+      font-family: Arial, sans-serif;
+    }
+
+    .wrap {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 28px 18px 60px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(17, 24, 39, 0.98) 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .login-box {
+      width: 100%;
+      max-width: 440px;
+      margin: 60px auto 0;
+      padding: 26px;
+    }
+
+    .brand {
+      margin-bottom: 18px;
+    }
+
+    .brand h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      color: #f8fbff;
+    }
+
+    .brand p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 20px 22px;
+      margin-bottom: 18px;
+    }
+
+    .toolbar h2 {
+      margin: 0 0 6px;
+      font-size: 26px;
+    }
+
+    .toolbar p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .stat {
+      padding: 18px;
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 800;
+      line-height: 1.1;
+      word-break: break-word;
+    }
+
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .panel-block {
+      padding: 20px;
+    }
+
+    .panel-block h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+
+    .panel-block p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .table-card {
+      padding: 18px;
+    }
+
+    .filters {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(248, 250, 252, 0.98);
+      color: #0f172a;
+      border-radius: 14px;
+      padding: 13px 14px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 130px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: rgba(56, 189, 248, 0.7);
+      box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.14);
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .row > * {
+      flex: 1;
+    }
+
+    button {
+      border: none;
+      border-radius: 16px;
+      padding: 13px 18px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform 0.14s ease, filter 0.14s ease, opacity 0.14s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.04);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.7;
+    }
+
+    .btn-primary {
+      background: linear-gradient(180deg, #34d399 0%, #22c55e 100%);
+      color: #04120a;
+      box-shadow: 0 12px 24px rgba(34, 197, 94, 0.22);
+    }
+
+    .btn-secondary {
+      background: linear-gradient(180deg, #60a5fa 0%, #2563eb 100%);
+      color: #fff;
+      box-shadow: 0 12px 24px rgba(37, 99, 235, 0.24);
+    }
+
+    .btn-warning {
+      background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
+      color: #fff;
+      box-shadow: 0 12px 24px rgba(217, 119, 6, 0.25);
+    }
+
+    .btn-danger {
+      background: linear-gradient(180deg, #f87171 0%, #ef4444 100%);
+      color: #fff;
+      box-shadow: 0 12px 24px rgba(239, 68, 68, 0.22);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 13px;
+      color: #dbeafe;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #22c55e;
+      box-shadow: 0 0 14px rgba(34, 197, 94, 0.5);
+    }
+
+    .dot.off {
+      background: #ef4444;
+      box-shadow: 0 0 14px rgba(239, 68, 68, 0.4);
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+      overflow: hidden;
+    }
+
+    th,
+    td {
+      padding: 14px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      color: #cbd5e1;
+      background: rgba(255,255,255,0.02);
+      font-size: 12px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+
+    tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tag.on {
+      background: rgba(34, 197, 94, 0.14);
+      color: #86efac;
+      border: 1px solid rgba(34, 197, 94, 0.25);
+    }
+
+    .tag.off {
+      background: rgba(239, 68, 68, 0.14);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+    }
+
+    .actions-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .btn-mini {
+      padding: 9px 11px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .btn-mini.activate {
+      background: rgba(34, 197, 94, 0.15);
+      color: #86efac;
+      border: 1px solid rgba(34, 197, 94, 0.24);
+    }
+
+    .btn-mini.deactivate {
+      background: rgba(245, 158, 11, 0.14);
+      color: #fcd34d;
+      border: 1px solid rgba(245, 158, 11, 0.24);
+    }
+
+    .btn-mini.delete {
+      background: rgba(239, 68, 68, 0.14);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.24);
+    }
+
+    .empty {
+      padding: 26px 10px 10px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .flash {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      min-width: 280px;
+      max-width: 420px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      z-index: 999999;
+      color: #fff;
+      box-shadow: 0 16px 34px rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.08);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(12px);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .flash.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .flash.info {
+      background: linear-gradient(180deg, #1e3a8a 0%, #1d4ed8 100%);
+    }
+
+    .flash.success {
+      background: linear-gradient(180deg, #15803d 0%, #16a34a 100%);
+    }
+
+    .flash.warning {
+      background: linear-gradient(180deg, #b45309 0%, #d97706 100%);
+    }
+
+    .flash.error {
+      background: linear-gradient(180deg, #b91c1c 0%, #dc2626 100%);
+    }
+
+    @media (max-width: 980px) {
+      .panels,
+      .stats {
+        grid-template-columns: 1fr;
+      }
+
+      .toolbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .toolbar-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .row {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section id="login-view" class="login-box card">
+      <div class="brand">
+        <h1>Panel administrativo</h1>
+        <p>
+          Desde aqui crearas, activaras, desactivaras y eliminaras los usuarios operadores
+          que pueden entrar a la extension.
+        </p>
+      </div>
+
+      <form id="login-form">
+        <div style="margin-bottom: 12px;">
+          <input id="login-user" placeholder="Usuario admin" autocomplete="username" />
+        </div>
+        <div style="margin-bottom: 14px;">
+          <input id="login-password" type="password" placeholder="Password admin" autocomplete="current-password" />
+        </div>
+        <button id="login-btn" type="submit" class="btn-primary" style="width: 100%;">
+          Entrar al panel
+        </button>
+      </form>
+
+      <div style="margin-top: 18px;" class="meta">
+        URL del panel: <b>/admin</b>
+      </div>
+      <div id="login-health" style="margin-top: 14px;"></div>
+    </section>
+
+    <section id="app-view" class="hidden">
+      <div class="toolbar card">
+        <div>
+          <h2>IA Chat · Admin</h2>
+          <p>Admin conectado: <b id="admin-user">-</b></p>
+        </div>
+
+        <div class="toolbar-actions">
+          <div id="server-pill" class="status-pill">
+            <span id="server-dot" class="dot off"></span>
+            <span id="server-text">Verificando server...</span>
+          </div>
+          <button id="refresh-btn" class="btn-secondary">Actualizar</button>
+          <button id="logout-btn" class="btn-danger">Salir</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat card">
+          <div class="stat-label">Operadores totales</div>
+          <div id="stat-total" class="stat-value">0</div>
+        </div>
+        <div class="stat card">
+          <div class="stat-label">Activos</div>
+          <div id="stat-activos" class="stat-value">0</div>
+        </div>
+        <div class="stat card">
+          <div class="stat-label">Inactivos</div>
+          <div id="stat-inactivos" class="stat-value">0</div>
+        </div>
+        <div class="stat card">
+          <div class="stat-label">Clave compartida extension</div>
+          <div id="stat-key" class="stat-value" style="font-size: 22px;">-</div>
+        </div>
+      </div>
+
+      <div class="panels">
+        <div class="panel-block card">
+          <h3>Crear un operador</h3>
+          <p>
+            Crea un operador individual. Se guardara en la tabla <b>operadores</b>
+            y quedara activo para entrar a la extension.
+          </p>
+
+          <form id="create-form">
+            <div class="row">
+              <input id="operator-name" placeholder="Ejemplo: Andres Rodriguez" />
+              <button id="create-btn" type="submit" class="btn-primary" style="max-width: 180px;">
+                Crear operador
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel-block card">
+          <h3>Alta masiva</h3>
+          <p>
+            Pega varios nombres, uno por linea o separados por coma. El panel crea,
+            reactiva o actualiza lo que haga falta sin duplicar.
+          </p>
+
+          <form id="bulk-form">
+            <textarea id="bulk-names" placeholder="Nadia Taco&#10;Andres Rodriguez&#10;Agustin Zabala"></textarea>
+            <div style="margin-top: 12px; display: flex; justify-content: flex-end;">
+              <button id="bulk-btn" type="submit" class="btn-warning">
+                Procesar alta masiva
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="table-card card">
+        <div class="filters">
+          <input id="search-input" placeholder="Buscar operador por nombre" />
+          <select id="status-filter" style="max-width: 220px;">
+            <option value="all">Todos</option>
+            <option value="active">Solo activos</option>
+            <option value="inactive">Solo inactivos</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Nombre</th>
+                <th>Estado</th>
+                <th>Creado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="operators-body"></tbody>
+          </table>
+        </div>
+
+        <div id="empty-state" class="empty hidden">
+          No hay operadores para mostrar con ese filtro.
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="flash" class="flash info"></div>
+
+  <script src="/admin.js"></script>
+</body>
+</html>
