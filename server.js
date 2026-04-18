@@ -1,10 +1,96 @@
 const express = require("express");
 const cors = require("cors");
+const { randomUUID } = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
+function leerEnteroEnv(nombre, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[nombre];
+  const n = Number.parseInt(raw, 10);
+
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+
+  return n;
+}
+
+function crearRequestId() {
+  try {
+    return randomUUID();
+  } catch (_err) {
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
 const app = express();
+app.disable("x-powered-by");
 app.use(cors());
+
+const runtimeStats = {
+  startedAt: Date.now(),
+  http: {
+    total: 0,
+    ok: 0,
+    error: 0,
+    lastMs: 0
+  },
+  suggestions: {
+    total: 0,
+    ok: 0,
+    error: 0,
+    inflightHits: 0,
+    secondPasses: 0,
+    lastMs: 0
+  },
+  translations: {
+    total: 0,
+    ok: 0,
+    error: 0,
+    cacheHits: 0,
+    inflightHits: 0,
+    lastMs: 0
+  },
+  openai: {
+    total: 0,
+    ok: 0,
+    error: 0,
+    suggestionCalls: 0,
+    translationCalls: 0,
+    lastMs: 0
+  }
+};
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+
+  req.requestId = crearRequestId();
+  res.setHeader("X-Request-Id", req.requestId);
+  res.setHeader("Cache-Control", "no-store");
+
+  res.on("finish", () => {
+    const ms = Date.now() - startedAt;
+    runtimeStats.http.total += 1;
+    runtimeStats.http.lastMs = ms;
+
+    if (res.statusCode >= 400) runtimeStats.http.error += 1;
+    else runtimeStats.http.ok += 1;
+  });
+
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
+
+app.use((err, _req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({
+      ok: false,
+      error: "JSON invalido"
+    });
+  }
+
+  return next(err);
+});
 
 // ==========================
 // VARIABLES DESDE RAILWAY
@@ -14,14 +100,117 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const OPERATOR_SHARED_KEY = process.env.OPERATOR_SHARED_KEY || "2026";
 const PORT = process.env.PORT || 3000;
-const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+
+const OPENAI_URL =
+  process.env.OPENAI_URL || "https://api.openai.com/v1/chat/completions";
+
+const OPENAI_MODEL_SUGGESTIONS =
+  process.env.OPENAI_MODEL_SUGGESTIONS ||
+  process.env.OPENAI_MODEL ||
+  "gpt-4o";
+
+const OPENAI_MODEL_TRANSLATE =
+  process.env.OPENAI_MODEL_TRANSLATE ||
+  process.env.OPENAI_MODEL_FAST ||
+  "gpt-4o-mini";
 
 // ==========================
 // CONFIG
 // ==========================
-const MAX_CONTEXT_LINES = 8;
-const MIN_RESPONSE_LENGTH = 24;
+const MAX_CONTEXT_LINES = leerEnteroEnv("MAX_CONTEXT_LINES", 8, 4, 15);
+const MIN_RESPONSE_LENGTH = leerEnteroEnv("MIN_RESPONSE_LENGTH", 24, 8, 120);
+
+const OPENAI_TIMEOUT_SUGGESTIONS_MS = leerEnteroEnv(
+  "OPENAI_TIMEOUT_SUGGESTIONS_MS",
+  22000,
+  8000,
+  45000
+);
+
+const OPENAI_TIMEOUT_TRANSLATE_MS = leerEnteroEnv(
+  "OPENAI_TIMEOUT_TRANSLATE_MS",
+  10000,
+  4000,
+  25000
+);
+
+const SUGGESTION_OPENAI_CONCURRENCY = leerEnteroEnv(
+  "SUGGESTION_OPENAI_CONCURRENCY",
+  6,
+  1,
+  20
+);
+
+const TRANSLATION_OPENAI_CONCURRENCY = leerEnteroEnv(
+  "TRANSLATION_OPENAI_CONCURRENCY",
+  2,
+  1,
+  10
+);
+
+const SUGGESTION_OPENAI_QUEUE_LIMIT = leerEnteroEnv(
+  "SUGGESTION_OPENAI_QUEUE_LIMIT",
+  60,
+  1,
+  300
+);
+
+const TRANSLATION_OPENAI_QUEUE_LIMIT = leerEnteroEnv(
+  "TRANSLATION_OPENAI_QUEUE_LIMIT",
+  30,
+  1,
+  200
+);
+
+const SUGGESTION_OPENAI_QUEUE_WAIT_MS = leerEnteroEnv(
+  "SUGGESTION_OPENAI_QUEUE_WAIT_MS",
+  12000,
+  1000,
+  30000
+);
+
+const TRANSLATION_OPENAI_QUEUE_WAIT_MS = leerEnteroEnv(
+  "TRANSLATION_OPENAI_QUEUE_WAIT_MS",
+  6000,
+  1000,
+  20000
+);
+
+const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = leerEnteroEnv(
+  "PER_OPERATOR_SUGGESTION_QUEUE_LIMIT",
+  3,
+  1,
+  10
+);
+
+const PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS = leerEnteroEnv(
+  "PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS",
+  12000,
+  1000,
+  30000
+);
+
+const OPERATOR_CACHE_TTL_MS = leerEnteroEnv(
+  "OPERATOR_CACHE_TTL_MS",
+  5 * 60 * 1000,
+  30000,
+  60 * 60 * 1000
+);
+
+const TRANSLATION_CACHE_TTL_MS = leerEnteroEnv(
+  "TRANSLATION_CACHE_TTL_MS",
+  15 * 60 * 1000,
+  60000,
+  2 * 60 * 60 * 1000
+);
+
+const TRANSLATION_CACHE_LIMIT = leerEnteroEnv(
+  "TRANSLATION_CACHE_LIMIT",
+  500,
+  50,
+  5000
+);
+
 const TARGET_SUGGESTION_SPECS = [
   { min: 200, max: 260, ideal: 230 },
   { min: 200, max: 260, ideal: 230 },
@@ -42,6 +231,257 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ==========================
+// CACHES Y ESTADO EN MEMORIA
+// ==========================
+const operatorAuthCache = new Map();
+const translationCache = new Map();
+const inflightTranslationJobs = new Map();
+const inflightSuggestionJobs = new Map();
+
+/*
+IMPORTANTE
+Esta cola por operador vive en memoria de esta replica.
+Si luego activas 2 o mas replicas en Railway, la siguiente etapa correcta
+es mover esta cola a Redis o a un store compartido.
+*/
+const operatorSuggestionQueues = new Map();
+
+// ==========================
+// LIMITERS
+// ==========================
+class ConcurrencyLimiter {
+  constructor({ name, maxConcurrent, maxQueue, waitTimeoutMs }) {
+    this.name = name;
+    this.maxConcurrent = maxConcurrent;
+    this.maxQueue = maxQueue;
+    this.waitTimeoutMs = waitTimeoutMs;
+    this.active = 0;
+    this.queue = [];
+  }
+
+  get activeCount() {
+    return this.active;
+  }
+
+  get queuedCount() {
+    return this.queue.length;
+  }
+
+  run(task) {
+    return new Promise((resolve, reject) => {
+      const job = {
+        started: false,
+        timeoutId: null,
+        execute: null
+      };
+
+      const execute = () => {
+        job.started = true;
+
+        if (job.timeoutId) {
+          clearTimeout(job.timeoutId);
+          job.timeoutId = null;
+        }
+
+        this.active += 1;
+
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            this.active = Math.max(0, this.active - 1);
+            this.drain();
+          });
+      };
+
+      job.execute = execute;
+
+      if (this.active < this.maxConcurrent) {
+        execute();
+        return;
+      }
+
+      if (this.queue.length >= this.maxQueue) {
+        reject(new Error(`Servidor ocupado. Cola ${this.name} llena`));
+        return;
+      }
+
+      if (this.waitTimeoutMs > 0) {
+        job.timeoutId = setTimeout(() => {
+          if (job.started) return;
+
+          const idx = this.queue.indexOf(job);
+          if (idx >= 0) {
+            this.queue.splice(idx, 1);
+          }
+
+          reject(new Error(`Servidor ocupado. Tiempo de espera agotado en ${this.name}`));
+        }, this.waitTimeoutMs);
+      }
+
+      this.queue.push(job);
+    });
+  }
+
+  drain() {
+    while (this.active < this.maxConcurrent && this.queue.length) {
+      const job = this.queue.shift();
+      job.execute();
+    }
+  }
+}
+
+const suggestionsOpenAILimiter = new ConcurrencyLimiter({
+  name: "openai_sugerencias",
+  maxConcurrent: SUGGESTION_OPENAI_CONCURRENCY,
+  maxQueue: SUGGESTION_OPENAI_QUEUE_LIMIT,
+  waitTimeoutMs: SUGGESTION_OPENAI_QUEUE_WAIT_MS
+});
+
+const translationOpenAILimiter = new ConcurrencyLimiter({
+  name: "openai_traduccion",
+  maxConcurrent: TRANSLATION_OPENAI_CONCURRENCY,
+  maxQueue: TRANSLATION_OPENAI_QUEUE_LIMIT,
+  waitTimeoutMs: TRANSLATION_OPENAI_QUEUE_WAIT_MS
+});
+
+function countOperatorSuggestionsRunning() {
+  let total = 0;
+
+  for (const state of operatorSuggestionQueues.values()) {
+    if (state.running) total += 1;
+  }
+
+  return total;
+}
+
+function countOperatorSuggestionsQueued() {
+  let total = 0;
+
+  for (const state of operatorSuggestionQueues.values()) {
+    total += state.queue.length;
+  }
+
+  return total;
+}
+
+function getOrCreateOperatorQueueState(operadorKey) {
+  if (!operatorSuggestionQueues.has(operadorKey)) {
+    operatorSuggestionQueues.set(operadorKey, {
+      running: false,
+      queue: [],
+      lastUsedAt: Date.now()
+    });
+  }
+
+  return operatorSuggestionQueues.get(operadorKey);
+}
+
+function cleanupOperatorSuggestionQueue(operadorKey, state) {
+  if (!state.running && state.queue.length === 0) {
+    operatorSuggestionQueues.delete(operadorKey);
+  }
+}
+
+function drainOperatorSuggestionQueue(operadorKey, state) {
+  if (state.running) return;
+
+  const nextJob = state.queue.shift();
+
+  if (!nextJob) {
+    cleanupOperatorSuggestionQueue(operadorKey, state);
+    return;
+  }
+
+  nextJob.execute();
+}
+
+function runSuggestionQueueByOperator(operador = "", task) {
+  const operadorKey = normalizarTexto(operador || "anon");
+  const state = getOrCreateOperatorQueueState(operadorKey);
+
+  return new Promise((resolve, reject) => {
+    const job = {
+      started: false,
+      timeoutId: null,
+      execute: null
+    };
+
+    const execute = () => {
+      job.started = true;
+      state.running = true;
+      state.lastUsedAt = Date.now();
+
+      if (job.timeoutId) {
+        clearTimeout(job.timeoutId);
+        job.timeoutId = null;
+      }
+
+      Promise.resolve()
+        .then(task)
+        .then(resolve, reject)
+        .finally(() => {
+          state.running = false;
+          state.lastUsedAt = Date.now();
+          drainOperatorSuggestionQueue(operadorKey, state);
+        });
+    };
+
+    job.execute = execute;
+
+    if (!state.running) {
+      execute();
+      return;
+    }
+
+    if (state.queue.length >= PER_OPERATOR_SUGGESTION_QUEUE_LIMIT) {
+      reject(new Error("Este operador ya tiene demasiadas solicitudes de IA en curso"));
+      return;
+    }
+
+    if (PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS > 0) {
+      job.timeoutId = setTimeout(() => {
+        if (job.started) return;
+
+        const idx = state.queue.indexOf(job);
+        if (idx >= 0) {
+          state.queue.splice(idx, 1);
+        }
+
+        cleanupOperatorSuggestionQueue(operadorKey, state);
+        reject(new Error("La cola de IA de este operador esta llena o lenta"));
+      }, PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS);
+    }
+
+    state.queue.push(job);
+  });
+}
+
+function getSharedInFlight(map, key, factory) {
+  if (map.has(key)) {
+    return {
+      shared: true,
+      promise: map.get(key)
+    };
+  }
+
+  const promise = Promise.resolve()
+    .then(factory)
+    .finally(() => {
+      if (map.get(key) === promise) {
+        map.delete(key);
+      }
+    });
+
+  map.set(key, promise);
+
+  return {
+    shared: false,
+    promise
+  };
+}
 
 // ==========================
 // UTILIDADES
@@ -93,23 +533,48 @@ function limitarContexto(ctx = "") {
 function compactarBloque(texto = "", maxChars = 1200) {
   const limpio = String(texto ?? "").trim();
   if (!limpio) return "";
+
   if (limpio.length <= maxChars) return limpio;
+
   return limpio.slice(-maxChars);
 }
 
 function limpiarLinea(texto = "") {
   return limpiarSalidaHumana(
     String(texto ?? "")
-      .replace(/^\s*\d+[\).\-\s]*/, "")
+      .replace(/^\s*\d+[\).\-\s:]*/, "")
       .replace(/^\s*[•\-–—]+\s*/, "")
   );
+}
+
+function extraerBloquesIA(texto = "") {
+  const raw = String(texto ?? "")
+    .replace(/\r/g, "")
+    .trim();
+
+  if (!raw) return [];
+
+  const bloques = [];
+  const regex = /(?:^|\n)\s*\d+\s*[\).\-\:]*\s*([\s\S]*?)(?=(?:\n\s*\d+\s*[\).\-\:]*\s)|$)/g;
+
+  let match;
+  while ((match = regex.exec(raw))) {
+    const bloque = normalizarEspacios(String(match[1] || "").replace(/\n+/g, " "));
+    if (bloque) bloques.push(bloque);
+  }
+
+  if (bloques.length) return bloques;
+
+  return raw
+    .split(/\n+/)
+    .map((linea) => normalizarEspacios(linea))
+    .filter(Boolean);
 }
 
 function limpiarTextoIA(texto = "") {
   const vistos = new Set();
 
-  return String(texto ?? "")
-    .split(/\n+/)
+  return extraerBloquesIA(texto)
     .map(limpiarLinea)
     .filter((t) => t.length >= MIN_RESPONSE_LENGTH)
     .filter((t) => {
@@ -191,6 +656,22 @@ function sePareceDemasiado(a = "", b = "") {
   return overlap / wb.length >= 0.85;
 }
 
+function crearFingerprintSugerencia({
+  operador = "",
+  textoPlano = "",
+  clientePlano = "",
+  contextoPlano = "",
+  perfilPlano = ""
+}) {
+  return [
+    normalizarTexto(operador).slice(0, 80),
+    normalizarTexto(textoPlano).slice(0, 500),
+    normalizarTexto(clientePlano).slice(0, 300),
+    normalizarTexto(contextoPlano).slice(-600),
+    normalizarTexto(perfilPlano).slice(0, 200)
+  ].join("||");
+}
+
 // ==========================
 // CONTEXTO RELEVANTE
 // ==========================
@@ -239,7 +720,11 @@ function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
 
   const scored = lineas.map((linea) => {
     const tokens = tokenizarRelevancia(linea);
-    const score = tokens.reduce((acc, token) => acc + (tokensObjetivo.has(token) ? 1 : 0), 0);
+    const score = tokens.reduce(
+      (acc, token) => acc + (tokensObjetivo.has(token) ? 1 : 0),
+      0
+    );
+
     return { linea, score };
   });
 
@@ -272,7 +757,9 @@ const TERMINOS_AFECTIVOS = [
 
 function extraerNombreEnApertura(texto = "") {
   const limpio = normalizarEspacios(String(texto ?? ""));
-  const match = limpio.match(/^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\s+([a-zA-ZñÑáéíóúÁÉÍÓÚ]+)/i);
+  const match = limpio.match(
+    /^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\s+([a-zA-ZñÑáéíóúÁÉÍÓÚ]+)/i
+  );
 
   if (!match) return "";
 
@@ -300,15 +787,20 @@ function detectarElementosClave(texto = "") {
   };
 }
 
-function faltaElementosClave(sugerencia = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
+function faltaElementosClave(
+  sugerencia = "",
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+) {
   const sugNorm = normalizarTexto(sugerencia);
   const nombreSugerencia = extraerNombreEnApertura(sugerencia);
 
   if (elementos.nombreApertura) {
     if (!sugNorm.includes(elementos.nombreApertura)) return true;
-    if (nombreSugerencia && nombreSugerencia !== elementos.nombreApertura) return true;
-  } else {
-    if (nombreSugerencia) return true;
+    if (nombreSugerencia && nombreSugerencia !== elementos.nombreApertura) {
+      return true;
+    }
+  } else if (nombreSugerencia) {
+    return true;
   }
 
   if (elementos.afectivos.length) {
@@ -336,7 +828,11 @@ function originalEsInicioOEnganche(original = "") {
   );
 }
 
-function esSugerenciaDebil(texto = "", original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
+function esSugerenciaDebil(
+  texto = "",
+  original = "",
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+) {
   const t = normalizarTexto(texto);
 
   if (!t || t.length < 18) return true;
@@ -344,7 +840,8 @@ function esSugerenciaDebil(texto = "", original = "", elementos = { nombreApertu
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
 
-  if (originalEsInicioOEnganche(original) && pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)) {
+  if (originalEsInicioOEnganche(original) &&
+      pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)) {
     return true;
   }
 
@@ -367,7 +864,11 @@ function esSugerenciaDebil(texto = "", original = "", elementos = { nombreApertu
   return patrones.some((p) => p.test(t));
 }
 
-function necesitaSegundoIntento(sugerencias = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
+function necesitaSegundoIntento(
+  sugerencias = [],
+  original = "",
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+) {
   if (sugerencias.length < 3) return true;
   if (!setCumpleLongitudes(sugerencias)) return true;
 
@@ -666,22 +1167,35 @@ function construirBloqueConservacion(elementosClave) {
   const partes = [];
 
   if (elementosClave.nombreApertura) {
-    partes.push(`Si el borrador incluye un nombre propio, debes conservar exactamente ese nombre: ${elementosClave.nombreApertura}`);
+    partes.push(
+      `Si el borrador incluye un nombre propio, debes conservar exactamente ese nombre: ${elementosClave.nombreApertura}`
+    );
   } else {
-    partes.push("Si el borrador no incluye un nombre propio, no inventes ninguno aunque aparezca en el perfil o contexto.");
+    partes.push(
+      "Si el borrador no incluye un nombre propio, no inventes ninguno aunque aparezca en el perfil o contexto."
+    );
   }
 
   if (elementosClave.afectivos.length) {
-    partes.push(`Si el borrador incluye palabras afectivas, debes conservarlas exactamente: ${elementosClave.afectivos.join(", ")}`);
+    partes.push(
+      `Si el borrador incluye palabras afectivas, debes conservarlas exactamente: ${elementosClave.afectivos.join(", ")}`
+    );
   }
 
-  partes.push("Nunca uses el nombre de otra clienta, de otro chat o del perfil si el operador no lo escribio.");
-  partes.push("No cambies el lado de la conversacion. Tu salida sigue siendo del operador para la clienta.");
+  partes.push(
+    "Nunca uses el nombre de otra clienta, de otro chat o del perfil si el operador no lo escribio."
+  );
+  partes.push(
+    "No cambies el lado de la conversacion. Tu salida sigue siendo del operador para la clienta."
+  );
 
   return partes.join("\n");
 }
 
-function construirSystemPrompt(elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false }, segundoIntento = false) {
+function construirSystemPrompt(
+  elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false },
+  segundoIntento = false
+) {
   return `
 Eres un editor conversacional premium para operadores que escriben a una clienta dentro de una app de citas.
 
@@ -842,6 +1356,73 @@ Escribe como si la clienta fuera a leer el mensaje final
 }
 
 // ==========================
+// CACHE DE OPERADORES
+// ==========================
+function leerOperadorCache(nombreFormateado = "") {
+  const key = normalizarTexto(nombreFormateado);
+  const entry = operatorAuthCache.get(key);
+
+  if (!entry) return "";
+
+  if (entry.expiresAt <= Date.now()) {
+    operatorAuthCache.delete(key);
+    return "";
+  }
+
+  return entry.nombre || "";
+}
+
+function guardarOperadorCache(nombreFormateado = "", nombreReal = "") {
+  const key = normalizarTexto(nombreFormateado);
+  operatorAuthCache.set(key, {
+    nombre: nombreReal,
+    expiresAt: Date.now() + OPERATOR_CACHE_TTL_MS
+  });
+}
+
+// ==========================
+// TRADUCCION CACHE
+// ==========================
+function getTranslationCacheKey(texto = "") {
+  return normalizarTexto(texto).slice(0, 1200);
+}
+
+function leerTraduccionCache(cacheKey = "") {
+  if (!cacheKey) return "";
+
+  const entry = translationCache.get(cacheKey);
+  if (!entry) return "";
+
+  if (entry.expiresAt <= Date.now()) {
+    translationCache.delete(cacheKey);
+    return "";
+  }
+
+  translationCache.delete(cacheKey);
+  translationCache.set(cacheKey, entry);
+
+  return entry.value || "";
+}
+
+function guardarTraduccionCache(cacheKey = "", value = "") {
+  if (!cacheKey || !value) return;
+
+  if (translationCache.has(cacheKey)) {
+    translationCache.delete(cacheKey);
+  }
+
+  translationCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + TRANSLATION_CACHE_TTL_MS
+  });
+
+  while (translationCache.size > TRANSLATION_CACHE_LIMIT) {
+    const oldestKey = translationCache.keys().next().value;
+    translationCache.delete(oldestKey);
+  }
+}
+
+// ==========================
 // OPERADORES
 // ==========================
 async function validarOperadorAcceso(operador = "", clave = "") {
@@ -853,6 +1434,11 @@ async function validarOperadorAcceso(operador = "", clave = "") {
 
   if (clave !== OPERATOR_SHARED_KEY) {
     throw new Error("Clave invalida");
+  }
+
+  const cacheHit = leerOperadorCache(operadorFormateado);
+  if (cacheHit) {
+    return cacheHit;
   }
 
   const { data, error } = await supabase
@@ -869,6 +1455,7 @@ async function validarOperadorAcceso(operador = "", clave = "") {
     throw new Error("Operador no autorizado");
   }
 
+  guardarOperadorCache(operadorFormateado, data.nombre);
   return data.nombre;
 }
 
@@ -922,53 +1509,105 @@ async function registrarConsumo({
   }
 }
 
+function registrarConsumoAsync(payload) {
+  setImmediate(async () => {
+    try {
+      await registrarConsumo(payload);
+    } catch (err) {
+      console.error("Error guardando consumo async:", err.message);
+    }
+  });
+}
+
 // ==========================
 // OPENAI
 // ==========================
-async function llamarOpenAI(messages, temperature = 0.58, max_tokens = 420) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const response = await fetch(OPENAI_URL, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages,
-        temperature,
-        max_tokens
-      })
-    });
-
-    let data;
-
-    try {
-      data = await response.json();
-    } catch (err) {
-      throw new Error("La respuesta de OpenAI no vino en JSON");
-    }
-
-    if (!response.ok) {
-      throw new Error(data?.error?.message || "Error consultando OpenAI");
-    }
-
-    return data;
-  } catch (err) {
-    if (err.name === "AbortError") {
-      throw new Error("OpenAI tardo demasiado en responder");
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+function obtenerOpenAILimiter(lane = "sugerencias") {
+  return lane === "traduccion"
+    ? translationOpenAILimiter
+    : suggestionsOpenAILimiter;
 }
 
-function elegirMejorSet(primary = [], secondary = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
+async function llamarOpenAI({
+  lane = "sugerencias",
+  model,
+  messages,
+  temperature = 0.58,
+  maxTokens = 420,
+  timeoutMs = 20000
+}) {
+  const limiter = obtenerOpenAILimiter(lane);
+
+  return limiter.run(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+
+    runtimeStats.openai.total += 1;
+    if (lane === "traduccion") runtimeStats.openai.translationCalls += 1;
+    else runtimeStats.openai.suggestionCalls += 1;
+
+    try {
+      const response = await fetch(OPENAI_URL, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens
+        })
+      });
+
+      let data;
+
+      try {
+        data = await response.json();
+      } catch (_err) {
+        throw new Error("La respuesta de OpenAI no vino en JSON");
+      }
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          throw new Error("OpenAI esta ocupado. Intenta de nuevo en unos segundos");
+        }
+
+        throw new Error(data?.error?.message || "Error consultando OpenAI");
+      }
+
+      runtimeStats.openai.ok += 1;
+      runtimeStats.openai.lastMs = Date.now() - startedAt;
+
+      return data;
+    } catch (err) {
+      runtimeStats.openai.error += 1;
+      runtimeStats.openai.lastMs = Date.now() - startedAt;
+
+      if (err.name === "AbortError") {
+        throw new Error(
+          lane === "traduccion"
+            ? "La traduccion tardo demasiado"
+            : "OpenAI tardo demasiado en responder"
+        );
+      }
+
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  });
+}
+
+function elegirMejorSet(
+  primary = [],
+  secondary = [],
+  original = "",
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+) {
   const puntuar = (arr) => {
     if (!arr.length) return -999;
 
@@ -1013,14 +1652,17 @@ async function generarSugerencias({
     guiaIntencion
   });
 
-  const data1 = await llamarOpenAI(
-    [
+  const data1 = await llamarOpenAI({
+    lane: "sugerencias",
+    model: OPENAI_MODEL_SUGGESTIONS,
+    messages: [
       { role: "system", content: construirSystemPrompt(elementosClave, false) },
       { role: "user", content: userPrompt }
     ],
-    0.58,
-    420
-  );
+    temperature: 0.56,
+    maxTokens: 360,
+    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
+  });
 
   const sugerencias1 = limpiarTextoIA(
     data1?.choices?.[0]?.message?.content || ""
@@ -1034,6 +1676,8 @@ async function generarSugerencias({
       usageData: data1
     };
   }
+
+  runtimeStats.suggestions.secondPasses += 1;
 
   const reporteLongitudes1 = construirReporteLongitudes(sugerencias1);
 
@@ -1058,14 +1702,17 @@ Corrige esto ahora:
 - no respondas como si la clienta hubiera dicho otra cosa
 `.trim();
 
-  const data2 = await llamarOpenAI(
-    [
+  const data2 = await llamarOpenAI({
+    lane: "sugerencias",
+    model: OPENAI_MODEL_SUGGESTIONS,
+    messages: [
       { role: "system", content: construirSystemPrompt(elementosClave, true) },
       { role: "user", content: userPrompt2 }
     ],
-    0.64,
-    520
-  );
+    temperature: 0.62,
+    maxTokens: 440,
+    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
+  });
 
   const sugerencias2 = limpiarTextoIA(
     data2?.choices?.[0]?.message?.content || ""
@@ -1074,8 +1721,55 @@ Corrige esto ahora:
     .filter((s) => !esRespuestaBasura(s));
 
   return {
-    sugerencias: elegirMejorSet(sugerencias1, sugerencias2, textoPlano, elementosClave).slice(0, 3),
+    sugerencias: elegirMejorSet(
+      sugerencias1,
+      sugerencias2,
+      textoPlano,
+      elementosClave
+    ).slice(0, 3),
     usageData: sumarUsage(data1, data2)
+  };
+}
+
+async function traducirTexto(texto = "") {
+  const data = await llamarOpenAI({
+    lane: "traduccion",
+    model: OPENAI_MODEL_TRANSLATE,
+    messages: [
+      {
+        role: "system",
+        content: `
+Traduce al ingles natural de chat como una persona real escribiria.
+
+REGLAS
+No usar comillas
+No usar simbolos raros
+No sonar perfecto
+Debe sonar natural y humano
+Devuelve solo una version final
+`.trim()
+      },
+      {
+        role: "user",
+        content: String(texto ?? "")
+      }
+    ],
+    temperature: 0.3,
+    maxTokens: 140,
+    timeoutMs: OPENAI_TIMEOUT_TRANSLATE_MS
+  });
+
+  const traducido = limpiarSalidaHumana(
+    data?.choices?.[0]?.message?.content || ""
+  );
+
+  if (!traducido) {
+    throw new Error("No se pudo traducir");
+  }
+
+  return {
+    traducido,
+    usageData: data
   };
 }
 
@@ -1083,7 +1777,34 @@ Corrige esto ahora:
 // HEALTH
 // ==========================
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "server mic" });
+  return res.json({
+    ok: true,
+    service: "server pro",
+    uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    models: {
+      sugerencias: OPENAI_MODEL_SUGGESTIONS,
+      traduccion: OPENAI_MODEL_TRANSLATE
+    },
+    queues: {
+      operator_suggestions: {
+        running: countOperatorSuggestionsRunning(),
+        waiting: countOperatorSuggestionsQueued(),
+        operators: operatorSuggestionQueues.size,
+        max_waiting_per_operator: PER_OPERATOR_SUGGESTION_QUEUE_LIMIT
+      },
+      openai_suggestions: {
+        active: suggestionsOpenAILimiter.activeCount,
+        waiting: suggestionsOpenAILimiter.queuedCount,
+        max_concurrent: SUGGESTION_OPENAI_CONCURRENCY
+      },
+      openai_translate: {
+        active: translationOpenAILimiter.activeCount,
+        waiting: translationOpenAILimiter.queuedCount,
+        max_concurrent: TRANSLATION_OPENAI_CONCURRENCY
+      }
+    },
+    stats: runtimeStats
+  });
 });
 
 // ==========================
@@ -1100,7 +1821,9 @@ app.post("/login", autorizarOperador, async (req, res) => {
 // SUGERENCIAS
 // ==========================
 app.post("/sugerencias", autorizarOperador, async (req, res) => {
+  const startedAt = Date.now();
   const operador = req.operadorAutorizado;
+  runtimeStats.suggestions.total += 1;
 
   try {
     const {
@@ -1127,42 +1850,81 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     const lecturaOperador = construirLecturaOperador(analisisOperador);
 
     const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
-    const intencionOperador = detectarIntencionOperador(texto, cliente, contextoFiltrado);
+    const intencionOperador = detectarIntencionOperador(
+      texto,
+      cliente,
+      contextoFiltrado
+    );
     const guiaIntencion = construirGuiaIntencion(intencionOperador);
 
     const textoPlano = compactarBloque(quitarTildes(texto), 800);
-    const clientePlano = compactarBloque(quitarTildes(cliente || "Sin mensaje"), 600);
-    const contextoPlano = compactarBloque(quitarTildes(limitarContexto(contextoFiltrado) || "Sin contexto"), 1200);
-    const perfilPlano = compactarBloque(quitarTildes(limitarContexto(perfil) || "Sin perfil"), 400);
+    const clientePlano = compactarBloque(
+      quitarTildes(cliente || "Sin mensaje"),
+      500
+    );
+    const contextoPlano = compactarBloque(
+      quitarTildes(limitarContexto(contextoFiltrado) || "Sin contexto"),
+      1000
+    );
+    const perfilPlano = compactarBloque(
+      quitarTildes(limitarContexto(perfil) || "Sin perfil"),
+      280
+    );
 
-    const resultado = await generarSugerencias({
+    const fingerprint = crearFingerprintSugerencia({
+      operador,
       textoPlano,
       clientePlano,
       contextoPlano,
-      perfilPlano,
-      lecturaCliente,
-      lecturaOperador,
-      tonoCliente: analisisCliente.tono,
-      contactoExterno: analisisCliente.contacto,
-      elementosClave,
-      intencionOperador,
-      guiaIntencion
+      perfilPlano
     });
 
-    let sugerencias = resultado.sugerencias;
+    const sharedJob = getSharedInFlight(
+      inflightSuggestionJobs,
+      fingerprint,
+      async () => {
+        return runSuggestionQueueByOperator(operador, async () => {
+          return generarSugerencias({
+            textoPlano,
+            clientePlano,
+            contextoPlano,
+            perfilPlano,
+            lecturaCliente,
+            lecturaOperador,
+            tonoCliente: analisisCliente.tono,
+            contactoExterno: analisisCliente.contacto,
+            elementosClave,
+            intencionOperador,
+            guiaIntencion
+          });
+        });
+      }
+    );
+
+    if (sharedJob.shared) {
+      runtimeStats.suggestions.inflightHits += 1;
+    }
+
+    const resultado = await sharedJob.promise;
+    let sugerencias = Array.isArray(resultado?.sugerencias)
+      ? resultado.sugerencias
+      : [];
 
     if (!sugerencias.length) {
       sugerencias = ["Escribe un poco mas de contexto"];
     }
 
-    await registrarConsumo({
+    registrarConsumoAsync({
       operador,
       extension_id,
-      data: resultado.usageData,
-      tipo: "IA",
+      data: sharedJob.shared ? null : resultado.usageData,
+      tipo: sharedJob.shared ? "IA_SHARED" : "IA",
       mensaje_operador: texto,
       request_ok: true
     });
+
+    runtimeStats.suggestions.ok += 1;
+    runtimeStats.suggestions.lastMs = Date.now() - startedAt;
 
     return res.json({
       ok: true,
@@ -1171,7 +1933,7 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
   } catch (err) {
     console.error("Error en /sugerencias:", err.message);
 
-    await registrarConsumo({
+    registrarConsumoAsync({
       operador,
       extension_id: req.body?.extension_id || "",
       data: null,
@@ -1179,6 +1941,9 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       mensaje_operador: req.body?.texto || "",
       request_ok: false
     });
+
+    runtimeStats.suggestions.error += 1;
+    runtimeStats.suggestions.lastMs = Date.now() - startedAt;
 
     return res.json({
       ok: false,
@@ -1192,7 +1957,9 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
 // TRADUCCION
 // ==========================
 app.post("/traducir", autorizarOperador, async (req, res) => {
+  const startedAt = Date.now();
   const operador = req.operadorAutorizado;
+  runtimeStats.translations.total += 1;
 
   try {
     const { texto = "", extension_id = "" } = req.body || {};
@@ -1204,42 +1971,59 @@ app.post("/traducir", autorizarOperador, async (req, res) => {
       });
     }
 
-    const data = await llamarOpenAI(
-      [
-        {
-          role: "system",
-          content: `
-Traduce al ingles natural de chat como una persona real escribiria.
+    const cacheKey = getTranslationCacheKey(texto);
+    const cached = leerTraduccionCache(cacheKey);
 
-REGLAS
-No usar comillas
-No usar simbolos raros
-No sonar perfecto
-Debe sonar natural y humano
-Devuelve solo una version final
-`.trim()
-        },
-        {
-          role: "user",
-          content: quitarTildes(texto)
-        }
-      ],
-      0.45,
-      220
+    if (cached) {
+      runtimeStats.translations.cacheHits += 1;
+      runtimeStats.translations.ok += 1;
+      runtimeStats.translations.lastMs = Date.now() - startedAt;
+
+      registrarConsumoAsync({
+        operador,
+        extension_id,
+        data: null,
+        tipo: "TRAD_CACHE",
+        mensaje_operador: texto,
+        request_ok: true
+      });
+
+      return res.json({
+        ok: true,
+        traducido: cached
+      });
+    }
+
+    const sharedJob = getSharedInFlight(
+      inflightTranslationJobs,
+      cacheKey,
+      async () => traducirTexto(texto)
     );
 
-    const traducido = limpiarSalidaHumana(
-      data?.choices?.[0]?.message?.content || ""
-    );
+    if (sharedJob.shared) {
+      runtimeStats.translations.inflightHits += 1;
+    }
 
-    await registrarConsumo({
+    const resultado = await sharedJob.promise;
+    const traducido = resultado?.traducido || "";
+
+    if (!traducido) {
+      throw new Error("No se pudo traducir");
+    }
+
+    guardarTraduccionCache(cacheKey, traducido);
+
+    registrarConsumoAsync({
       operador,
       extension_id,
-      data,
-      tipo: "TRAD",
+      data: sharedJob.shared ? null : resultado.usageData,
+      tipo: sharedJob.shared ? "TRAD_SHARED" : "TRAD",
       mensaje_operador: texto,
       request_ok: true
     });
+
+    runtimeStats.translations.ok += 1;
+    runtimeStats.translations.lastMs = Date.now() - startedAt;
 
     return res.json({
       ok: true,
@@ -1248,7 +2032,7 @@ Devuelve solo una version final
   } catch (err) {
     console.error("Error en /traducir:", err.message);
 
-    await registrarConsumo({
+    registrarConsumoAsync({
       operador,
       extension_id: req.body?.extension_id || "",
       data: null,
@@ -1256,6 +2040,9 @@ Devuelve solo una version final
       mensaje_operador: req.body?.texto || "",
       request_ok: false
     });
+
+    runtimeStats.translations.error += 1;
+    runtimeStats.translations.lastMs = Date.now() - startedAt;
 
     return res.json({
       ok: false,
@@ -1265,8 +2052,30 @@ Devuelve solo una version final
 });
 
 // ==========================
+// ERROR FINAL
+// ==========================
+app.use((err, _req, res, _next) => {
+  console.error("Error no controlado:", err);
+
+  if (res.headersSent) {
+    return;
+  }
+
+  return res.status(500).json({
+    ok: false,
+    error: "Error interno"
+  });
+});
+
+// ==========================
 // START
 // ==========================
 app.listen(PORT, () => {
   console.log(`Server PRO activo en puerto ${PORT}`);
+  console.log(
+    `Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`
+  );
+  console.log(
+    `Lanes OpenAI => sugerencias: ${SUGGESTION_OPENAI_CONCURRENCY} | traduccion: ${TRANSLATION_OPENAI_CONCURRENCY}`
+  );
 });
