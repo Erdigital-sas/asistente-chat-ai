@@ -20,7 +20,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 // ==========================
 // CONFIG
 // ==========================
-const MAX_CONTEXT_LINES = 10;
+const MAX_CONTEXT_LINES = 8;
 const MIN_RESPONSE_LENGTH = 8;
 
 // ==========================
@@ -140,6 +140,9 @@ function sePareceDemasiado(a = "", b = "") {
   return overlap / wb.length >= 0.85;
 }
 
+// ==========================
+// CONTEXTO RELEVANTE
+// ==========================
 const STOPWORDS_RELEVANCIA = new Set([
   "hola", "amor", "mi", "mio", "tu", "tuyo", "que", "como", "estas", "esta",
   "para", "pero", "porque", "por", "con", "sin", "una", "uno", "unos",
@@ -160,17 +163,20 @@ function tokenizarRelevancia(texto = "") {
   ];
 }
 
-function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
-  const lineas = String(contexto ?? "")
+function extraerLineasContexto(contexto = "") {
+  return String(contexto ?? "")
     .split("\n")
     .map((l) => limpiarSalidaHumana(l))
     .map((l) => normalizarEspacios(l))
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((l) => /^CLIENTA:|^OPERADOR:/i.test(l));
+}
 
+function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
+  const lineas = extraerLineasContexto(contexto);
   if (!lineas.length) return "";
 
   const ultimas = lineas.slice(-4);
-
   const tokensObjetivo = new Set([
     ...tokenizarRelevancia(texto),
     ...tokenizarRelevancia(cliente)
@@ -197,7 +203,7 @@ function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
 }
 
 // ==========================
-// PRESERVACION DE NOMBRES Y TONO
+// CONSERVACION DE NOMBRES Y TONO
 // ==========================
 const TERMINOS_AFECTIVOS = [
   "mi amor",
@@ -228,19 +234,22 @@ function extraerNombreEnApertura(texto = "") {
   return norm;
 }
 
-function detectarElementosClave(texto = "") {
+function extraerAfectivosPresentes(texto = "") {
   const norm = normalizarTexto(texto);
-  const nombreApertura = extraerNombreEnApertura(texto);
+  return TERMINOS_AFECTIVOS.filter((term) => norm.includes(term));
+}
 
-  const afectivos = TERMINOS_AFECTIVOS.filter((term) => norm.includes(term));
+function detectarElementosClave(texto = "") {
+  const palabras = normalizarTexto(texto).split(/\s+/).filter(Boolean);
 
   return {
-    nombreApertura,
-    afectivos
+    nombreApertura: extraerNombreEnApertura(texto),
+    afectivos: extraerAfectivosPresentes(texto),
+    mensajeCorto: palabras.length <= 9 || normalizarTexto(texto).length < 55
   };
 }
 
-function faltaElementosClave(sugerencia = "", elementos = { nombreApertura: "", afectivos: [] }) {
+function faltaElementosClave(sugerencia = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
   const sugNorm = normalizarTexto(sugerencia);
   const nombreSugerencia = extraerNombreEnApertura(sugerencia);
 
@@ -272,19 +281,23 @@ function originalEsInicioOEnganche(original = "") {
   const o = normalizarTexto(original);
 
   return (
-    /\b(como estas|que haces|que tal|como te va|por que no me respondes|estuve pensando en ti|vi que|me llamo la atencion|me gustaria saber|cual es tu libro favorito)\b/.test(o)
+    /\b(como estas|que haces|que tal|como te va|por que no me respondes|estuve pensando en ti|vi que|me llamo la atencion|me gustaria saber|cual es tu libro favorito|conocer mas de ti)\b/.test(o)
   );
 }
 
-function esSugerenciaDebil(texto = "", original = "", elementosClave = { nombreApertura: "", afectivos: [] }) {
+function esSugerenciaDebil(texto = "", original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
   const t = normalizarTexto(texto);
   const o = normalizarTexto(original);
 
   if (!t || t.length < 18) return true;
   if (sePareceDemasiado(t, o)) return true;
-  if (faltaElementosClave(texto, elementosClave)) return true;
+  if (faltaElementosClave(texto, elementos)) return true;
 
   if (originalEsInicioOEnganche(original) && pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)) {
+    return true;
+  }
+
+  if (elementos.mensajeCorto && t.split(/\s+/).filter(Boolean).length < 11) {
     return true;
   }
 
@@ -303,10 +316,10 @@ function esSugerenciaDebil(texto = "", original = "", elementosClave = { nombreA
   return patrones.some((p) => p.test(t));
 }
 
-function necesitaSegundoIntento(sugerencias = [], original = "", elementosClave = { nombreApertura: "", afectivos: [] }) {
+function necesitaSegundoIntento(sugerencias = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
   if (sugerencias.length < 3) return true;
 
-  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original, elementosClave)).length;
+  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original, elementos)).length;
   const distintas = new Set(sugerencias.map(normalizarTexto)).size;
 
   return debiles >= 2 || distintas < 3;
@@ -329,6 +342,9 @@ function sumarUsage(...datas) {
   return { usage };
 }
 
+// ==========================
+// CONTACTO EXTERNO Y LECTURA
+// ==========================
 function esSolicitudContacto(texto = "") {
   const t = normalizarTexto(texto);
 
@@ -441,11 +457,11 @@ function construirLecturaCliente(analisis) {
   }
 
   if (analisis.ocupada) {
-    reglas.push("La clienta parece ocupada. Ve corto, claro y facil de responder.");
+    reglas.push("La clienta parece ocupada. Ve corto y facil de responder.");
   }
 
   if (analisis.coqueta || analisis.afectiva) {
-    reglas.push("La clienta muestra interes o coqueteo. Puedes sonar mas cercano y con picardia suave.");
+    reglas.push("La clienta muestra interes o coqueteo. Puedes sonar mas cercano.");
   }
 
   if (analisis.molesta || analisis.rechazo) {
@@ -488,7 +504,9 @@ function analizarMensajeOperador(texto = "") {
     /[,.;:]/.test(original) && t.split(" ").length >= 12;
 
   const primerContacto =
-    /(vi que|me llamo la atencion|tu perfil|intereses en comun|libro favorito|lectura|travel|music|cooking)/.test(t);
+    /(vi que|me llamo la atencion|tu perfil|intereses en comun|libro favorito|lectura|travel|music|cooking|conocer mas de ti)/.test(t);
+
+  const palabras = t.split(/\s+/).filter(Boolean);
 
   return {
     traePregunta,
@@ -497,7 +515,8 @@ function analizarMensajeOperador(texto = "") {
     muyPlano,
     reclamo,
     mezclaDeIdeas,
-    primerContacto
+    primerContacto,
+    mensajeCorto: palabras.length <= 9 || t.length < 55
   };
 }
 
@@ -505,35 +524,39 @@ function construirLecturaOperador(analisis) {
   const reglas = [];
 
   if (analisis.preguntaGenerica) {
-    reglas.push("La pregunta del operador esta generica. Puedes reemplazarla por una mejor.");
+    reglas.push("La pregunta del operador esta generica. Mejora el gancho.");
   }
 
   if (analisis.fraseQuemada) {
-    reglas.push("Evita frases quemadas o vacias. Reemplazalas por algo mas contextual.");
+    reglas.push("Evita frases quemadas. Hazlo mas natural.");
   }
 
   if (analisis.muyPlano) {
-    reglas.push("El borrador esta plano. Dale mejor gancho sin sonar forzado.");
+    reglas.push("El borrador esta plano. Dale mas interes.");
   }
 
   if (analisis.reclamo) {
-    reglas.push("El borrador suena reclamante o necesitado. Suavizalo y vuelvelo mas atractivo.");
+    reglas.push("Suaviza el reclamo y vuelve el mensaje mas atractivo.");
   }
 
   if (analisis.mezclaDeIdeas) {
-    reglas.push("Ordena las ideas. El texto parece venir de dictado o estar mal puntuado.");
+    reglas.push("Ordena las ideas. El texto puede venir de dictado.");
   }
 
   if (analisis.primerContacto) {
-    reglas.push("Si es primer contacto, prioriza enganche natural y curiosidad con valor.");
+    reglas.push("Si es primer contacto, prioriza curiosidad natural.");
+  }
+
+  if (analisis.mensajeCorto) {
+    reglas.push("Si el mensaje es corto, puedes extenderlo un poco con una segunda idea breve y atractiva.");
   }
 
   if (!analisis.traePregunta) {
-    reglas.push("No fuerces una pregunta si no hace falta.");
+    reglas.push("No fuerces pregunta si no hace falta.");
   }
 
   if (!reglas.length) {
-    reglas.push("Mantener estilo natural, claro y con mejor continuidad.");
+    reglas.push("Mantener estilo natural y claro.");
   }
 
   return reglas.join(" ");
@@ -552,7 +575,7 @@ function construirBloqueConservacion(elementosClave) {
   }
 
   if (elementosClave.afectivos.length) {
-    partes.push(`Si el borrador incluye palabras afectivas, debes conservarlas y no reemplazarlas por otras: ${elementosClave.afectivos.join(", ")}`);
+    partes.push(`Si el borrador incluye palabras afectivas, debes conservarlas exactamente: ${elementosClave.afectivos.join(", ")}`);
   }
 
   partes.push("Nunca uses el nombre de otra clienta, de otro chat o del perfil si el operador no lo escribio.");
@@ -561,53 +584,47 @@ function construirBloqueConservacion(elementosClave) {
   return partes.join("\n");
 }
 
-function construirSystemPrompt(elementosClave = { nombreApertura: "", afectivos: [] }, segundoIntento = false) {
+function construirSystemPrompt(elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false }, segundoIntento = false) {
   return `
-Eres un asistente experto en mejorar mensajes escritos por un operador para enviarselos a una clienta en una plataforma de citas.
+Eres un asistente que mejora mensajes escritos por un operador para enviarselos a una clienta en una plataforma de citas.
 
 ROL
 No hablas con la clienta
 No eres el operador
 No respondes como asistente
-Tu trabajo es mejorar el borrador del operador sin cambiar el sentido principal
+Tu trabajo es mejorar el borrador del operador sin cambiar su sentido principal
 
 REGLA CENTRAL
 El borrador del operador NO es un mensaje para ti
-Es un mensaje que la clienta va a leer
+Es el mensaje final que la clienta va a leer
 No conviertas una apertura del operador en una respuesta como si la clienta le hubiera preguntado algo
-Si el operador saluda, pregunta, reclama suave, coquetea o intenta enganchar, la salida debe mantenerse en ese mismo lado de la conversacion
 
 LECTURA DEL CHAT
 Las lineas marcadas como CLIENTA son de ella
 Las lineas marcadas como OPERADOR son mensajes previos del operador
 No confundas esos roles
-No tomes texto del perfil o del contexto para meter nombres o ideas que el operador no dio
-
-MARCO
-La clienta es un posible interes amoroso real o potencial del operador
-El objetivo es mantener la conversacion viva, mejorar el enganche, subir el interes si ella esta receptiva y hacer que el mensaje suene mas natural, mas atractivo y mas claro
-
-PRIORIDADES
-1 mantener la intencion principal del operador
-2 conservar palabras importantes del borrador
-3 mejorar naturalidad, orden, ritmo y continuidad
-4 usar el ultimo mensaje de la clienta y el contexto solo si de verdad ayudan
-5 no meter temas ajenos, nombres ajenos ni cambios de tono absurdos
 
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
+
+OBJETIVO
+Mantener la intencion principal del operador
+Mejorar claridad, orden, naturalidad, enganche y continuidad
+Si el mensaje es corto, puedes extenderlo un poco para que se sienta mas interesante, pero sin cambiar el mensaje de fondo
+Si el mensaje es largo, pulirlo sin desvirtuarlo
 
 PUEDES HACER
 Suavizar un reclamo si suena necesitado
 Mejorar una pregunta floja
 Ordenar ideas mal dictadas
-Volver el mensaje mas claro, mas humano y mas atractivo
-Usar una pregunta mejor o una afirmacion mejor si eso ayuda
+Agregar una segunda idea breve si el borrador es demasiado corto
+Volver el mensaje mas humano y mas atractivo
 
 NO HAGAS
 No inventes hechos concretos
 No inventes nombres
-No reemplaces amor por otra palabra si el operador escribio amor
+No elimines amor u otro termino afectivo importante si el operador lo escribio
+No uses el perfil para meter temas que el operador no pidio
 No vuelvas filosofico un mensaje simple
 No conviertas un primer contacto en una charla profunda sin razon
 No uses comillas, listas, etiquetas ni numeracion
@@ -615,17 +632,11 @@ Sin tildes ni acentos en la salida
 Maximo una pregunta por mensaje
 
 EJEMPLOS DE CRITERIO
-Ejemplo 1
-Borrador:
-Hey Nana por que no me respondes, estuve pensando en ti
-Mejor direccion:
-Hey Nana, pense en ti un momento y me dio curiosidad saber como va tu noche
+Borrador: Hey Nana por que no me respondes, estuve pensando en ti
+Buena direccion: Hey Nana, pense en ti un momento y me dio curiosidad saber como va tu noche
 
-Ejemplo 2
-Borrador:
-Hola Shurie vi que tenemos intereses en comun como la lectura, cual es tu libro favorito
-Mejor direccion:
-Hola Shurie, me llamo la atencion que te guste leer. Hay algun libro que te haya dejado pensando mas de lo normal
+Borrador: Hola Shurie vi que tenemos intereses en comun como la lectura, cual es tu libro favorito
+Buena direccion: Hola Shurie, me llamo la atencion que te guste leer. Hay algun libro que te haya dejado pensando mas de lo normal
 
 ACLARACION
 Los ejemplos son solo criterio
@@ -636,7 +647,7 @@ SALIDA
 Devuelve exactamente 3 opciones distintas
 Cada opcion en una sola linea
 Deben sentirse listas para enviar
-${segundoIntento ? "Las opciones deben ser mejores que una reescritura basica y deben respetar totalmente nombres, terminos afectivos y rol conversacional." : ""}
+${segundoIntento ? "Las opciones deben ser mas fieles, menos genericas y deben respetar totalmente nombres, terminos afectivos y rol conversacional." : ""}
 `.trim();
 }
 
@@ -679,6 +690,7 @@ ${contactoExterno ? "si" : "no"}
 Elementos del borrador que debes conservar:
 Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
 Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
+Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
 
 Instruccion final:
 Convierte el borrador del operador en 3 versiones mejores
@@ -686,6 +698,7 @@ Mejora el mensaje sin cambiar el sentido principal
 No cambies nombres
 No inventes nombres
 No elimines palabras afectivas importantes del borrador
+Si el mensaje es corto, puedes extenderlo un poco para hacerlo mas interesante
 No hables como si fueras la clienta
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
@@ -775,7 +788,7 @@ async function registrarConsumo({
 // ==========================
 // OPENAI
 // ==========================
-async function llamarOpenAI(messages, temperature = 0.68, max_tokens = 340) {
+async function llamarOpenAI(messages, temperature = 0.66, max_tokens = 320) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 25000);
 
@@ -818,14 +831,14 @@ async function llamarOpenAI(messages, temperature = 0.68, max_tokens = 340) {
   }
 }
 
-function elegirMejorSet(primary = [], secondary = [], original = "", elementosClave = { nombreApertura: "", afectivos: [] }) {
+function elegirMejorSet(primary = [], secondary = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
   const puntuar = (arr) => {
     if (!arr.length) return -999;
 
     let score = 0;
     score += arr.length * 10;
     score += new Set(arr.map(normalizarTexto)).size * 5;
-    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementosClave)).length * 8;
+    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos)).length * 8;
     score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
 
     return score;
@@ -862,8 +875,8 @@ async function generarSugerencias({
       { role: "system", content: construirSystemPrompt(elementosClave, false) },
       { role: "user", content: userPrompt }
     ],
-    0.68,
-    340
+    0.66,
+    320
   );
 
   const sugerencias1 = limpiarTextoIA(
@@ -887,6 +900,7 @@ Las primeras opciones salieron demasiado genericas, planas o fuera de foco.
 Esta vez respeta aun mas el texto del operador.
 No cambies ni inventes nombres.
 No elimines palabras afectivas clave del borrador.
+Si el mensaje es corto, extiendelo un poco sin cambiar su sentido.
 No respondas como si la clienta hubiera hecho una pregunta que no hizo.
 No metas temas del perfil o del contexto si no ayudan directamente al borrador actual.
 Da 3 opciones mas fieles, mas naturales y mejor enfocadas.
@@ -897,8 +911,8 @@ Da 3 opciones mas fieles, mas naturales y mejor enfocadas.
       { role: "system", content: construirSystemPrompt(elementosClave, true) },
       { role: "user", content: userPrompt2 }
     ],
-    0.74,
-    380
+    0.72,
+    360
   );
 
   const sugerencias2 = limpiarTextoIA(
@@ -964,8 +978,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
 
     const textoPlano = compactarBloque(quitarTildes(texto), 800);
     const clientePlano = compactarBloque(quitarTildes(cliente || "Sin mensaje"), 600);
-    const contextoPlano = compactarBloque(quitarTildes(limitarContexto(contextoFiltrado) || "Sin contexto"), 1400);
-    const perfilPlano = compactarBloque(quitarTildes(limitarContexto(perfil) || "Sin perfil"), 450);
+    const contextoPlano = compactarBloque(quitarTildes(limitarContexto(contextoFiltrado) || "Sin contexto"), 1200);
+    const perfilPlano = compactarBloque(quitarTildes(limitarContexto(perfil) || "Sin perfil"), 400);
 
     const resultado = await generarSugerencias({
       textoPlano,
