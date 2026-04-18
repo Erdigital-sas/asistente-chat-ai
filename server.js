@@ -243,7 +243,7 @@ const inflightSuggestionJobs = new Map();
 /*
 IMPORTANTE
 Esta cola por operador vive en memoria de esta replica.
-Si luego activas 2 o mas replicas en Railway, la siguiente etapa correcta
+Si luego activas 2 o mas replicas en Railway, el siguiente paso correcto
 es mover esta cola a Redis o a un store compartido.
 */
 const operatorSuggestionQueues = new Map();
@@ -673,6 +673,28 @@ function crearFingerprintSugerencia({
 }
 
 // ==========================
+// BLOQUEO DE ENCUENTROS
+// ==========================
+const PATRONES_ENCUENTRO = [
+  /\b(vernos|nos vemos|verme|verte|verse|vernos algun dia|conocernos en persona|en persona|cara a cara)\b/i,
+  /\b(meet|meet up|see each other|see you in person|in person|face to face|date)\b/i,
+  /\b(cenar|cena|ir a cenar|dinner|almorzar juntos|almuerzo juntos|lunch together|desayunar juntos|breakfast together)\b/i,
+  /\b(tomar un cafe|ir por un cafe|cafe juntos|coffee together|grab coffee|coffee date)\b/i,
+  /\b(tomar algo|tomar unos tragos|tragos juntos|drinks together|grab a drink|have a drink)\b/i,
+  /\b(salgamos|salir contigo|go out sometime|go out together|ir al cine|movie together|caminar juntos|walk together)\b/i,
+  /\b(venir a mi casa|ven a mi casa|ir a tu casa|voy a tu casa|my place|your place|come over|visitarte|visitarnos|visit you)\b/i,
+  /\b(paso por ti|te recojo|pick you up|send me your address|dame tu direccion|mandame tu ubicacion)\b/i,
+  /\b(fin de semana juntos|weekend together|viaje juntos|trip together)\b/i
+];
+
+function contieneTemaEncuentro(texto = "") {
+  const original = String(texto ?? "");
+  const limpio = quitarTildes(original);
+
+  return PATRONES_ENCUENTRO.some((regex) => regex.test(limpio));
+}
+
+// ==========================
 // CONTEXTO RELEVANTE
 // ==========================
 const STOPWORDS_RELEVANCIA = new Set([
@@ -837,6 +859,7 @@ function esSugerenciaDebil(
 
   if (!t || t.length < 18) return true;
   if (contarPreguntas(texto) > 2) return true;
+  if (contieneTemaEncuentro(texto)) return true;
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
 
@@ -976,6 +999,7 @@ function analizarCliente(texto = "") {
     /^(ok|okay|yes|no|bien|vale|jaja|haha|hmm|mm|fine|nice|cool)\b/.test(t);
 
   const contacto = esSolicitudContacto(original);
+  const encuentro = contieneTemaEncuentro(original);
 
   let tono = "neutral";
   if (rechazo) tono = "rechazo";
@@ -994,6 +1018,7 @@ function analizarCliente(texto = "") {
     coqueta,
     fria,
     contacto,
+    encuentro,
     tono
   };
 }
@@ -1023,6 +1048,10 @@ function construirLecturaCliente(analisis) {
 
   if (analisis.contacto) {
     reglas.push("Pidio contacto externo. Mantiene la conversacion dentro de la app.");
+  }
+
+  if (analisis.encuentro) {
+    reglas.push("Se menciono verse o hacer un plan presencial. No propongas encuentros ni salidas. Redirige la charla para seguir por aqui.");
   }
 
   if (!reglas.length) {
@@ -1059,6 +1088,8 @@ function analizarMensajeOperador(texto = "") {
   const primerContacto =
     /(vi que|me llamo la atencion|tu perfil|intereses en comun|libro favorito|lectura|travel|music|cooking|conocer mas de ti)/.test(t);
 
+  const encuentroPresencial = contieneTemaEncuentro(original);
+
   const palabras = t.split(/\s+/).filter(Boolean);
 
   return {
@@ -1069,6 +1100,7 @@ function analizarMensajeOperador(texto = "") {
     reclamo,
     mezclaDeIdeas,
     primerContacto,
+    encuentroPresencial,
     mensajeCorto: palabras.length <= 9 || t.length < 55
   };
 }
@@ -1102,6 +1134,10 @@ function construirLecturaOperador(analisis) {
 
   if (analisis.mensajeCorto) {
     reglas.push("Si el mensaje es corto, debes ampliarlo de forma util con una segunda idea natural.");
+  }
+
+  if (analisis.encuentroPresencial) {
+    reglas.push("El borrador alude a verse en persona o a un plan presencial. Debes transformarlo para seguir la charla sin proponer encuentros.");
   }
 
   if (!analisis.traePregunta) {
@@ -1228,6 +1264,15 @@ No confundas esos roles
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
 
+CONVERSACION SOLO DENTRO DE LA APP
+Nunca sugieras, insinues ni invites a:
+- verse en persona
+- conocerse fuera de la app
+- salir, cita, cena, almuerzo, cafe, tragos o cualquier plan presencial
+- visitarse, ir a casa de alguien, pasar por alguien, pedir direccion o ubicacion
+- fin de semana juntos, viaje, hotel o planes fisicos
+Si el borrador o la clienta mencionan eso, reconduce la conversacion para seguir por aqui de forma natural, sin rechazo brusco y sin cerrar la charla.
+
 OBJETIVO DE CALIDAD
 Cada opcion debe sentirse humana, natural, agradable, atractiva sin exagerar y lista para enviar
 
@@ -1270,8 +1315,9 @@ Verifica que las 3 opciones:
 - respeten el sentido principal del borrador
 - sean claramente distintas entre si
 - cumplan la longitud pedida
+- no incluyan encuentros ni planes presenciales
 - esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad o falta de foco del intento anterior" : ""}
+${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA
 Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
@@ -1339,6 +1385,9 @@ Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
 Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
 Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
 
+RESTRICCION ABSOLUTA
+Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
+
 OBJETIVO DE LAS 3 SALIDAS
 1. 200 a 260 caracteres, directa y agradable
 2. 200 a 260 caracteres, mas atractiva o emocional
@@ -1351,6 +1400,7 @@ Ayuda aunque el borrador sea corto
 Usa el ultimo mensaje de la clienta como prioridad
 Usa contexto o perfil solo si mejoran de verdad la respuesta
 Mantente dentro de la app si hay solicitud de contacto externo
+No sugieras encuentros presenciales
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
 }
@@ -1617,6 +1667,7 @@ function elegirMejorSet(
     score += arr.reduce((acc, s, idx) => acc + puntuarLongitud(s, idx), 0);
     score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
     score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos)).length * 8;
+    score -= arr.filter((s) => contieneTemaEncuentro(s)).length * 20;
     score += setCumpleLongitudes(arr) ? 18 : -18;
 
     return score;
@@ -1664,11 +1715,14 @@ async function generarSugerencias({
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const sugerencias1 = limpiarTextoIA(
+  const sugerencias1Raw = limpiarTextoIA(
     data1?.choices?.[0]?.message?.content || ""
   )
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
+
+  const sugerencias1 = sugerencias1Raw.filter((s) => !contieneTemaEncuentro(s));
+  const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
 
   if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave)) {
     return {
@@ -1680,6 +1734,9 @@ async function generarSugerencias({
   runtimeStats.suggestions.secondPasses += 1;
 
   const reporteLongitudes1 = construirReporteLongitudes(sugerencias1);
+  const correccionEncuentro = huboEncuentros1
+    ? "Se detectaron alusiones prohibidas a verse en persona, cena, cafe, salida o plan presencial. Corrigelo por completo."
+    : "No incluyas ninguna alusion a verse en persona ni a planes presenciales.";
 
   const userPrompt2 = `
 ${userPrompt}
@@ -1689,6 +1746,8 @@ El intento anterior no cumplio bien calidad o longitud.
 
 Reporte del intento anterior:
 ${reporteLongitudes1}
+
+${correccionEncuentro}
 
 Corrige esto ahora:
 - opcion 1 entre 200 y 260 caracteres
@@ -1700,6 +1759,7 @@ Corrige esto ahora:
 - cero relleno
 - respeta por completo nombres, afectivos e intencion
 - no respondas como si la clienta hubiera dicho otra cosa
+- no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
 `.trim();
 
   const data2 = await llamarOpenAI({
@@ -1714,11 +1774,13 @@ Corrige esto ahora:
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const sugerencias2 = limpiarTextoIA(
+  const sugerencias2Raw = limpiarTextoIA(
     data2?.choices?.[0]?.message?.content || ""
   )
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
+
+  const sugerencias2 = sugerencias2Raw.filter((s) => !contieneTemaEncuentro(s));
 
   return {
     sugerencias: elegirMejorSet(
@@ -1909,6 +1971,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     let sugerencias = Array.isArray(resultado?.sugerencias)
       ? resultado.sugerencias
       : [];
+
+    sugerencias = sugerencias.filter((s) => !contieneTemaEncuentro(s));
 
     if (!sugerencias.length) {
       sugerencias = ["Escribe un poco mas de contexto"];
