@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const { randomUUID } = require("crypto");
+const path = require("path");
+const { randomUUID, createHmac, timingSafeEqual } = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 function leerEnteroEnv(nombre, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -57,6 +58,15 @@ const runtimeStats = {
     suggestionCalls: 0,
     translationCalls: 0,
     lastMs: 0
+  },
+  admin: {
+    loginTotal: 0,
+    loginOk: 0,
+    loginError: 0,
+    operatorList: 0,
+    operatorCreate: 0,
+    operatorUpdate: 0,
+    operatorDelete: 0
   }
 };
 
@@ -99,6 +109,9 @@ const API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const OPERATOR_SHARED_KEY = process.env.OPERATOR_SHARED_KEY || "2026";
+const ADMIN_USER = process.env.ADMIN_USER || "admin";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || SUPABASE_KEY || OPERATOR_SHARED_KEY;
 const PORT = process.env.PORT || 3000;
 
 const OPENAI_URL =
@@ -211,6 +224,27 @@ const TRANSLATION_CACHE_LIMIT = leerEnteroEnv(
   5000
 );
 
+const ADMIN_TOKEN_TTL_HOURS = leerEnteroEnv(
+  "ADMIN_TOKEN_TTL_HOURS",
+  12,
+  1,
+  168
+);
+
+const ADMIN_LOGIN_WINDOW_MS = leerEnteroEnv(
+  "ADMIN_LOGIN_WINDOW_MS",
+  15 * 60 * 1000,
+  60 * 1000,
+  24 * 60 * 60 * 1000
+);
+
+const ADMIN_LOGIN_MAX_ATTEMPTS = leerEnteroEnv(
+  "ADMIN_LOGIN_MAX_ATTEMPTS",
+  8,
+  3,
+  50
+);
+
 const TARGET_SUGGESTION_SPECS = [
   { min: 200, max: 260, ideal: 230 },
   { min: 200, max: 260, ideal: 230 },
@@ -239,6 +273,7 @@ const operatorAuthCache = new Map();
 const translationCache = new Map();
 const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
+const adminLoginAttempts = new Map();
 
 /*
 IMPORTANTE
@@ -672,6 +707,43 @@ function crearFingerprintSugerencia({
   ].join("||");
 }
 
+function base64UrlEncode(input = "") {
+  const buffer = Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(String(input), "utf8");
+
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(input = "") {
+  const normalized = String(input)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  const padding = normalized.length % 4 === 0
+    ? ""
+    : "=".repeat(4 - (normalized.length % 4));
+
+  return Buffer.from(normalized + padding, "base64").toString("utf8");
+}
+
+function compararSeguro(a = "", b = "") {
+  const aa = Buffer.from(String(a), "utf8");
+  const bb = Buffer.from(String(b), "utf8");
+
+  if (aa.length !== bb.length) return false;
+
+  try {
+    return timingSafeEqual(aa, bb);
+  } catch (_err) {
+    return false;
+  }
+}
+
 // ==========================
 // BLOQUEO DE ENCUENTROS
 // ==========================
@@ -863,8 +935,10 @@ function esSugerenciaDebil(
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
 
-  if (originalEsInicioOEnganche(original) &&
-      pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)) {
+  if (
+    originalEsInicioOEnganche(original) &&
+    pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)
+  ) {
     return true;
   }
 
@@ -1153,8 +1227,6 @@ function construirLecturaOperador(analisis) {
 
 function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   const t = normalizarTexto(texto);
-  const c = normalizarTexto(cliente);
-  const ctx = normalizarTexto(contexto);
 
   if (
     /(no me respondes|no respondes|no me contestas|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|pensando en ti|me acorde de ti|por que no)/.test(t)
@@ -1176,7 +1248,7 @@ function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
 
   if (
     /(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) ||
-    ((!c && !ctx) && /^(hola|hey|hi)\b/.test(t))
+    ((!cliente && !contexto) && /^(hola|hey|hi)\b/.test(t))
   ) {
     return "enganche";
   }
@@ -1430,6 +1502,12 @@ function guardarOperadorCache(nombreFormateado = "", nombreReal = "") {
   });
 }
 
+function borrarOperadorCache(nombre = "") {
+  const key = normalizarTexto(formatearNombreOperador(nombre));
+  if (!key) return;
+  operatorAuthCache.delete(key);
+}
+
 // ==========================
 // TRADUCCION CACHE
 // ==========================
@@ -1473,6 +1551,297 @@ function guardarTraduccionCache(cacheKey = "", value = "") {
 }
 
 // ==========================
+// ADMIN AUTH
+// ==========================
+function adminEstaConfigurado() {
+  return Boolean(ADMIN_USER && ADMIN_PASSWORD && ADMIN_TOKEN_SECRET);
+}
+
+function firmarAdminToken(payloadB64 = "") {
+  return base64UrlEncode(
+    createHmac("sha256", ADMIN_TOKEN_SECRET).update(payloadB64).digest()
+  );
+}
+
+function crearAdminToken(usuario = ADMIN_USER) {
+  const now = Date.now();
+  const payload = {
+    sub: usuario || ADMIN_USER,
+    role: "admin",
+    iat: now,
+    exp: now + (ADMIN_TOKEN_TTL_HOURS * 60 * 60 * 1000),
+    nonce: crearRequestId()
+  };
+
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const signature = firmarAdminToken(payloadB64);
+
+  return `${payloadB64}.${signature}`;
+}
+
+function verificarAdminToken(token = "") {
+  const [payloadB64, signature] = String(token || "").split(".");
+
+  if (!payloadB64 || !signature) {
+    throw new Error("Token admin invalido");
+  }
+
+  const expected = firmarAdminToken(payloadB64);
+
+  if (!compararSeguro(signature, expected)) {
+    throw new Error("Token admin invalido");
+  }
+
+  let payload = null;
+
+  try {
+    payload = JSON.parse(base64UrlDecode(payloadB64));
+  } catch (_err) {
+    throw new Error("Token admin invalido");
+  }
+
+  if (!payload?.sub || payload?.role !== "admin") {
+    throw new Error("Token admin invalido");
+  }
+
+  if (!payload?.exp || payload.exp < Date.now()) {
+    throw new Error("Sesion admin expirada");
+  }
+
+  return payload;
+}
+
+function limpiarIntentosAdmin() {
+  const ahora = Date.now();
+
+  for (const [key, entry] of adminLoginAttempts.entries()) {
+    const recientes = (entry?.timestamps || []).filter(
+      (ts) => (ahora - ts) < ADMIN_LOGIN_WINDOW_MS
+    );
+
+    if (!recientes.length) {
+      adminLoginAttempts.delete(key);
+      continue;
+    }
+
+    adminLoginAttempts.set(key, { timestamps: recientes });
+  }
+}
+
+function obtenerClaveRateAdmin(req, usuario = "") {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = forwarded || req.ip || "sin-ip";
+  return `${ip}::${normalizarTexto(usuario || "admin")}`;
+}
+
+function adminLoginBloqueado(rateKey = "") {
+  if (!rateKey) return false;
+
+  limpiarIntentosAdmin();
+  const entry = adminLoginAttempts.get(rateKey);
+  if (!entry) return false;
+
+  return (entry.timestamps || []).length >= ADMIN_LOGIN_MAX_ATTEMPTS;
+}
+
+function registrarIntentoAdmin(rateKey = "", ok = false) {
+  if (!rateKey) return;
+
+  if (ok) {
+    adminLoginAttempts.delete(rateKey);
+    return;
+  }
+
+  limpiarIntentosAdmin();
+
+  const entry = adminLoginAttempts.get(rateKey) || { timestamps: [] };
+  entry.timestamps.push(Date.now());
+
+  adminLoginAttempts.set(rateKey, entry);
+}
+
+function obtenerAdminTokenDesdeRequest(req) {
+  const auth = String(req.headers.authorization || "");
+
+  if (/^Bearer\s+/i.test(auth)) {
+    return auth.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  return String(req.headers["x-admin-token"] || req.body?.token || req.query?.token || "");
+}
+
+function credencialesAdminValidas(usuario = "", password = "") {
+  return (
+    compararSeguro(normalizarTexto(usuario), normalizarTexto(ADMIN_USER)) &&
+    compararSeguro(String(password || ""), String(ADMIN_PASSWORD || ""))
+  );
+}
+
+function autorizarAdmin(req, res, next) {
+  if (!adminEstaConfigurado()) {
+    return res.status(503).json({
+      ok: false,
+      error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET en Railway"
+    });
+  }
+
+  try {
+    const token = obtenerAdminTokenDesdeRequest(req);
+
+    if (!token) {
+      return res.status(401).json({
+        ok: false,
+        error: "Sesion admin requerida"
+      });
+    }
+
+    const payload = verificarAdminToken(token);
+    req.adminAuth = payload;
+    return next();
+  } catch (err) {
+    return res.status(401).json({
+      ok: false,
+      error: err.message || "Sesion admin invalida"
+    });
+  }
+}
+
+function validarNombreOperadorAdmin(nombre = "") {
+  const nombreFinal = formatearNombreOperador(nombre);
+
+  if (!nombreFinal) {
+    throw new Error("Escribe un nombre valido");
+  }
+
+  if (nombreFinal.length < 3) {
+    throw new Error("El nombre del operador es demasiado corto");
+  }
+
+  if (nombreFinal.length > 80) {
+    throw new Error("El nombre del operador es demasiado largo");
+  }
+
+  return nombreFinal;
+}
+
+async function listarOperadoresAdmin() {
+  const { data, error } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .order("nombre", { ascending: true });
+
+  if (error) {
+    throw new Error("No se pudo leer la lista de operadores");
+  }
+
+  return Array.isArray(data) ? data : [];
+}
+
+async function buscarOperadorPorNombreAdmin(nombre = "") {
+  const nombreFinal = validarNombreOperadorAdmin(nombre);
+
+  const { data, error } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .ilike("nombre", nombreFinal)
+    .limit(10);
+
+  if (error) {
+    throw new Error("No se pudo buscar el operador");
+  }
+
+  return Array.isArray(data) && data.length ? data[0] : null;
+}
+
+function resumirOperadores(operators = []) {
+  const total = operators.length;
+  const activos = operators.filter((x) => Boolean(x.activo)).length;
+  const inactivos = total - activos;
+
+  return {
+    total,
+    activos,
+    inactivos
+  };
+}
+
+async function crearOReactivarOperadorAdmin(nombre = "") {
+  const nombreFinal = validarNombreOperadorAdmin(nombre);
+  const existente = await buscarOperadorPorNombreAdmin(nombreFinal);
+
+  if (existente) {
+    const necesitaUpdate = !existente.activo || existente.nombre !== nombreFinal;
+
+    if (!necesitaUpdate) {
+      return {
+        action: "exists",
+        operator: existente
+      };
+    }
+
+    borrarOperadorCache(existente.nombre);
+
+    const { data, error } = await supabase
+      .from("operadores")
+      .update({
+        nombre: nombreFinal,
+        activo: true
+      })
+      .eq("id", existente.id)
+      .select("id, nombre, activo, created_at")
+      .single();
+
+    if (error || !data) {
+      throw new Error("No se pudo actualizar el operador");
+    }
+
+    return {
+      action: existente.activo ? "updated" : "reactivated",
+      operator: data
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("operadores")
+    .insert([
+      {
+        nombre: nombreFinal,
+        activo: true
+      }
+    ])
+    .select("id, nombre, activo, created_at")
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "No se pudo crear el operador");
+  }
+
+  return {
+    action: "created",
+    operator: data
+  };
+}
+
+function parsearNombresBulk(raw = "") {
+  const nombres = String(raw ?? "")
+    .split(/\r?\n|,/)
+    .map((item) => formatearNombreOperador(item))
+    .filter(Boolean);
+
+  const vistos = new Set();
+  const salida = [];
+
+  for (const nombre of nombres) {
+    const clave = normalizarTexto(nombre);
+    if (!clave || vistos.has(clave)) continue;
+    vistos.add(clave);
+    salida.push(nombre);
+  }
+
+  return salida.slice(0, 300);
+}
+
+// ==========================
 // OPERADORES
 // ==========================
 async function validarOperadorAcceso(operador = "", clave = "") {
@@ -1495,18 +1864,20 @@ async function validarOperadorAcceso(operador = "", clave = "") {
     .from("operadores")
     .select("nombre, activo")
     .ilike("nombre", operadorFormateado)
-    .maybeSingle();
+    .limit(10);
 
   if (error) {
     throw new Error("No se pudo validar el operador");
   }
 
-  if (!data || !data.activo) {
+  const row = Array.isArray(data) && data.length ? data[0] : null;
+
+  if (!row || !row.activo) {
     throw new Error("Operador no autorizado");
   }
 
-  guardarOperadorCache(operadorFormateado, data.nombre);
-  return data.nombre;
+  guardarOperadorCache(operadorFormateado, row.nombre);
+  return row.nombre;
 }
 
 async function autorizarOperador(req, res, next) {
@@ -1836,6 +2207,17 @@ Devuelve solo una version final
 }
 
 // ==========================
+// PANEL ADMIN STATIC
+// ==========================
+app.get(["/admin", "/admin/"], (_req, res) => {
+  return res.sendFile(path.join(__dirname, "admin.html"));
+});
+
+app.get("/admin.js", (_req, res) => {
+  return res.sendFile(path.join(__dirname, "admin.js"));
+});
+
+// ==========================
 // HEALTH
 // ==========================
 app.get("/health", (_req, res) => {
@@ -1843,6 +2225,10 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "server pro",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    admin: {
+      configured: adminEstaConfigurado(),
+      token_ttl_hours: ADMIN_TOKEN_TTL_HOURS
+    },
     models: {
       sugerencias: OPENAI_MODEL_SUGGESTIONS,
       traduccion: OPENAI_MODEL_TRANSLATE
@@ -1870,7 +2256,271 @@ app.get("/health", (_req, res) => {
 });
 
 // ==========================
-// LOGIN
+// ADMIN API
+// ==========================
+app.post("/admin-api/login", async (req, res) => {
+  runtimeStats.admin.loginTotal += 1;
+
+  if (!adminEstaConfigurado()) {
+    runtimeStats.admin.loginError += 1;
+    return res.status(503).json({
+      ok: false,
+      error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET en Railway"
+    });
+  }
+
+  const usuario = normalizarEspacios(req.body?.usuario || "");
+  const password = String(req.body?.password || "").trim();
+
+  if (!usuario || !password) {
+    runtimeStats.admin.loginError += 1;
+    return res.status(400).json({
+      ok: false,
+      error: "Completa usuario y password"
+    });
+  }
+
+  const rateKey = obtenerClaveRateAdmin(req, usuario);
+
+  if (adminLoginBloqueado(rateKey)) {
+    runtimeStats.admin.loginError += 1;
+    return res.status(429).json({
+      ok: false,
+      error: "Demasiados intentos. Espera unos minutos"
+    });
+  }
+
+  if (!credencialesAdminValidas(usuario, password)) {
+    registrarIntentoAdmin(rateKey, false);
+    runtimeStats.admin.loginError += 1;
+    return res.status(401).json({
+      ok: false,
+      error: "Credenciales admin invalidas"
+    });
+  }
+
+  registrarIntentoAdmin(rateKey, true);
+  runtimeStats.admin.loginOk += 1;
+
+  return res.json({
+    ok: true,
+    token: crearAdminToken(ADMIN_USER),
+    user: ADMIN_USER,
+    operator_shared_key: OPERATOR_SHARED_KEY,
+    expires_in_hours: ADMIN_TOKEN_TTL_HOURS
+  });
+});
+
+app.get("/admin-api/session", autorizarAdmin, async (req, res) => {
+  return res.json({
+    ok: true,
+    user: req.adminAuth?.sub || ADMIN_USER,
+    expires_at: req.adminAuth?.exp || null,
+    operator_shared_key: OPERATOR_SHARED_KEY
+  });
+});
+
+app.get("/admin-api/operators", autorizarAdmin, async (_req, res) => {
+  try {
+    const operators = await listarOperadoresAdmin();
+    runtimeStats.admin.operatorList += 1;
+
+    return res.json({
+      ok: true,
+      summary: resumirOperadores(operators),
+      operators
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo listar operadores"
+    });
+  }
+});
+
+app.post("/admin-api/operators", autorizarAdmin, async (req, res) => {
+  try {
+    const result = await crearOReactivarOperadorAdmin(req.body?.nombre || "");
+    runtimeStats.admin.operatorCreate += 1;
+
+    return res.json({
+      ok: true,
+      action: result.action,
+      operator: result.operator
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo guardar el operador"
+    });
+  }
+});
+
+app.post("/admin-api/operators/bulk", autorizarAdmin, async (req, res) => {
+  try {
+    const nombres = parsearNombresBulk(req.body?.texto || req.body?.nombres || "");
+
+    if (!nombres.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "Pega al menos un nombre"
+      });
+    }
+
+    const result = {
+      created: [],
+      reactivated: [],
+      updated: [],
+      existing: [],
+      errors: []
+    };
+
+    for (const nombre of nombres) {
+      try {
+        const item = await crearOReactivarOperadorAdmin(nombre);
+        if (item.action === "created") result.created.push(item.operator);
+        else if (item.action === "reactivated") result.reactivated.push(item.operator);
+        else if (item.action === "updated") result.updated.push(item.operator);
+        else result.existing.push(item.operator);
+      } catch (err) {
+        result.errors.push({
+          nombre,
+          error: err.message || "No se pudo procesar"
+        });
+      }
+    }
+
+    runtimeStats.admin.operatorCreate +=
+      result.created.length + result.reactivated.length + result.updated.length;
+
+    const operators = await listarOperadoresAdmin();
+
+    return res.json({
+      ok: true,
+      result,
+      summary: resumirOperadores(operators),
+      operators
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo procesar el alta masiva"
+    });
+  }
+});
+
+app.patch("/admin-api/operators/:id/status", autorizarAdmin, async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    const activo = Boolean(req.body?.activo);
+
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "ID invalido"
+      });
+    }
+
+    const { data: actual, error: errorRead } = await supabase
+      .from("operadores")
+      .select("id, nombre, activo, created_at")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (errorRead) {
+      throw new Error("No se pudo leer el operador");
+    }
+
+    if (!actual) {
+      return res.status(404).json({
+        ok: false,
+        error: "Operador no encontrado"
+      });
+    }
+
+    if (!activo) {
+      borrarOperadorCache(actual.nombre);
+    }
+
+    const { data, error } = await supabase
+      .from("operadores")
+      .update({ activo })
+      .eq("id", id)
+      .select("id, nombre, activo, created_at")
+      .single();
+
+    if (error || !data) {
+      throw new Error("No se pudo actualizar el operador");
+    }
+
+    runtimeStats.admin.operatorUpdate += 1;
+
+    return res.json({
+      ok: true,
+      operator: data
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo actualizar el operador"
+    });
+  }
+});
+
+app.delete("/admin-api/operators/:id", autorizarAdmin, async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "ID invalido"
+      });
+    }
+
+    const { data: actual, error: errorRead } = await supabase
+      .from("operadores")
+      .select("id, nombre, activo, created_at")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (errorRead) {
+      throw new Error("No se pudo leer el operador");
+    }
+
+    if (!actual) {
+      return res.status(404).json({
+        ok: false,
+        error: "Operador no encontrado"
+      });
+    }
+
+    const { error } = await supabase
+      .from("operadores")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      throw new Error("No se pudo eliminar el operador");
+    }
+
+    borrarOperadorCache(actual.nombre);
+    runtimeStats.admin.operatorDelete += 1;
+
+    return res.json({
+      ok: true,
+      operator: actual
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo eliminar el operador"
+    });
+  }
+});
+
+// ==========================
+// LOGIN OPERADOR
 // ==========================
 app.post("/login", autorizarOperador, async (req, res) => {
   return res.json({
@@ -2141,5 +2791,8 @@ app.listen(PORT, () => {
   );
   console.log(
     `Lanes OpenAI => sugerencias: ${SUGGESTION_OPENAI_CONCURRENCY} | traduccion: ${TRANSLATION_OPENAI_CONCURRENCY}`
+  );
+  console.log(
+    `Admin panel => ${adminEstaConfigurado() ? "configurado" : "faltan variables ADMIN_*"}`
   );
 });
