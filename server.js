@@ -275,26 +275,41 @@ function limpiarLinea(texto = "") {
   return limpiarSalidaHumana(String(texto ?? "").replace(/^\s*\d+[\).\-\s:]*/, "").replace(/^\s*[•\-–—]+\s*/, ""));
 }
 
+// 🧠 NUEVO PARSER DE JSON BLINDADO
 function parsearArregloJSON(jsonString) {
   const vistos = new Set();
+  let arr = [];
   try {
-    let arr = JSON.parse(jsonString || "[]");
-    if (!Array.isArray(arr)) return [];
+    let limpio = String(jsonString || "").replace(/^```(json)?|```$/gi, "").trim();
+    let parsed = JSON.parse(limpio || "[]");
     
-    return arr
-      .filter((t) => typeof t === "string")
-      .map(limpiarLinea)
-      .filter((t) => t.length >= MIN_RESPONSE_LENGTH)
-      .filter((t) => {
-        const clave = normalizarTexto(t);
-        if (!clave || vistos.has(clave)) return false;
-        vistos.add(clave);
-        return true;
-      });
+    if (Array.isArray(parsed)) {
+      arr = parsed;
+    } 
+    else if (parsed && typeof parsed === "object") {
+      for (const val of Object.values(parsed)) {
+        if (Array.isArray(val)) { arr = val; break; }
+      }
+      if (!arr.length) arr = Object.values(parsed).filter(v => typeof v === "string");
+    }
   } catch (e) {
-    console.error("Fallo parseo de JSON Gemini:", e);
-    return [];
+    console.error("Fallo parseo de JSON Gemini, usando fallback Regex:", e.message);
+    const matches = String(jsonString).match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g);
+    if (matches) {
+      arr = matches.map(m => m.slice(1, -1)).filter(s => s.length > 50);
+    }
   }
+
+  return arr
+    .filter((t) => typeof t === "string")
+    .map(limpiarLinea)
+    .filter((t) => t.length >= MIN_RESPONSE_LENGTH)
+    .filter((t) => {
+      const clave = normalizarTexto(t);
+      if (!clave || vistos.has(clave)) return false;
+      vistos.add(clave);
+      return true;
+    });
 }
 
 function contarCaracteres(texto = "") { return normalizarEspacios(String(texto ?? "")).length; }
@@ -668,7 +683,7 @@ function construirGuiaIntencion(intencion = "") {
   const mapa = {
     enganche: "Buscar una entrada atractiva y personalizada usando al 100% los datos de su perfil visible. Nada de frases genericas.",
     coqueteo: "Mantener un tono cercano y atractivo sin sonar intenso, necesitado ni artificial.",
-    conversacion: "Responder y mover la charla con fluidez, naturalidad y continuidad.",
+    conversacion: "Responder y mover la charla con fluidez, naturalidad y continuity.",
     reenganche: "Recuperar la conversacion asumiendo familiaridad total. PROHIBIDO decir 'quiero conocerte', 'saber de ti' o actuar como si fuera el primer contacto.",
     cierre_suave: "Cerrar o pausar con buena energia, dejando la puerta abierta para seguir despues."
   };
@@ -772,11 +787,9 @@ Cada opcion debe incluir, sin sonar formula:
 - una idea atractiva o mini detalle que genere interes real
 - un cierre que invite a seguir la conversacion con maximo una pregunta
 
-CUANDO EL BORRADOR SEA CORTO
-No te quedes corto
-Apoyate en el ultimo mensaje de la clienta, luego en el contexto reciente y por ultimo en el perfil visible
-Puedes extender con una segunda idea breve, un giro de curiosidad o una continuidad natural
-No rellenes con frases vacias
+CUANDO EL BORRADOR SEA CORTO (EXPANSIÓN OBLIGATORIA)
+Si el operador escribe algo muy básico como "hola", o una frase corta, ESTÁS OBLIGADO a expandirlo usando los datos del perfil de la clienta y el historial hasta cumplir la longitud objetivo (mínimo 200 caracteres).
+Inventa conversación natural, atractiva y relevante basada en ella. NO devuelvas mensajes cortos ni secos jamás.
 
 LONGITUD OBLIGATORIA
 Opcion 1: entre 200 y 260 caracteres
@@ -786,7 +799,7 @@ Opcion 3: entre 320 y 420 caracteres
 DIFERENCIACION OBLIGATORIA
 Opcion 1 debe ser directa, agradable y facil de enviar
 Opcion 2 debe ser mas atractiva, emocional o coqueta segun el caso, sin exagerar
-Opcion 3 debe ser mas desarrollada, envolvente y con mas continuidad conversacional
+Opcion 3 debe ser mas desarrollada, envolvente y con mas continuity conversacional
 
 NO HAGAS
 No inventes nombres
@@ -812,10 +825,14 @@ Verifica que las 3 opciones:
 ${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, respuesta meta equivocada o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA OBLIGATORIA (FORMATO ESTRICTO DE PRIORIDAD MAXIMA)
-Debes devolver ÚNICAMENTE un arreglo JSON válido con 3 strings.
+Debes devolver ÚNICAMENTE un arreglo JSON plano con 3 strings.
 NUNCA uses Markdown, no pongas introducciones, no enumere las opciones.
 Ejemplo exacto del output esperado:
-["Opcion 1 corregida y lista para enviar", "Opcion 2 corregida y lista para enviar", "Opcion 3 corregida y lista para enviar"]
+[
+  "Opcion 1 expandida y lista para enviar",
+  "Opcion 2 expandida y lista para enviar",
+  "Opcion 3 expandida y lista para enviar"
+]
 `.trim();
 }
 
@@ -892,7 +909,7 @@ OBJETIVO DE LAS 3 SALIDAS
 TAREA FINAL
 Reescribe el borrador del operador en 3 versiones mejores
 Conserva el sentido principal
-Ayuda aunque el borrador sea corto
+Ayuda EXPANDIENDO el texto obligatoriamente si el borrador es corto
 Usa el ultimo mensaje de la clienta como prioridad
 Usa contexto o perfil solo si mejoran de verdad la respuesta
 Mantente dentro de la app si hay solicitud de contacto externo
@@ -1242,7 +1259,7 @@ const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
 ];
 
-async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.58, maxTokens = 800, responseMimeType = "text/plain" }) {
+async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.58, maxTokens = 1500, responseMimeType = "text/plain" }) {
   const limiter = obtenerOpenAILimiter(lane);
   return limiter.run(async () => {
     const startedAt = Date.now();
@@ -1324,7 +1341,7 @@ async function generarSugerencias({ textoPlano, clientePlano, contextoPlano, per
     systemInstruction: sysInstruction1,
     prompt: userPrompt,
     temperature: 0.65,
-    maxTokens: 800,
+    maxTokens: 1500, // <--- SUBIDO A 1500 PARA MAXIMA CAPACIDAD
     responseMimeType: "application/json"
   });
 
@@ -1379,7 +1396,7 @@ Corrige esto ahora:
     systemInstruction: sysInstruction2,
     prompt: userPrompt2,
     temperature: 0.68,
-    maxTokens: 800,
+    maxTokens: 1500, // <--- SUBIDO A 1500 PARA MAXIMA CAPACIDAD
     responseMimeType: "application/json"
   });
 
@@ -1393,7 +1410,13 @@ Corrige esto ahora:
 }
 
 async function traducirTexto(texto = "") {
-  const sysInstruction = `You are a native US English translator. Traduce el texto al INGLÉS natural de chat. REGLAS: NO respondas en español jamás. NO uses comillas. NO agregues introducciones. Devuelve SOLO la traducción en inglés final.`;
+  const sysInstruction = `You are a strict US English translator. You receive text in Spanish and MUST return ONLY the translation in English. 
+RULES:
+- DO NOT answer in Spanish.
+- DO NOT add introductions like "Here is the translation".
+- DO NOT use quotes.
+- Return ONLY the final English chat message.`;
+
   const data = await llamarGemini({
     lane: "traduccion",
     modelName: OPENAI_MODEL_TRANSLATE, 
@@ -1555,7 +1578,7 @@ app.get("/admin.js", (_req, res) => res.sendFile(path.join(__dirname, "admin.js"
 // ==========================
 app.get("/health", (_req, res) => {
   return res.json({
-    ok: true, service: "server pro gemini json", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    ok: true, service: "server pro gemini json 1500t", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: { configured: adminEstaConfigurado(), token_ttl_hours: ADMIN_TOKEN_TTL_HOURS },
     pricing: { suggestions_model: OPENAI_MODEL_SUGGESTIONS, translate_model: OPENAI_MODEL_TRANSLATE, suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M, suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M, translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M, translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M },
     models: { sugerencias: OPENAI_MODEL_SUGGESTIONS, traduccion: OPENAI_MODEL_TRANSLATE },
