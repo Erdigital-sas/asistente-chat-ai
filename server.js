@@ -2639,28 +2639,40 @@ Devuelve solo una version final
 // ==========================
 // ANALYTICS
 // ==========================
-async function cargarConsumoPorRango(range) {
-  return seleccionarTodasLasPaginas((from, to) =>
-    supabase
+async function cargarConsumoPorRango(range, operadoresFiltrados = []) {
+  return seleccionarTodasLasPaginas((from, to) => {
+    let query = supabase
       .from("consumo")
-      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,created_at,extension_id")
+      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,request_ok,created_at,extension_id")
       .gte("created_at", range.startIso)
       .lt("created_at", range.endExclusiveIso)
       .order("created_at", { ascending: false })
-      .range(from, to)
-  );
+      .range(from, to);
+
+    if (operadoresFiltrados.length) {
+      query = query.in("operador", operadoresFiltrados);
+    }
+
+    return query;
+  });
 }
 
-async function cargarWarningsPorRango(range) {
-  return seleccionarTodasLasPaginas((from, to) =>
-    supabase
+async function cargarWarningsPorRango(range, operadoresFiltrados = []) {
+  return seleccionarTodasLasPaginas((from, to) => {
+    let query = supabase
       .from("warning_resumen_diario")
       .select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at")
       .gte("fecha", range.from)
       .lte("fecha", range.to)
       .order("fecha", { ascending: false })
-      .range(from, to)
-  );
+      .range(from, to);
+
+    if (operadoresFiltrados.length) {
+      query = query.in("operador", operadoresFiltrados);
+    }
+
+    return query;
+  });
 }
 
 function crearSummaryDashboard() {
@@ -2718,7 +2730,8 @@ function crearSerieDia(fecha = "") {
 function construirDashboardAnalytics({
   consumoRows = [],
   warningRows = [],
-  range = construirRangoFechas()
+  range = construirRangoFechas(),
+  operadoresFiltrados = []
 }) {
   const summary = crearSummaryDashboard();
   const operatorMap = new Map();
@@ -2883,6 +2896,7 @@ function construirDashboardAnalytics({
     operator_stats: operatorStats,
     warning_top: warningTop,
     series,
+    operator_filter: operadoresFiltrados,
     pricing: {
       suggestions_model: OPENAI_MODEL_SUGGESTIONS,
       translate_model: OPENAI_MODEL_TRANSLATE,
@@ -2892,6 +2906,15 @@ function construirDashboardAnalytics({
       translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
     }
   };
+}
+
+function parsearFiltroOperadores(raw = "") {
+  const nombres = String(raw ?? "")
+    .split(",")
+    .map((x) => formatearNombreOperador(x))
+    .filter(Boolean);
+
+  return [...new Set(nombres.map((x) => x))].slice(0, 100);
 }
 
 // ==========================
@@ -3218,10 +3241,11 @@ app.delete("/admin-api/operators/:id", autorizarAdmin, async (req, res) => {
 app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
   try {
     const range = construirRangoFechas(req.query?.from || "", req.query?.to || "");
+    const operadoresFiltrados = parsearFiltroOperadores(req.query?.operadores || "");
 
     const [consumoRows, warningRows] = await Promise.all([
-      cargarConsumoPorRango(range),
-      cargarWarningsPorRango(range)
+      cargarConsumoPorRango(range, operadoresFiltrados),
+      cargarWarningsPorRango(range, operadoresFiltrados)
     ]);
 
     runtimeStats.admin.dashboardLoads += 1;
@@ -3231,7 +3255,8 @@ app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
       ...construirDashboardAnalytics({
         consumoRows,
         warningRows,
-        range
+        range,
+        operadoresFiltrados
       })
     });
   } catch (err) {
