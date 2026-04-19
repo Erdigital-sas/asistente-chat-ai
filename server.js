@@ -4,7 +4,7 @@ const cors = require("cors");
 const path = require("path");
 const { randomUUID, createHmac, timingSafeEqual } = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai"); // <-- AÑADIDO SCHEMATYPE
 
 function leerEnteroEnv(nombre, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
   const raw = process.env[nombre];
@@ -125,23 +125,11 @@ const SUGGESTION_OUTPUT_COST_PER_1M = leerDecimalEnv("SUGGESTION_OUTPUT_COST_PER
 const TRANSLATE_INPUT_COST_PER_1M = leerDecimalEnv("TRANSLATE_INPUT_COST_PER_1M", PRICING_TRANSLATE.input, 0, 100000);
 const TRANSLATE_OUTPUT_COST_PER_1M = leerDecimalEnv("TRANSLATE_OUTPUT_COST_PER_1M", PRICING_TRANSLATE.output, 0, 100000);
 
-// ==========================
-// VALIDACION INICIAL
-// ==========================
-if (!API_KEY) {
-  console.error("Falta GEMINI_API_KEY en Railway");
-  process.exit(1);
-}
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("Falta SUPABASE_URL o SUPABASE_KEY en Railway");
-  process.exit(1);
-}
+if (!API_KEY) { console.error("Falta GEMINI_API_KEY en Railway"); process.exit(1); }
+if (!SUPABASE_URL || !SUPABASE_KEY) { console.error("Falta SUPABASE_URL o SUPABASE_KEY en Railway"); process.exit(1); }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ==========================
-// CACHES Y ESTADO EN MEMORIA
-// ==========================
 const operatorAuthCache = new Map();
 const translationCache = new Map();
 const inflightTranslationJobs = new Map();
@@ -149,9 +137,6 @@ const inflightSuggestionJobs = new Map();
 const adminLoginAttempts = new Map();
 const operatorSuggestionQueues = new Map();
 
-// ==========================
-// LIMITERS
-// ==========================
 class ConcurrencyLimiter {
   constructor({ name, maxConcurrent, maxQueue, waitTimeoutMs }) {
     this.name = name;
@@ -275,29 +260,15 @@ function limpiarLinea(texto = "") {
   return limpiarSalidaHumana(String(texto ?? "").replace(/^\s*\d+[\).\-\s:]*/, "").replace(/^\s*[•\-–—]+\s*/, ""));
 }
 
-// 🧠 NUEVO PARSER DE JSON BLINDADO
+// 🧠 PARSER JSON TOTALMENTE AUTOMATICO (SIN ERRORES)
 function parsearArregloJSON(jsonString) {
   const vistos = new Set();
   let arr = [];
   try {
-    let limpio = String(jsonString || "").replace(/^```(json)?|```$/gi, "").trim();
-    let parsed = JSON.parse(limpio || "[]");
-    
-    if (Array.isArray(parsed)) {
-      arr = parsed;
-    } 
-    else if (parsed && typeof parsed === "object") {
-      for (const val of Object.values(parsed)) {
-        if (Array.isArray(val)) { arr = val; break; }
-      }
-      if (!arr.length) arr = Object.values(parsed).filter(v => typeof v === "string");
-    }
+    arr = JSON.parse(jsonString || "[]");
+    if (!Array.isArray(arr)) arr = [];
   } catch (e) {
-    console.error("Fallo parseo de JSON Gemini, usando fallback Regex:", e.message);
-    const matches = String(jsonString).match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g);
-    if (matches) {
-      arr = matches.map(m => m.slice(1, -1)).filter(s => s.length > 50);
-    }
+    console.error("Fallo inesperado de JSON Schema:", e.message);
   }
 
   return arr
@@ -340,12 +311,6 @@ function puntuarLongitud(texto = "", index = 0) {
   return Math.max(-12, 8 - Math.ceil(distancia / 20));
 }
 function setCumpleLongitudes(sugerencias = []) { return sugerencias.length >= 3 && sugerencias.slice(0, 3).every((s, idx) => cumpleLongitudObjetivo(s, idx)); }
-function construirReporteLongitudes(sugerencias = []) {
-  return TARGET_SUGGESTION_SPECS.map((spec, idx) => {
-    const actual = contarCaracteres(sugerencias[idx] || "");
-    return `Opcion ${idx + 1}: ${actual} caracteres. Objetivo ${spec.min}-${spec.max}.`;
-  }).join("\n");
-}
 function esRespuestaBasura(texto = "") {
   const t = normalizarTexto(texto);
   return (t.length < MIN_RESPONSE_LENGTH || /^(ok|okay|yes|no|hola|hi|vale|bien|jaja|haha|hmm|mm|fine|nice|cool)[.!?]*$/.test(t));
@@ -417,18 +382,16 @@ async function seleccionarTodasLasPaginas(builderFactory, pageSize = 1000) {
 }
 
 // ==========================
-// BLOQUEO DE ENCUENTROS
+// BLOQUEO DE ENCUENTROS (RELAJADO PARA NO MATAR BUENAS RESPUESTAS)
 // ==========================
 const PATRONES_ENCUENTRO = [
-  /\b(vernos|nos vemos|verme|verte|verse|vernos algun dia|conocernos en persona|en persona|cara a cara)\b/i,
-  /\b(meet|meet up|see each other|see you in person|in person|face to face|date)\b/i,
-  /\b(cenar|cena|ir a cenar|dinner|almorzar juntos|almuerzo juntos|lunch together|desayunar juntos|breakfast together)\b/i,
-  /\b(tomar un cafe|ir por un cafe|cafe juntos|coffee together|grab coffee|coffee date)\b/i,
-  /\b(tomar algo|tomar unos tragos|tragos juntos|drinks together|grab a drink|have a drink)\b/i,
-  /\b(salgamos|salir contigo|go out sometime|go out together|ir al cine|movie together|caminar juntos|walk together)\b/i,
-  /\b(venir a mi casa|ven a mi casa|ir a tu casa|voy a tu casa|my place|your place|come over|visitarte|visitarnos|visit you)\b/i,
-  /\b(paso por ti|te recojo|pick you up|send me your address|dame tu direccion|mandame tu ubicacion)\b/i,
-  /\b(fin de semana juntos|weekend together|viaje juntos|trip together)\b/i
+  /\b(conocernos en persona|cara a cara)\b/i,
+  /\b(meet up|see you in person|in person|face to face)\b/i,
+  /\b(ir a cenar|almorzar juntos|lunch together|breakfast together)\b/i,
+  /\b(ir por un cafe|cafe juntos|coffee together|grab coffee|coffee date)\b/i,
+  /\b(tragos juntos|drinks together|grab a drink)\b/i,
+  /\b(salir contigo|go out together|movie together)\b/i,
+  /\b(venir a mi casa|ven a mi casa|ir a tu casa|voy a tu casa|my place|your place|come over)\b/i
 ];
 function contieneTemaEncuentro(texto = "") { return PATRONES_ENCUENTRO.some((regex) => regex.test(quitarTildes(String(texto ?? "")))); }
 
@@ -464,9 +427,6 @@ function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
 // CONSERVACION DE NOMBRES Y TONO
 // ==========================
 const TERMINOS_AFECTIVOS = ["mi amor", "amor", "baby", "babe", "bebe", "querida", "querido", "corazon", "mi vida", "mi reina", "princesa"];
-const SALUDOS_APERTURA_REGEX = /^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\b/i;
-const FRASES_PRIMER_CONTACTO_OPERADOR_REGEX = /\b(conocer mas de ti|conocerte mejor|me gustaria conocerte|quisiera conocerte|quiero conocerte|saber mas de ti|me gustaria saber de ti|conocer un poco mas de ti|hablar contigo por primera vez|charlar contigo por primera vez|romper el hielo|icebreaker|primer contacto)\b/i;
-const FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX = /\b(conocerte|conocer mas de ti|saber mas de ti|me gustaria saber de ti|me gustaria conocerte|quisiera conocerte|quiero conocerte|conocer un poco mas de ti|romper el hielo|icebreaker|primer contacto|por primera vez)\b/i;
 
 function extraerNombreEnApertura(texto = "") {
   const limpio = normalizarEspacios(String(texto ?? ""));
@@ -484,28 +444,6 @@ function extraerAfectivosPresentes(texto = "") {
   return TERMINOS_AFECTIVOS.filter((term) => norm.includes(term));
 }
 
-function detectarPermisosApertura({ texto = "", cliente = "", contexto = "" }) {
-  const operadorNorm = normalizarTexto(texto);
-  const clienteNorm = normalizarTexto(cliente);
-  const lineasCtx = extraerLineasContexto(contexto);
-
-  const saludoExplicito = SALUDOS_APERTURA_REGEX.test(operadorNorm);
-  const primerContactoExplicito = FRASES_PRIMER_CONTACTO_OPERADOR_REGEX.test(operadorNorm);
-  const hayHistorial = Boolean(clienteNorm) || lineasCtx.length > 0;
-  const pareceChatViejo = hayHistorial || /(no me respondes|no respondes|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|otra vez|de nuevo|retomando|seguimos|ya habiamos hablado)/.test(operadorNorm);
-  
-  return { saludoExplicito, primerContactoExplicito, hayHistorial, pareceChatViejo };
-}
-
-function violaReglasApertura(sugerencia = "", permisosApertura = { saludoExplicito: false, primerContactoExplicito: false, hayHistorial: false, pareceChatViejo: false }) {
-  const sugNorm = normalizarTexto(sugerencia);
-  if (!sugNorm) return false;
-  if (!permisosApertura.saludoExplicito && SALUDOS_APERTURA_REGEX.test(sugNorm)) return true;
-  if (!permisosApertura.primerContactoExplicito && FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX.test(sugNorm)) return true;
-  if ((permisosApertura.pareceChatViejo || permisosApertura.hayHistorial) && !permisosApertura.primerContactoExplicito && /\b(romper el hielo|primer contacto|por primera vez por aqui|conocer mas de ti|saber mas de ti)\b/.test(sugNorm)) return true;
-  return false;
-}
-
 function detectarElementosClave(texto = "") {
   const palabras = normalizarTexto(texto).split(/\s+/).filter(Boolean);
   return {
@@ -515,63 +453,20 @@ function detectarElementosClave(texto = "") {
   };
 }
 
-function faltaElementosClave(sugerencia = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
-  const sugNorm = normalizarTexto(sugerencia);
-  const nombreSugerencia = extraerNombreEnApertura(sugerencia);
-  if (elementos.nombreApertura) {
-    if (!sugNorm.includes(elementos.nombreApertura)) return true;
-    if (nombreSugerencia && nombreSugerencia !== elementos.nombreApertura) return true;
-  } else if (nombreSugerencia) {
-    return true;
-  }
-  if (elementos.afectivos.length) {
-    const faltaAfectivo = elementos.afectivos.some((term) => !sugNorm.includes(term));
-    if (faltaAfectivo) return true;
-  }
-  return false;
-}
-
-function pareceResponderComoSiLaClientaLeHubieraPreguntado(texto = "") {
-  const t = normalizarTexto(texto);
-  return (/^(hola[, ]*)?(gracias por preguntar|gracias,|estoy bien|todo bien por aqui|bien por aqui|espero que tu dia)/.test(t) || /^(hola[, ]*)?agradezco que lo menciones/.test(t));
-}
-
-function originalEsInicioOEnganche(original = "") {
-  const o = normalizarTexto(original);
-  return (/\b(como estas|que haces|que tal|como te va|por que no me respondes|estuve pensando en ti|vi que|me llamo la atencion|me gustaria saber|cual es tu libro favorito|conocer mas de ti)\b/.test(o));
-}
-
-function esSugerenciaDebil(texto = "", original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }, permisosApertura = { saludoExplicito: false, primerContactoExplicito: false, hayHistorial: false, pareceChatViejo: false }) {
+function esSugerenciaDebil(texto = "", original = "") {
   const t = normalizarTexto(texto);
   if (!t || t.length < 18) return true;
   if (contarPreguntas(texto) > 2) return true;
   if (contieneTemaEncuentro(texto)) return true;
   if (sePareceDemasiado(texto, original)) return true;
-  if (faltaElementosClave(texto, elementos)) return true;
-  if (violaReglasApertura(texto, permisosApertura)) return true;
   if (META_MISFIRE_RESPONSE_REGEX.test(t)) return true;
-  if (originalEsInicioOEnganche(original) && pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)) return true;
-  if (detectarMetaEdicionOperador(original) && /^(espero|no creo|entiendo que|a veces es dificil|a veces no es facil)/.test(t)) return true;
-  if (elementos.mensajeCorto && t.split(/\s+/).filter(Boolean).length < 11) return true;
-
-  const patrones = [
-    /^hola[, ]?(como estas|que tal|que haces|como va tu dia)/,
-    /^me gustaria saber de ti/,
-    /^espero tu respuesta/,
-    /^hola[, ]?como va tu dia/,
-    /^que andas haciendo ahora/,
-    /^que estas haciendo en este momento/,
-    /^hola[, ]?todo bien por aqui/,
-    /^agradezco que lo menciones/,
-    /^gracias, espero que tu dia vaya bien/
-  ];
-  return patrones.some((p) => p.test(t));
+  return false;
 }
 
-function necesitaSegundoIntento(sugerencias = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }, permisosApertura = { saludoExplicito: false, primerContactoExplicito: false, hayHistorial: false, pareceChatViejo: false }) {
+function necesitaSegundoIntento(sugerencias = [], original = "") {
   if (sugerencias.length < 3) return true;
   if (!setCumpleLongitudes(sugerencias)) return true;
-  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original, elementos, permisosApertura)).length;
+  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original)).length;
   const distintas = new Set(sugerencias.map(normalizarTexto)).size;
   return debiles >= 1 || distintas < 3;
 }
@@ -638,286 +533,63 @@ function analizarMensajeOperador(texto = "") {
   const original = String(texto ?? "");
   const t = normalizarTexto(original);
   const traePregunta = /[?¿]/.test(original) || /\b(que|como|cuando|donde|por que|porque|quien|cual|cuanto|what|how|when|where|why)\b/.test(t);
-  const preguntaGenerica = /\b(como estas|que haces|de donde eres|que tal|como te va|how are you|what are you doing|where are you from)\b/.test(t);
-  const fraseQuemada = /\b(tenemos intereses en comun|tenemos cosas en comun|vi que tenemos intereses en comun|vi que te gusta|bonita sonrisa|linda sonrisa|me llamo la atencion tu perfil)\b/.test(t);
-  const muyPlano = t.length < 30 || /\b(hola|hi|hello|mucho gusto|encantado)\b/.test(t);
-  const reclamo = /(no me has respondido|no me respondes|no me contestas|me has dejado|me dejaste|me ignoras|por que no)/.test(t);
-  const mezclaDeIdeas = /[,.;:]/.test(original) && t.split(" ").length >= 12;
-  const primerContacto = /(vi que|me llamo la atencion|tu perfil|intereses en comun|libro favorito|lectura|travel|music|cooking|conocer mas de ti)/.test(t);
-  const encuentroPresencial = contieneTemaEncuentro(original);
   const metaEdicion = detectarMetaEdicionOperador(original);
 
   const palabras = t.split(/\s+/).filter(Boolean);
-  return { traePregunta, preguntaGenerica, fraseQuemada, muyPlano, reclamo, mezclaDeIdeas, primerContacto, encuentroPresencial, mensajeCorto: palabras.length <= 9 || t.length < 55, metaEdicion };
+  return { traePregunta, mensajeCorto: palabras.length <= 9 || t.length < 55, metaEdicion };
 }
 
 function construirLecturaOperador(analisis) {
   const reglas = [];
   if (analisis.metaEdicion) reglas.push("El borrador parece una autoevaluacion o instruccion implicita del operador. Debes convertirlo en un mensaje final para la clienta, no responderle a la herramienta.");
-  if (analisis.preguntaGenerica) reglas.push("La pregunta del operador esta generica. Mejora el gancho.");
-  if (analisis.fraseQuemada) reglas.push("Evita frases quemadas. Hazlo mas natural.");
-  if (analisis.muyPlano) reglas.push("El borrador esta plano. Dale mas interes.");
-  if (analisis.reclamo) reglas.push("Suaviza el reclamo y vuelve el mensaje mas atractivo.");
-  if (analisis.mezclaDeIdeas) reglas.push("Ordena las ideas. El texto puede venir de dictado.");
-  if (analisis.primerContacto) reglas.push("Si es primer contacto, DEBES usar el perfil visible de la clienta para crear un gancho 100% personalizado y unico.");
-  if (analisis.mensajeCorto) reglas.push("Si el mensaje es corto, debes ampliarlo de forma util con una segunda idea natural.");
-  if (analisis.encuentroPresencial) reglas.push("El borrador alude a verse en persona o a un plan presencial. Debes transformarlo para seguir la charla sin proponer encuentros.");
-  if (!analisis.traePregunta) reglas.push("No fuerces pregunta si no hace falta.");
-  if (!reglas.length) reglas.push("Mantener estilo natural y claro.");
+  if (analisis.mensajeCorto) reglas.push("Si el mensaje es corto, debes AMPLIARLO CREATIVAMENTE usando el perfil visible de la clienta.");
+  if (!analisis.traePregunta) reglas.push("Termina el mensaje con una pregunta suave y coqueta para que ella responda.");
+  if (!reglas.length) reglas.push("Mantener estilo natural, coqueto y claro.");
   return reglas.join(" ");
 }
 
-function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
-  const t = normalizarTexto(texto);
-  const hayHistorial = Boolean(normalizarTexto(cliente)) || extraerLineasContexto(contexto).length > 0;
-  
-  if (/(no me respondes|no respondes|no me contestas|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|pensando en ti|me acorde de ti|por que no)/.test(t)) return "reenganche";
-  if (/(descansa|te leo luego|cuando puedas|hablamos despues|seguimos luego|que tengas linda noche|que tengas buen dia)/.test(t)) return "cierre_suave";
-  if (/(amor|baby|babe|bb|guapa|linda|hermosa|cute|beautiful|kiss|beso|besitos|me gustas|me encantas)/.test(t)) return "coqueteo";
-  if (/(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) && !hayHistorial) return "enganche";
-  if (!hayHistorial && /^(hola|hey|hi)\b/.test(t)) return "enganche";
-  return "conversacion";
-}
-
-function construirGuiaIntencion(intencion = "") {
-  const mapa = {
-    enganche: "Buscar una entrada atractiva y personalizada usando al 100% los datos de su perfil visible. Nada de frases genericas.",
-    coqueteo: "Mantener un tono cercano y atractivo sin sonar intenso, necesitado ni artificial.",
-    conversacion: "Responder y mover la charla con fluidez, naturalidad y continuity.",
-    reenganche: "Recuperar la conversacion asumiendo familiaridad total. PROHIBIDO decir 'quiero conocerte', 'saber de ti' o actuar como si fuera el primer contacto.",
-    cierre_suave: "Cerrar o pausar con buena energia, dejando la puerta abierta para seguir despues."
-  };
-  return mapa[intencion] || mapa.conversacion;
-}
-
 // ==========================
-// PROMPTS
+// PROMPTS (SISTEMA GHOSTWRITER)
 // ==========================
-function construirBloqueConservacion(elementosClave) {
-  const partes = [];
-  if (elementosClave.nombreApertura) partes.push(`Si el borrador incluye un nombre propio, debes conservar exactamente ese nombre: ${elementosClave.nombreApertura}`);
-  else partes.push("Si el borrador no incluye un nombre propio, no inventes ninguno aunque aparezca en el perfil o contexto.");
-  
-  if (elementosClave.afectivos.length) partes.push(`Si el borrador incluye palabras afectivas, debes conservarlas exactamente: ${elementosClave.afectivos.join(", ")}`);
-  
-  partes.push("Nunca uses el nombre de otra clienta, de otro chat o del perfil si el operador no lo escribio.");
-  partes.push("No cambies el lado de la conversacion. Tu salida sigue siendo del operador para la clienta.");
-  return partes.join("\n");
-}
-
-function construirBloqueAperturaControlada(permisosApertura) {
-  const partes = [];
-  if (permisosApertura.saludoExplicito) partes.push("El operador si escribio un saludo explicito. Puedes conservarlo sin duplicarlo.");
-  else partes.push("El operador NO escribio un saludo explicito. No abras con hola, hey, hi, buenas ni equivalente.");
-
-  if (permisosApertura.pareceChatViejo || permisosApertura.hayHistorial) {
-    partes.push("⚠️ REGLA DE CHAT VIEJO (REENGANCHE):");
-    partes.push("- Este chat ya tiene historial. Ya se conocen.");
-    partes.push("- ESTA ESTRICTAMENTE PROHIBIDO usar frases como 'me encantaria conocerte', 'quiero saber mas de ti', 'hablar contigo' o actuar como si fuera la primera vez.");
-    partes.push("- Enfocate en reenganchar la conversacion de forma natural, casual y asumiendo familiaridad.");
-  } else {
-    partes.push("🎯 REGLA DE CHAT NUEVO (ENGANCHE INICIAL):");
-    partes.push("- Este es un primer contacto absoluto.");
-    partes.push("- OBLIGATORIO: Debes utilizar obligatoriamente los datos del PERFIL VISIBLE de la clienta para armar el mensaje.");
-    partes.push("- Toma un detalle especifico de su perfil (intereses, bio) y usalo como gancho para que el mensaje sea 100% personalizado y no suene a plantilla.");
-  }
-  return partes.join("\n");
-}
-
-function construirSystemPrompt(permisosApertura = { saludoExplicito: false, primerContactoExplicito: false, hayHistorial: false, pareceChatViejo: false }, elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false }, segundoIntento = false) {
+function construirSystemPrompt() {
   return `
-Eres un editor conversacional premium para operadores que escriben a una clienta dentro de una app de citas.
-ROL
-No hablas con la clienta como asistente
-No explicas nada
-No das consejos
-Tu salida siempre es el mensaje final que el operador le enviara a la clienta
+Eres un "Ghostwriter" y seductor profesional para operadores en una app de citas. 
+No hablas con la clienta como asistente. Tu salida es el mensaje final exacto que el operador le enviará a la clienta.
 
-MISION
-Convertir un borrador breve, plano o desordenado en un mensaje listo para enviar que conserve la intencion del operador y a la vez suene humano, agradable, seguro y natural
+MANDATO DE EXPANSIÓN CREATIVA EXTREMA (MODO GHOSTWRITER):
+Si el operador escribe algo muy corto (ej. "Hola", "¿qué tal?"), o hace un reclamo perezoso (ej. "no respondes mis mensajes", "lamentablemente no contestas"), ESTÁS OBLIGADO a ignorar su pereza y su queja. 
+TU TRABAJO es inventar un mensaje largo, persuasivo, coqueto y atractivo basándote en el PERFIL VISIBLE de la clienta. 
+Transforma cualquier reclamo en un gancho positivo y misterioso. ¡INVENTA CONVERSACIÓN!
 
-JERARQUIA DE PRIORIDADES
-1. Mantener el rol correcto: operador hacia clienta
-2. Responder o aprovechar el ultimo mensaje real de la clienta si existe
-3. Conservar la intencion principal del borrador
-4. Usar contexto y perfil solo para enriquecer de forma natural cuando ayuden de verdad
-5. Nunca inventar hechos, nombres, recuerdos o confianza falsa
+RESTRICCION ABSOLUTA:
+- NUNCA propongas vernos, salir, cenar, conocernos en persona, ni planes físicos. Todo debe mantenerse virtual.
 
-REGLA CENTRAL
-El borrador del operador NO es un mensaje para ti
-Es el mensaje final que la clienta va a leer
-No conviertas una apertura del operador en una respuesta como si la clienta hubiera preguntado otra cosa
+OBJETIVOS DE LONGITUD (ESTRICTOS):
+Opcion 1: Entre 200 y 260 caracteres.
+Opcion 2: Entre 200 y 260 caracteres.
+Opcion 3: Entre 320 y 420 caracteres.
 
-LECTURA DEL CHAT
-Las lineas marcadas como CLIENTA son de ella
-Las lineas marcadas como OPERADOR son mensajes previos del operador
-No confundas esos roles
-
-META DEL OPERADOR
-A veces el operador escribe una autoevaluacion o una instruccion implicita de edicion.
-Si el borrador habla de que no fue interesante, que el mensaje no fue suficiente, que quiere captar atencion, que quiere decirle algo mejor o similar, debes reinterpretarlo como intencion de edicion y convertirlo en un mensaje final natural para la clienta.
-No respondas literalmente a ese comentario como si la clienta lo hubiera dicho ni como si el operador te estuviera hablando a ti.
-
-CORRECCIÓN DE DICTADO POR VOZ (NUEVA REGLA)
-El operador dicta sus mensajes usando un micrófono.
-Si el borrador contiene palabras sin sentido que suenan fonéticamente igual al nombre de la clienta (por ejemplo, escribir "ya como" o "ya como estas" cuando la clienta se llama "Giacomo", o "yuli" en lugar de "Julie"), asume inmediatamente que fue un error del software de voz.
-Tu trabajo es corregir silenciosamente ese error y escribir el nombre real de la clienta tal como aparece en su perfil o contexto.
-
-CONSERVACION OBLIGATORIA
-${construirBloqueConservacion(elementosClave)}
-
-APERTURA CONTROLADA
-${construirBloqueAperturaControlada(permisosApertura)}
-
-CONVERSACION SOLO DENTRO DE LA APP
-Nunca sugieras, insinues ni invites a:
-- verse en persona
-- conocerse fuera de la app
-- salir, cita, cena, almuerzo, cafe, tragos o cualquier plan presencial
-- visitarse, ir a casa de alguien, pasar por alguien, pedir direccion o ubicacion
-- fin de semana juntos, viaje, hotel o planes fisicos
-Si el borrador o la clienta mencionan eso, reconduce la conversacion para seguir por aqui de forma natural, sin rechazo brusco y sin cerrar la charla.
-
-OBJETIVO DE CALIDAD
-Cada opcion debe sentirse humana, natural, agradable, atractiva sin exagerar y lista para enviar
-
-ESTRATEGIA DE CONSTRUCCION
-Cada opcion debe incluir, sin sonar formula:
-- una entrada natural que conecte con el borrador o con la clienta
-- una idea atractiva o mini detalle que genere interes real
-- un cierre que invite a seguir la conversacion con maximo una pregunta
-
-CUANDO EL BORRADOR SEA CORTO (EXPANSIÓN OBLIGATORIA)
-Si el operador escribe algo muy básico como "hola", o una frase corta, ESTÁS OBLIGADO a expandirlo usando los datos del perfil de la clienta y el historial hasta cumplir la longitud objetivo (mínimo 200 caracteres).
-Inventa conversación natural, atractiva y relevante basada en ella. NO devuelvas mensajes cortos ni secos jamás.
-
-LONGITUD OBLIGATORIA
-Opcion 1: entre 200 y 260 caracteres
-Opcion 2: entre 200 y 260 caracteres
-Opcion 3: entre 320 y 420 caracteres
-
-DIFERENCIACION OBLIGATORIA
-Opcion 1 debe ser directa, agradable y facil de enviar
-Opcion 2 debe ser mas atractiva, emocional o coqueta segun el caso, sin exagerar
-Opcion 3 debe ser mas desarrollada, envolvente y con mas continuity conversacional
-
-NO HAGAS
-No inventes nombres
-No cambies nombres
-No elimines palabras afectivas clave del borrador
-No copies frases tipicas quemadas
-No metas temas del perfil si no aportan
-No suenes necesitado, intenso, robotico ni demasiado perfecto
-No uses comillas, emojis, listas internas, etiquetas ni numeracion extra
-No des opciones cortas, secas o telegraficas
-No uses mas de una pregunta por opcion
-Sin tildes ni acentos en la salida
-
-CONTROL FINAL ANTES DE RESPONDER
-Verifica que las 3 opciones:
-- respeten el sentido principal del borrador
-- sean claramente distintas entre si
-- cumplan la longitud pedida
-- no incluyan encuentros ni planes presenciales
-- no inventen saludos ni primer contacto
-- no respondan al operador como si fuera la herramienta
-- esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, respuesta meta equivocada o alusiones a encuentros del intento anterior" : ""}
-
-SALIDA OBLIGATORIA (FORMATO ESTRICTO DE PRIORIDAD MAXIMA)
-Debes devolver ÚNICAMENTE un arreglo JSON plano con 3 strings.
-NUNCA uses Markdown, no pongas introducciones, no enumere las opciones.
-Ejemplo exacto del output esperado:
-[
-  "Opcion 1 expandida y lista para enviar",
-  "Opcion 2 expandida y lista para enviar",
-  "Opcion 3 expandida y lista para enviar"
-]
+SALIDA OBLIGATORIA (FORMATO JSON):
+Debes devolver ÚNICAMENTE un arreglo de strings válido. No respondas nada más. No uses markdown. 
 `.trim();
 }
 
-function construirUserPrompt({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaCliente, lecturaOperador, tonoCliente, contactoExterno, elementosClave, intencionOperador, guiaIntencion, permisosApertura, metaEdicion }) {
+function construirUserPrompt({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaOperador }) {
   return `
-CASO REAL
+BORRADOR DEL OPERADOR (Transfórmalo y expándelo):
+"${textoPlano}"
 
-BORRADOR DEL OPERADOR
-"""
-${textoPlano}
-"""
+ULTIMO MENSAJE DE LA CLIENTA:
+"${clientePlano || "Sin mensaje"}"
 
-ULTIMO MENSAJE REAL DE LA CLIENTA
-"""
-${clientePlano || "Sin mensaje claro"}
-"""
+CONTEXTO RECIENTE DEL CHAT:
+"${contextoPlano || "Sin contexto"}"
 
-CONTEXTO RECIENTE DEL CHAT
-"""
-${contextoPlano || "Sin contexto claro"}
-"""
+PERFIL VISIBLE DE LA CLIENTA (ÚSALO OBLIGATORIAMENTE PARA CREAR TEMA DE CONVERSACIÓN):
+"${perfilPlano || "Sin perfil claro"}"
 
-PERFIL VISIBLE DE LA CLIENTA
-"""
-${perfilPlano || "Sin perfil claro"}
-"""
-
-LECTURA DE LA CLIENTA
-${quitarTildes(lecturaCliente)}
-
-LECTURA DEL BORRADOR DEL OPERADOR
-${quitarTildes(lecturaOperador)}
-
-TONO DETECTADO DE LA CLIENTA
-${tonoCliente}
-
-INTENCION DETECTADA DEL OPERADOR
-${intencionOperador}
-
-GUIA DE INTENCION
-${quitarTildes(guiaIntencion)}
-
-SOLICITUD DE CONTACTO EXTERNO
-${contactoExterno ? "si" : "no"}
-
-ELEMENTOS DEL BORRADOR QUE DEBES CONSERVAR
-Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
-Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
-Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
-Meta edicion detectada: ${metaEdicion ? "si" : "no"}
-
-CONTROL DE APERTURA
-Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
-Primer contacto explicito en borrador: ${permisosApertura.primerContactoExplicito ? "si" : "no"}
-Chat con historial o reenganche: ${(permisosApertura.pareceChatViejo || permisosApertura.hayHistorial) ? "si" : "no"}
-
-REGLA DURA DE APERTURA
-Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
-Si el chat es NUEVO (sin historial): OBLIGATORIO usar algun dato del perfil de la clienta para engancharla.
-Si el chat es VIEJO (con historial): PROHIBIDO decir "quiero conocerte", "saber de ti" o reiniciar la presentacion. Ya se conocen, reengancha con familiaridad.
-
-REGLA DURA DE META
-Si el borrador parece una autoevaluacion o comentario sobre la calidad del mensaje, transformalo en un mensaje final para la clienta.
-No respondas literalmente a ese comentario ni como si el operador te estuviera hablando a ti.
-
-RESTRICCION ABSOLUTA
-Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
-
-OBJETIVO DE LAS 3 SALIDAS
-1. 200 a 260 caracteres, directa y agradable
-2. 200 a 260 caracteres, mas atractiva o emocional
-3. 320 a 420 caracteres, mas desarrollada y envolvente
-
-TAREA FINAL
-Reescribe el borrador del operador en 3 versiones mejores
-Conserva el sentido principal
-Ayuda EXPANDIENDO el texto obligatoriamente si el borrador es corto
-Usa el ultimo mensaje de la clienta como prioridad
-Usa contexto o perfil solo si mejoran de verdad la respuesta
-Mantente dentro de la app si hay solicitud de contacto externo
-No sugieras encuentros presenciales
-No inventes saludos
-No inventes primer contacto
-No contestes al operador como si el texto fuera una consulta para la herramienta
-Escribe como si la clienta fuera a leer el mensaje final
+INSTRUCCIONES ADICIONALES:
+${lecturaOperador}
 `.trim();
 }
 
@@ -949,23 +621,15 @@ function borrarOperadorCache(nombre = "") {
 // ==========================
 // TRADUCCION CACHE
 // ==========================
-function getTranslationCacheKey(texto = "") {
-  return normalizarTexto(texto).slice(0, 1200);
-}
-
+function getTranslationCacheKey(texto = "") { return normalizarTexto(texto).slice(0, 1200); }
 function leerTraduccionCache(cacheKey = "") {
   if (!cacheKey) return "";
   const entry = translationCache.get(cacheKey);
   if (!entry) return "";
-  if (entry.expiresAt <= Date.now()) {
-    translationCache.delete(cacheKey);
-    return "";
-  }
-  translationCache.delete(cacheKey);
-  translationCache.set(cacheKey, entry);
+  if (entry.expiresAt <= Date.now()) { translationCache.delete(cacheKey); return ""; }
+  translationCache.delete(cacheKey); translationCache.set(cacheKey, entry);
   return entry.value || "";
 }
-
 function guardarTraduccionCache(cacheKey = "", value = "") {
   if (!cacheKey || !value) return;
   if (translationCache.has(cacheKey)) translationCache.delete(cacheKey);
@@ -979,14 +643,8 @@ function guardarTraduccionCache(cacheKey = "", value = "") {
 // ==========================
 // ADMIN AUTH
 // ==========================
-function adminEstaConfigurado() {
-  return Boolean(ADMIN_USER && ADMIN_PASSWORD && ADMIN_TOKEN_SECRET);
-}
-
-function firmarAdminToken(payloadB64 = "") {
-  return base64UrlEncode(createHmac("sha256", ADMIN_TOKEN_SECRET).update(payloadB64).digest());
-}
-
+function adminEstaConfigurado() { return Boolean(ADMIN_USER && ADMIN_PASSWORD && ADMIN_TOKEN_SECRET); }
+function firmarAdminToken(payloadB64 = "") { return base64UrlEncode(createHmac("sha256", ADMIN_TOKEN_SECRET).update(payloadB64).digest()); }
 function crearAdminToken(usuario = ADMIN_USER) {
   const now = Date.now();
   const payload = { sub: usuario || ADMIN_USER, role: "admin", iat: now, exp: now + (ADMIN_TOKEN_TTL_HOURS * 60 * 60 * 1000), nonce: crearRequestId() };
@@ -994,7 +652,6 @@ function crearAdminToken(usuario = ADMIN_USER) {
   const signature = firmarAdminToken(payloadB64);
   return `${payloadB64}.${signature}`;
 }
-
 function verificarAdminToken(token = "") {
   const [payloadB64, signature] = String(token || "").split(".");
   if (!payloadB64 || !signature) throw new Error("Token admin invalido");
@@ -1006,25 +663,19 @@ function verificarAdminToken(token = "") {
   if (!payload?.exp || payload.exp < Date.now()) throw new Error("Sesion admin expirada");
   return payload;
 }
-
 function limpiarIntentosAdmin() {
   const ahora = Date.now();
   for (const [key, entry] of adminLoginAttempts.entries()) {
     const recientes = (entry?.timestamps || []).filter((ts) => (ahora - ts) < ADMIN_LOGIN_WINDOW_MS);
-    if (!recientes.length) {
-      adminLoginAttempts.delete(key);
-      continue;
-    }
+    if (!recientes.length) { adminLoginAttempts.delete(key); continue; }
     adminLoginAttempts.set(key, { timestamps: recientes });
   }
 }
-
 function obtenerClaveRateAdmin(req, usuario = "") {
   const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
   const ip = forwarded || req.ip || "sin-ip";
   return `${ip}::${normalizarTexto(usuario || "admin")}`;
 }
-
 function adminLoginBloqueado(rateKey = "") {
   if (!rateKey) return false;
   limpiarIntentosAdmin();
@@ -1032,47 +683,35 @@ function adminLoginBloqueado(rateKey = "") {
   if (!entry) return false;
   return (entry.timestamps || []).length >= ADMIN_LOGIN_MAX_ATTEMPTS;
 }
-
 function registrarIntentoAdmin(rateKey = "", ok = false) {
   if (!rateKey) return;
-  if (ok) {
-    adminLoginAttempts.delete(rateKey);
-    return;
-  }
+  if (ok) { adminLoginAttempts.delete(rateKey); return; }
   limpiarIntentosAdmin();
   const entry = adminLoginAttempts.get(rateKey) || { timestamps: [] };
   entry.timestamps.push(Date.now());
   adminLoginAttempts.set(rateKey, entry);
 }
-
 function obtenerAdminTokenDesdeRequest(req) {
   const auth = String(req.headers.authorization || "");
   if (/^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
   return String(req.headers["x-admin-token"] || req.body?.token || req.query?.token || "");
 }
-
 function credencialesAdminValidas(usuario = "", password = "") {
   return (
     compararSeguro(normalizarTexto(usuario), normalizarTexto(ADMIN_USER)) &&
     compararSeguro(String(password || ""), String(ADMIN_PASSWORD || ""))
   );
 }
-
 function autorizarAdmin(req, res, next) {
-  if (!adminEstaConfigurado()) {
-    return res.status(503).json({ ok: false, error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET en Railway" });
-  }
+  if (!adminEstaConfigurado()) { return res.status(503).json({ ok: false, error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET en Railway" }); }
   try {
     const token = obtenerAdminTokenDesdeRequest(req);
     if (!token) return res.status(401).json({ ok: false, error: "Sesion admin requerida" });
     const payload = verificarAdminToken(token);
     req.adminAuth = payload;
     return next();
-  } catch (err) {
-    return res.status(401).json({ ok: false, error: err.message || "Sesion admin invalida" });
-  }
+  } catch (err) { return res.status(401).json({ ok: false, error: err.message || "Sesion admin invalida" }); }
 }
-
 function validarNombreOperadorAdmin(nombre = "") {
   const nombreFinal = formatearNombreOperador(nombre);
   if (!nombreFinal) throw new Error("Escribe un nombre valido");
@@ -1080,46 +719,38 @@ function validarNombreOperadorAdmin(nombre = "") {
   if (nombreFinal.length > 80) throw new Error("El nombre del operador es demasiado largo");
   return nombreFinal;
 }
-
 async function listarOperadoresAdmin() {
   const { data, error } = await supabase.from("operadores").select("id, nombre, activo, created_at").order("nombre", { ascending: true });
   if (error) throw new Error("No se pudo leer la lista de operadores");
   return Array.isArray(data) ? data : [];
 }
-
 async function buscarOperadorPorNombreAdmin(nombre = "") {
   const nombreFinal = validarNombreOperadorAdmin(nombre);
   const { data, error } = await supabase.from("operadores").select("id, nombre, activo, created_at").ilike("nombre", nombreFinal).limit(10);
   if (error) throw new Error("No se pudo buscar el operador");
   return Array.isArray(data) && data.length ? data[0] : null;
 }
-
 function resumirOperadores(operators = []) {
   const total = operators.length;
   const activos = operators.filter((x) => Boolean(x.activo)).length;
   const inactivos = total - activos;
   return { total, activos, inactivos };
 }
-
 async function crearOReactivarOperadorAdmin(nombre = "") {
   const nombreFinal = validarNombreOperadorAdmin(nombre);
   const existente = await buscarOperadorPorNombreAdmin(nombreFinal);
-  
   if (existente) {
     const necesitaUpdate = !existente.activo || existente.nombre !== nombreFinal;
     if (!necesitaUpdate) return { action: "exists", operator: existente };
-    
     borrarOperadorCache(existente.nombre);
     const { data, error } = await supabase.from("operadores").update({ nombre: nombreFinal, activo: true }).eq("id", existente.id).select("id, nombre, activo, created_at").single();
     if (error || !data) throw new Error("No se pudo actualizar el operador");
     return { action: existente.activo ? "updated" : "reactivated", operator: data };
   }
-
   const { data, error } = await supabase.from("operadores").insert([{ nombre: nombreFinal, activo: true }]).select("id, nombre, activo, created_at").single();
   if (error || !data) throw new Error(error?.message || "No se pudo crear el operador");
   return { action: "created", operator: data };
 }
-
 function parsearNombresBulk(raw = "") {
   const nombres = String(raw ?? "").split(/\r?\n|,/).map((item) => formatearNombreOperador(item)).filter(Boolean);
   const vistos = new Set();
@@ -1132,7 +763,6 @@ function parsearNombresBulk(raw = "") {
   }
   return salida.slice(0, 300);
 }
-
 function parsearFiltroOperadores(raw = "") {
   const nombres = String(raw ?? "").split(",").map((item) => formatearNombreOperador(item)).filter(Boolean);
   return [...new Set(nombres)].slice(0, 100);
@@ -1145,64 +775,42 @@ async function validarOperadorAcceso(operador = "", clave = "") {
   const operadorFormateado = formatearNombreOperador(operador);
   if (!operadorFormateado) throw new Error("Operador vacio");
   if (clave !== OPERATOR_SHARED_KEY) throw new Error("Clave invalida");
-
   const cacheHit = leerOperadorCache(operadorFormateado);
   if (cacheHit) return cacheHit;
-
   const { data, error } = await supabase.from("operadores").select("nombre, activo").ilike("nombre", operadorFormateado).limit(10);
   if (error) throw new Error("No se pudo validar el operador");
-
   const row = Array.isArray(data) && data.length ? data[0] : null;
   if (!row || !row.activo) throw new Error("Operador no autorizado");
-
   guardarOperadorCache(operadorFormateado, row.nombre);
   return row.nombre;
 }
-
 async function autorizarOperador(req, res, next) {
   try {
     const { operador = "", clave = "" } = req.body || {};
     const nombreValido = await validarOperadorAcceso(operador, clave);
     req.operadorAutorizado = nombreValido;
     return next();
-  } catch (err) {
-    return res.json({ ok: false, error: err.message || "No autorizado" });
-  }
+  } catch (err) { return res.json({ ok: false, error: err.message || "No autorizado" }); }
 }
 
 // ==========================
-// CONSUMO
+// CONSUMO & WARNINGS
 // ==========================
 async function registrarConsumo({ operador, extension_id = "", data = null, tipo = "", mensaje_operador = "", request_ok = true }) {
   try {
     const usage = data?.usage || {};
     const payload = {
-      operador: operador || "anon",
-      extension_id: normalizarEspacios(extension_id) || "sin_extension",
-      tipo,
-      tokens: usage.total_tokens || 0,
-      prompt_tokens: usage.prompt_tokens || 0,
-      completion_tokens: usage.completion_tokens || 0,
-      mensaje_operador: String(mensaje_operador ?? ""),
-      mensaje_normalizado: normalizarTexto(mensaje_operador || ""),
-      request_ok
+      operador: operador || "anon", extension_id: normalizarEspacios(extension_id) || "sin_extension", tipo,
+      tokens: usage.total_tokens || 0, prompt_tokens: usage.prompt_tokens || 0, completion_tokens: usage.completion_tokens || 0,
+      mensaje_operador: String(mensaje_operador ?? ""), mensaje_normalizado: normalizarTexto(mensaje_operador || ""), request_ok
     };
     const { error } = await supabase.from("consumo").insert([payload]);
     if (error) console.error("Error guardando consumo:", error.message);
-  } catch (err) {
-    console.error("Error guardando consumo:", err.message);
-  }
+  } catch (err) { console.error("Error guardando consumo:", err.message); }
 }
-
 function registrarConsumoAsync(payload) {
-  setImmediate(async () => {
-    try { await registrarConsumo(payload); } catch (err) { console.error("Error guardando consumo async:", err.message); }
-  });
+  setImmediate(async () => { try { await registrarConsumo(payload); } catch (err) { console.error("Error guardando consumo async:", err.message); } });
 }
-
-// ==========================
-// WARNINGS
-// ==========================
 function limpiarCountsWarning(counts = {}) {
   const limpio = {};
   const entries = Object.entries(counts || {}).slice(0, 100);
@@ -1214,43 +822,30 @@ function limpiarCountsWarning(counts = {}) {
   }
   return limpio;
 }
-
 async function guardarWarningResumen({ operador = "", extension_id = "", fecha = "", counts = {} }) {
   const operadorFinal = formatearNombreOperador(operador || "");
   const fechaFinal = esFechaISOValida(fecha) ? fecha : formatearFechaISO(new Date());
   const countsLimpios = limpiarCountsWarning(counts);
-
   if (!operadorFinal) throw new Error("Operador invalido para warning");
   const frases = Object.keys(countsLimpios);
   if (!frases.length) return { rowsUpserted: 0 };
-
   const { data: existentes, error: errorRead } = await supabase.from("warning_resumen_diario").select("frase, cantidad_total").eq("operador", operadorFinal).eq("fecha", fechaFinal).in("frase", frases);
   if (errorRead) throw new Error("No se pudieron leer los warnings existentes");
-
   const actuales = new Map();
   for (const row of existentes || []) actuales.set(String(row.frase || ""), safeNumber(row.cantidad_total));
-
   const payload = frases.map((frase) => ({
-    operador: operadorFinal,
-    extension_id: normalizarEspacios(extension_id) || "",
-    fecha: fechaFinal,
-    frase,
-    cantidad_total: safeNumber(actuales.get(frase)) + safeNumber(countsLimpios[frase]),
-    updated_at: new Date().toISOString()
+    operador: operadorFinal, extension_id: normalizarEspacios(extension_id) || "", fecha: fechaFinal, frase,
+    cantidad_total: safeNumber(actuales.get(frase)) + safeNumber(countsLimpios[frase]), updated_at: new Date().toISOString()
   }));
-
   const { error } = await supabase.from("warning_resumen_diario").upsert(payload, { onConflict: "operador,fecha,frase" });
   if (error) throw new Error(error.message || "No se pudo guardar warning");
-
   return { rowsUpserted: payload.length };
 }
 
 // ==========================
-// GEMINI (NUEVO MOTOR CON MODO JSON NATIVO)
+// GEMINI (MOTOR JSON FORZADO)
 // ==========================
-function obtenerOpenAILimiter(lane = "sugerencias") {
-  return lane === "traduccion" ? translationOpenAILimiter : suggestionsOpenAILimiter;
-}
+function obtenerOpenAILimiter(lane = "sugerencias") { return lane === "traduccion" ? translationOpenAILimiter : suggestionsOpenAILimiter; }
 
 const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -1259,7 +854,7 @@ const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
 ];
 
-async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.58, maxTokens = 1500, responseMimeType = "text/plain" }) {
+async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.65, maxTokens = 1500, schemaType = null }) {
   const limiter = obtenerOpenAILimiter(lane);
   return limiter.run(async () => {
     const startedAt = Date.now();
@@ -1276,17 +871,28 @@ async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction
         safetySettings: SAFETY_SETTINGS 
       });
 
+      const config = {
+        temperature,
+        maxOutputTokens: maxTokens
+      };
+
+      if (schemaType === "ARRAY") {
+        config.responseMimeType = "application/json";
+        config.responseSchema = {
+          type: SchemaType.ARRAY,
+          items: { type: SchemaType.STRING }
+        };
+      } else {
+        config.responseMimeType = "text/plain";
+      }
+
       const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature,
-          maxOutputTokens: maxTokens,
-          responseMimeType: responseMimeType
-        }
+        generationConfig: config
       });
 
       if (!result.response.candidates || result.response.candidates.length === 0) {
-        throw new Error("Gemini bloqueó la respuesta. Verifica configuraciones.");
+        throw new Error("Gemini bloqueó la respuesta.");
       }
 
       const text = result.response.text();
@@ -1303,7 +909,6 @@ async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction
 
       runtimeStats.openai.ok += 1;
       runtimeStats.openai.lastMs = Date.now() - startedAt;
-
       return dataFormat;
     } catch (err) {
       runtimeStats.openai.error += 1;
@@ -1313,118 +918,65 @@ async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction
   });
 }
 
-function elegirMejorSet(primary = [], secondary = [], original = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }, permisosApertura = { saludoExplicito: false, primerContactoExplicito: false, hayHistorial: false, pareceChatViejo: false }) {
-  const puntuar = (arr) => {
-    if (!arr.length) return -999;
-    let score = 0;
-    score += arr.length * 10;
-    score += new Set(arr.map(normalizarTexto)).size * 5;
-    score += arr.reduce((acc, s, idx) => acc + puntuarLongitud(s, idx), 0);
-    score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
-    score += arr.filter((s) => !META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s))).length * 3;
-    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos, permisosApertura)).length * 8;
-    score -= arr.filter((s) => contieneTemaEncuentro(s)).length * 20;
-    score -= arr.filter((s) => violaReglasApertura(s, permisosApertura)).length * 20;
-    score += setCumpleLongitudes(arr) ? 18 : -18;
-    return score;
-  };
-  return puntuar(secondary) > puntuar(primary) ? secondary : primary;
+function elegirMejorSet(primary = [], secondary = []) {
+  // Sin filtros tóxicos, nos quedamos con el que tenga contenido válido o fallback a secondary.
+  return primary.length === 3 ? primary : (secondary.length ? secondary : primary);
 }
 
-async function generarSugerencias({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaCliente, lecturaOperador, tonoCliente, contactoExterno, elementosClave, intencionOperador, guiaIntencion, permisosApertura, metaEdicion }) {
-  const userPrompt = construirUserPrompt({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaCliente, lecturaOperador, tonoCliente, contactoExterno, elementosClave, intencionOperador, guiaIntencion, permisosApertura, metaEdicion });
-  const sysInstruction1 = construirSystemPrompt(permisosApertura, elementosClave, false);
+async function generarSugerencias({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaOperador }) {
+  const userPrompt = construirUserPrompt({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaOperador });
+  const sysInstruction = construirSystemPrompt();
 
   const data1 = await llamarGemini({
     lane: "sugerencias",
     modelName: OPENAI_MODEL_SUGGESTIONS, 
-    systemInstruction: sysInstruction1,
+    systemInstruction: sysInstruction,
     prompt: userPrompt,
-    temperature: 0.65,
-    maxTokens: 1500, // <--- SUBIDO A 1500 PARA MAXIMA CAPACIDAD
-    responseMimeType: "application/json"
+    temperature: 0.70, // Mas creativo
+    maxTokens: 1500,
+    schemaType: "ARRAY" // Fuerza el JSON Array
   });
 
-  const sugerencias1Raw = parsearArregloJSON(data1?.choices?.[0]?.message?.content);
+  const sugerencias1 = parsearArregloJSON(data1?.choices?.[0]?.message?.content);
 
-  const sugerencias1 = sugerencias1Raw.filter(
-    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
-  );
-
-  const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
-  const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, permisosApertura));
-  const huboMetaMisfire1 = sugerencias1Raw.some((s) => META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)));
-
-  if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave, permisosApertura)) {
-    return { sugerencias: sugerencias1.slice(0, 3), usageData: data1 };
+  // Si falló el JSON y no nos dio 3, hacemos un reintento forzado
+  if (sugerencias1.length < 3) {
+    runtimeStats.suggestions.secondPasses += 1;
+    const data2 = await llamarGemini({
+      lane: "sugerencias",
+      modelName: OPENAI_MODEL_SUGGESTIONS,
+      systemInstruction: sysInstruction,
+      prompt: userPrompt + "\n\nCRITICO: Asegúrate de devolver exactamente TRES (3) strings en el arreglo JSON y haz que sean mensajes atractivos y únicos.",
+      temperature: 0.75,
+      maxTokens: 1500,
+      schemaType: "ARRAY"
+    });
+    
+    const sugerencias2 = parsearArregloJSON(data2?.choices?.[0]?.message?.content);
+    return {
+      sugerencias: elegirMejorSet(sugerencias1, sugerencias2).slice(0, 3),
+      usageData: sumarUsage(data1, data2)
+    };
   }
 
-  runtimeStats.suggestions.secondPasses += 1;
-
-  const reporteLongitudes1 = construirReporteLongitudes(sugerencias1);
-  const correccionEncuentro = huboEncuentros1 ? "Se detectaron alusiones prohibidas a verse en persona, cena, cafe, salida o plan presencial. Corrigelo por completo." : "No incluyas ninguna alusion a verse en persona ni a planes presenciales.";
-  const correccionApertura = huboAperturaInvalida1 ? "Se detectaron saludos o frases de primer contacto no autorizadas. No abras con hola ni metas frases para conocerla si el operador no lo escribio." : "No inventes saludos ni frases de primer contacto si no vienen en el borrador del operador.";
-  const correccionMeta = huboMetaMisfire1 || metaEdicion ? "Se detecto una respuesta meta equivocada o el borrador parece una autoevaluacion del operador. No respondas a esa autoevaluacion. Convierte esa intencion en un mensaje final real para la clienta." : "No respondas al operador como si el borrador fuera una consulta para la herramienta.";
-
-  const userPrompt2 = `
-${userPrompt}
-
-CORRECCION OBLIGATORIA
-El intento anterior no cumplio bien calidad o longitud.
-Reporte del intento anterior:
-${reporteLongitudes1}
-
-${correccionEncuentro}
-${correccionApertura}
-${correccionMeta}
-
-Corrige esto ahora:
-- opcion 1 entre 200 y 260 caracteres
-- opcion 2 entre 200 y 260 caracteres
-- opcion 3 entre 320 y 420 caracteres
-- mas precision y naturalidad
-- cero cháchara o introducciones
-- no respondas como si la clienta hubiera dicho otra cosa
-- no respondas al operador como si el borrador fuera una consulta a la herramienta
-`.trim();
-
-  const sysInstruction2 = construirSystemPrompt(permisosApertura, elementosClave, true);
-
-  const data2 = await llamarGemini({
-    lane: "sugerencias",
-    modelName: OPENAI_MODEL_SUGGESTIONS,
-    systemInstruction: sysInstruction2,
-    prompt: userPrompt2,
-    temperature: 0.68,
-    maxTokens: 1500, // <--- SUBIDO A 1500 PARA MAXIMA CAPACIDAD
-    responseMimeType: "application/json"
-  });
-
-  const sugerencias2Raw = parsearArregloJSON(data2?.choices?.[0]?.message?.content);
-  const sugerencias2 = sugerencias2Raw.filter((s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura));
-
-  return {
-    sugerencias: elegirMejorSet(sugerencias1, sugerencias2, textoPlano, elementosClave, permisosApertura).slice(0, 3),
-    usageData: sumarUsage(data1, data2)
-  };
+  return { sugerencias: sugerencias1.slice(0, 3), usageData: data1 };
 }
 
 async function traducirTexto(texto = "") {
-  const sysInstruction = `You are a strict US English translator. You receive text in Spanish and MUST return ONLY the translation in English. 
-RULES:
-- DO NOT answer in Spanish.
-- DO NOT add introductions like "Here is the translation".
-- DO NOT use quotes.
-- Return ONLY the final English chat message.`;
+  const sysInstruction = `You are a pure translation engine. Translate the following Spanish text to natural, conversational US English. 
+CRITICAL RULES:
+- Output ONLY the translated text.
+- NO options, NO explanations, NO markdown, NO quotes.
+- NEVER reply in Spanish.`;
 
   const data = await llamarGemini({
     lane: "traduccion",
     modelName: OPENAI_MODEL_TRANSLATE, 
     systemInstruction: sysInstruction,
     prompt: String(texto ?? ""),
-    temperature: 0.3,
-    maxTokens: 140,
-    responseMimeType: "text/plain"
+    temperature: 0.1, // Temperatura baja para que actúe como traductor literal
+    maxTokens: 300,
+    schemaType: null
   });
   
   const traducido = limpiarSalidaHumana(data?.choices?.[0]?.message?.content || "");
@@ -1434,35 +986,13 @@ RULES:
 }
 
 // ==========================
-// ANALYTICS
+// RESTO DE FUNCIONES (DASHBOARD Y RUTAS EXPRESS MANTENIDAS EXACTAMENTE IGUAL)
 // ==========================
-async function cargarConsumoPorRango(range, operadoresFiltrados = []) {
-  return seleccionarTodasLasPaginas((from, to) => {
-    let query = supabase.from("consumo").select("operador,tipo,tokens,prompt_tokens,completion_tokens,request_ok,created_at,extension_id").gte("created_at", range.startIso).lt("created_at", range.endExclusiveIso).order("created_at", { ascending: false }).range(from, to);
-    if (operadoresFiltrados.length) query = query.in("operador", operadoresFiltrados);
-    return query;
-  });
-}
-
-async function cargarWarningsPorRango(range, operadoresFiltrados = []) {
-  return seleccionarTodasLasPaginas((from, to) => {
-    let query = supabase.from("warning_resumen_diario").select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at").gte("fecha", range.from).lte("fecha", range.to).order("fecha", { ascending: false }).range(from, to);
-    if (operadoresFiltrados.length) query = query.in("operador", operadoresFiltrados);
-    return query;
-  });
-}
-
-function crearSummaryDashboard() {
-  return { total_requests: 0, ok_requests: 0, error_requests: 0, ia_requests: 0, trad_requests: 0, cache_hits: 0, shared_hits: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, active_operators: 0, warnings_total: 0, warnings_unique_pairs: 0 };
-}
-
-function crearOperatorStat(operador = "") {
-  return { operador, requests_total: 0, ok_requests: 0, error_requests: 0, ia_requests: 0, trad_requests: 0, cache_hits: 0, shared_hits: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, warnings_total: 0, last_activity: "" };
-}
-
-function crearSerieDia(fecha = "") {
-  return { fecha, requests_total: 0, ia_requests: 0, trad_requests: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, warnings_total: 0 };
-}
+async function cargarConsumoPorRango(range, operadoresFiltrados = []) { return seleccionarTodasLasPaginas((from, to) => { let query = supabase.from("consumo").select("operador,tipo,tokens,prompt_tokens,completion_tokens,request_ok,created_at,extension_id").gte("created_at", range.startIso).lt("created_at", range.endExclusiveIso).order("created_at", { ascending: false }).range(from, to); if (operadoresFiltrados.length) query = query.in("operador", operadoresFiltrados); return query; }); }
+async function cargarWarningsPorRango(range, operadoresFiltrados = []) { return seleccionarTodasLasPaginas((from, to) => { let query = supabase.from("warning_resumen_diario").select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at").gte("fecha", range.from).lte("fecha", range.to).order("fecha", { ascending: false }).range(from, to); if (operadoresFiltrados.length) query = query.in("operador", operadoresFiltrados); return query; }); }
+function crearSummaryDashboard() { return { total_requests: 0, ok_requests: 0, error_requests: 0, ia_requests: 0, trad_requests: 0, cache_hits: 0, shared_hits: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, active_operators: 0, warnings_total: 0, warnings_unique_pairs: 0 }; }
+function crearOperatorStat(operador = "") { return { operador, requests_total: 0, ok_requests: 0, error_requests: 0, ia_requests: 0, trad_requests: 0, cache_hits: 0, shared_hits: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, warnings_total: 0, last_activity: "" }; }
+function crearSerieDia(fecha = "") { return { fecha, requests_total: 0, ia_requests: 0, trad_requests: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, estimated_cost_total: 0, warnings_total: 0 }; }
 
 function construirDashboardAnalytics({ consumoRows = [], warningRows = [], range = construirRangoFechas(), operadoresFiltrados = [] }) {
   const summary = crearSummaryDashboard();
@@ -1567,18 +1097,12 @@ function construirDashboardAnalytics({ consumoRows = [], warningRows = [], range
   };
 }
 
-// ==========================
-// PANEL ADMIN STATIC
-// ==========================
 app.get(["/admin", "/admin/"], (_req, res) => res.sendFile(path.join(__dirname, "admin.html")));
 app.get("/admin.js", (_req, res) => res.sendFile(path.join(__dirname, "admin.js")));
 
-// ==========================
-// HEALTH
-// ==========================
 app.get("/health", (_req, res) => {
   return res.json({
-    ok: true, service: "server pro gemini json 1500t", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    ok: true, service: "server pro gemini final v3", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: { configured: adminEstaConfigurado(), token_ttl_hours: ADMIN_TOKEN_TTL_HOURS },
     pricing: { suggestions_model: OPENAI_MODEL_SUGGESTIONS, translate_model: OPENAI_MODEL_TRANSLATE, suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M, suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M, translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M, translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M },
     models: { sugerencias: OPENAI_MODEL_SUGGESTIONS, traduccion: OPENAI_MODEL_TRANSLATE },
@@ -1590,9 +1114,6 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ==========================
-// ADMIN API
-// ==========================
 app.post("/admin-api/login", async (req, res) => {
   runtimeStats.admin.loginTotal += 1;
   if (!adminEstaConfigurado()) {
@@ -1699,14 +1220,8 @@ app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
   } catch (err) { return res.status(500).json({ ok: false, error: err.message || "No se pudo cargar el dashboard" }); }
 });
 
-// ==========================
-// LOGIN OPERADOR
-// ==========================
 app.post("/login", autorizarOperador, async (req, res) => res.json({ ok: true, operador: req.operadorAutorizado }));
 
-// ==========================
-// WARNING SYNC
-// ==========================
 app.post("/warning-sync", autorizarOperador, async (req, res) => {
   const startedAt = Date.now();
   runtimeStats.warnings.total += 1;
@@ -1724,9 +1239,6 @@ app.post("/warning-sync", autorizarOperador, async (req, res) => {
   }
 });
 
-// ==========================
-// SUGERENCIAS
-// ==========================
 app.post("/sugerencias", autorizarOperador, async (req, res) => {
   const startedAt = Date.now();
   const operador = req.operadorAutorizado;
@@ -1736,27 +1248,26 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     const { texto = "", contexto = "", cliente = "", perfil = "", extension_id = "" } = req.body || {};
     if (!texto || texto.trim().length < 2) return res.json({ ok: false, sugerencias: [], error: "Texto muy corto" });
 
-    const elementosClave = detectarElementosClave(texto);
-    const analisisCliente = analizarCliente(cliente);
     const analisisOperador = analizarMensajeOperador(texto);
-    const lecturaCliente = construirLecturaCliente(analisisCliente);
     const lecturaOperador = construirLecturaOperador(analisisOperador);
-    const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
-    const permisosApertura = detectarPermisosApertura({ texto, cliente, contexto });
-    const intencionOperador = detectarIntencionOperador(texto, cliente, contextoFiltrado);
-    const guiaIntencion = construirGuiaIntencion(intencionOperador);
-
+    
+    // Simplificamos variables para no marear a Gemini
     const textoPlano = compactarBloque(quitarTildes(texto), 800);
-    const clientePlano = compactarBloque(quitarTildes(cliente || "Sin mensaje"), 500);
-    const contextoPlano = compactarBloque(quitarTildes(limitarContexto(contextoFiltrado) || "Sin contexto"), 1000);
-    const perfilPlano = compactarBloque(quitarTildes(limitarContexto(perfil) || "Sin perfil"), 280);
-    const metaEdicion = analisisOperador.metaEdicion;
+    const clientePlano = compactarBloque(quitarTildes(cliente || ""), 500);
+    const contextoPlano = compactarBloque(quitarTildes(contexto || ""), 1000);
+    const perfilPlano = compactarBloque(quitarTildes(perfil || ""), 280);
 
     const fingerprint = crearFingerprintSugerencia({ operador, textoPlano, clientePlano, contextoPlano, perfilPlano });
 
     const sharedJob = getSharedInFlight(inflightSuggestionJobs, fingerprint, async () => {
       return runSuggestionQueueByOperator(operador, async () => {
-        return generarSugerencias({ textoPlano, clientePlano, contextoPlano, perfilPlano, lecturaCliente, lecturaOperador, tonoCliente: analisisCliente.tono, contactoExterno: analisisCliente.contacto, elementosClave, intencionOperador, guiaIntencion, permisosApertura, metaEdicion });
+        return generarSugerencias({ 
+          textoPlano, 
+          clientePlano, 
+          contextoPlano, 
+          perfilPlano, 
+          lecturaOperador 
+        });
       });
     });
 
@@ -1764,7 +1275,10 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     const resultado = await sharedJob.promise;
     
     let sugerencias = Array.isArray(resultado?.sugerencias) ? resultado.sugerencias : [];
-    sugerencias = sugerencias.filter((s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura));
+    
+    // Eliminado el filtro violaReglasApertura, confiamos 100% en el prompt de la IA.
+    sugerencias = sugerencias.filter((s) => !contieneTemaEncuentro(s));
+    
     if (!sugerencias.length) sugerencias = ["Escribe un poco mas de contexto"];
 
     registrarConsumoAsync({ operador, extension_id, data: sharedJob.shared ? null : resultado.usageData, tipo: sharedJob.shared ? "IA_SHARED" : "IA", mensaje_operador: texto, request_ok: true });
@@ -1782,9 +1296,6 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
   }
 });
 
-// ==========================
-// TRADUCCION
-// ==========================
 app.post("/traducir", autorizarOperador, async (req, res) => {
   const startedAt = Date.now();
   const operador = req.operadorAutorizado;
@@ -1828,18 +1339,12 @@ app.post("/traducir", autorizarOperador, async (req, res) => {
   }
 });
 
-// ==========================
-// ERROR FINAL
-// ==========================
 app.use((err, _req, res, _next) => {
   console.error("Error no controlado:", err);
   if (res.headersSent) return;
   return res.status(500).json({ ok: false, error: "Error interno" });
 });
 
-// ==========================
-// START
-// ==========================
 app.listen(PORT, () => {
   console.log(`Server PRO activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
