@@ -83,7 +83,6 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || SUPABASE_KEY || OPERATOR_SHARED_KEY;
 const PORT = process.env.PORT || 3000;
 
-// Inicialización de cliente Gemini
 const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null;
 
 const OPENAI_MODEL_SUGGESTIONS = process.env.GEMINI_MODEL_SUGGESTIONS || "gemini-2.5-flash";
@@ -118,8 +117,7 @@ const ADMIN_TOKEN_TTL_HOURS = leerEnteroEnv("ADMIN_TOKEN_TTL_HOURS", 12, 1, 168)
 const ADMIN_LOGIN_WINDOW_MS = leerEnteroEnv("ADMIN_LOGIN_WINDOW_MS", 15 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
 const ADMIN_LOGIN_MAX_ATTEMPTS = leerEnteroEnv("ADMIN_LOGIN_MAX_ATTEMPTS", 8, 3, 50);
 
-// Precios de seguridad
-const PRICING_SUGGESTION = { input: 0.075, output: 0.30 }; // Actualizado a precios reales de Flash
+const PRICING_SUGGESTION = { input: 0.075, output: 0.30 };
 const PRICING_TRANSLATE = { input: 0.075, output: 0.30 };
 
 const SUGGESTION_INPUT_COST_PER_1M = leerDecimalEnv("SUGGESTION_INPUT_COST_PER_1M", PRICING_SUGGESTION.input, 0, 100000);
@@ -134,7 +132,6 @@ if (!API_KEY) {
   console.error("Falta GEMINI_API_KEY en Railway");
   process.exit(1);
 }
-
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("Falta SUPABASE_URL o SUPABASE_KEY en Railway");
   process.exit(1);
@@ -164,40 +161,24 @@ class ConcurrencyLimiter {
     this.active = 0;
     this.queue = [];
   }
-
   get activeCount() { return this.active; }
   get queuedCount() { return this.queue.length; }
 
   run(task) {
     return new Promise((resolve, reject) => {
       const job = { started: false, timeoutId: null, execute: null };
-
       const execute = () => {
         job.started = true;
-        if (job.timeoutId) {
-          clearTimeout(job.timeoutId);
-          job.timeoutId = null;
-        }
-
+        if (job.timeoutId) { clearTimeout(job.timeoutId); job.timeoutId = null; }
         this.active += 1;
         Promise.resolve().then(task).then(resolve, reject).finally(() => {
           this.active = Math.max(0, this.active - 1);
           this.drain();
         });
       };
-
       job.execute = execute;
-
-      if (this.active < this.maxConcurrent) {
-        execute();
-        return;
-      }
-
-      if (this.queue.length >= this.maxQueue) {
-        reject(new Error(`Servidor ocupado. Cola ${this.name} llena`));
-        return;
-      }
-
+      if (this.active < this.maxConcurrent) { execute(); return; }
+      if (this.queue.length >= this.maxQueue) { reject(new Error(`Servidor ocupado. Cola ${this.name} llena`)); return; }
       if (this.waitTimeoutMs > 0) {
         job.timeoutId = setTimeout(() => {
           if (job.started) return;
@@ -206,7 +187,6 @@ class ConcurrencyLimiter {
           reject(new Error(`Servidor ocupado. Tiempo de espera agotado en ${this.name}`));
         }, this.waitTimeoutMs);
       }
-
       this.queue.push(job);
     });
   }
@@ -219,91 +199,48 @@ class ConcurrencyLimiter {
   }
 }
 
-const suggestionsOpenAILimiter = new ConcurrencyLimiter({
-  name: "openai_sugerencias",
-  maxConcurrent: SUGGESTION_OPENAI_CONCURRENCY,
-  maxQueue: SUGGESTION_OPENAI_QUEUE_LIMIT,
-  waitTimeoutMs: SUGGESTION_OPENAI_QUEUE_WAIT_MS
-});
-
-const translationOpenAILimiter = new ConcurrencyLimiter({
-  name: "openai_traduccion",
-  maxConcurrent: TRANSLATION_OPENAI_CONCURRENCY,
-  maxQueue: TRANSLATION_OPENAI_QUEUE_LIMIT,
-  waitTimeoutMs: TRANSLATION_OPENAI_QUEUE_WAIT_MS
-});
+const suggestionsOpenAILimiter = new ConcurrencyLimiter({ name: "openai_sugerencias", maxConcurrent: SUGGESTION_OPENAI_CONCURRENCY, maxQueue: SUGGESTION_OPENAI_QUEUE_LIMIT, waitTimeoutMs: SUGGESTION_OPENAI_QUEUE_WAIT_MS });
+const translationOpenAILimiter = new ConcurrencyLimiter({ name: "openai_traduccion", maxConcurrent: TRANSLATION_OPENAI_CONCURRENCY, maxQueue: TRANSLATION_OPENAI_QUEUE_LIMIT, waitTimeoutMs: TRANSLATION_OPENAI_QUEUE_WAIT_MS });
 
 function countOperatorSuggestionsRunning() {
   let total = 0;
   for (const state of operatorSuggestionQueues.values()) if (state.running) total += 1;
   return total;
 }
-
 function countOperatorSuggestionsQueued() {
   let total = 0;
   for (const state of operatorSuggestionQueues.values()) total += state.queue.length;
   return total;
 }
-
 function getOrCreateOperatorQueueState(operadorKey) {
-  if (!operatorSuggestionQueues.has(operadorKey)) {
-    operatorSuggestionQueues.set(operadorKey, { running: false, queue: [], lastUsedAt: Date.now() });
-  }
+  if (!operatorSuggestionQueues.has(operadorKey)) operatorSuggestionQueues.set(operadorKey, { running: false, queue: [], lastUsedAt: Date.now() });
   return operatorSuggestionQueues.get(operadorKey);
 }
-
 function cleanupOperatorSuggestionQueue(operadorKey, state) {
-  if (!state.running && state.queue.length === 0) {
-    operatorSuggestionQueues.delete(operadorKey);
-  }
+  if (!state.running && state.queue.length === 0) operatorSuggestionQueues.delete(operadorKey);
 }
-
 function drainOperatorSuggestionQueue(operadorKey, state) {
   if (state.running) return;
   const nextJob = state.queue.shift();
-  if (!nextJob) {
-    cleanupOperatorSuggestionQueue(operadorKey, state);
-    return;
-  }
+  if (!nextJob) { cleanupOperatorSuggestionQueue(operadorKey, state); return; }
   nextJob.execute();
 }
-
 function runSuggestionQueueByOperator(operador = "", task) {
   const operadorKey = normalizarTexto(operador || "anon");
   const state = getOrCreateOperatorQueueState(operadorKey);
-
   return new Promise((resolve, reject) => {
     const job = { started: false, timeoutId: null, execute: null };
-
     const execute = () => {
-      job.started = true;
-      state.running = true;
-      state.lastUsedAt = Date.now();
-
-      if (job.timeoutId) {
-        clearTimeout(job.timeoutId);
-        job.timeoutId = null;
-      }
-
+      job.started = true; state.running = true; state.lastUsedAt = Date.now();
+      if (job.timeoutId) { clearTimeout(job.timeoutId); job.timeoutId = null; }
       Promise.resolve().then(task).then(resolve, reject).finally(() => {
-        state.running = false;
-        state.lastUsedAt = Date.now();
+        state.running = false; state.lastUsedAt = Date.now();
         drainOperatorSuggestionQueue(operadorKey, state);
       });
     };
-
     job.execute = execute;
-
-    if (!state.running) {
-      execute();
-      return;
-    }
-
-    if (state.queue.length >= PER_OPERATOR_SUGGESTION_QUEUE_LIMIT) {
-      reject(new Error("Este operador ya tiene demasiadas solicitudes de IA en curso"));
-      return;
-    }
-
+    if (!state.running) { execute(); return; }
+    if (state.queue.length >= PER_OPERATOR_SUGGESTION_QUEUE_LIMIT) { reject(new Error("Este operador ya tiene demasiadas solicitudes de IA en curso")); return; }
     if (PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS > 0) {
       job.timeoutId = setTimeout(() => {
         if (job.started) return;
@@ -313,18 +250,12 @@ function runSuggestionQueueByOperator(operador = "", task) {
         reject(new Error("La cola de IA de este operador esta llena o lenta"));
       }, PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS);
     }
-
     state.queue.push(job);
   });
 }
-
 function getSharedInFlight(map, key, factory) {
   if (map.has(key)) return { shared: true, promise: map.get(key) };
-
-  const promise = Promise.resolve().then(factory).finally(() => {
-    if (map.get(key) === promise) map.delete(key);
-  });
-  
+  const promise = Promise.resolve().then(factory).finally(() => { if (map.get(key) === promise) map.delete(key); });
   map.set(key, promise);
   return { shared: false, promise };
 }
@@ -332,83 +263,41 @@ function getSharedInFlight(map, key, factory) {
 // ==========================
 // UTILIDADES
 // ==========================
-function quitarTildes(texto = "") {
-  return String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-function normalizarTexto(texto = "") {
-  return quitarTildes(String(texto ?? "")).toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function normalizarEspacios(texto = "") {
-  return String(texto ?? "").replace(/\s+/g, " ").trim();
-}
-
-function formatearNombreOperador(nombre = "") {
-  return normalizarEspacios(nombre)
-    .toLowerCase()
-    .split(" ")
-    .filter(Boolean)
-    .map((parte) => parte.charAt(0).toUpperCase() + parte.slice(1))
-    .join(" ");
-}
-
-function limpiarSalidaHumana(texto = "") {
-  return quitarTildes(String(texto ?? "")).replace(/[“”"]/g, "").replace(/\s+/g, " ").trim();
-}
-
-function limitarContexto(ctx = "") {
-  return String(ctx ?? "").split("\n").map((linea) => linea.trim()).filter(Boolean).slice(-MAX_CONTEXT_LINES).join("\n");
-}
-
-function compactarBloque(texto = "", maxChars = 1200) {
-  const limpio = String(texto ?? "").trim();
-  if (!limpio) return "";
-  if (limpio.length <= maxChars) return limpio;
-  return limpio.slice(-maxChars);
-}
+function quitarTildes(texto = "") { return String(texto ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+function normalizarTexto(texto = "") { return quitarTildes(String(texto ?? "")).toLowerCase().replace(/\s+/g, " ").trim(); }
+function normalizarEspacios(texto = "") { return String(texto ?? "").replace(/\s+/g, " ").trim(); }
+function formatearNombreOperador(nombre = "") { return normalizarEspacios(nombre).toLowerCase().split(" ").filter(Boolean).map((parte) => parte.charAt(0).toUpperCase() + parte.slice(1)).join(" "); }
+function limpiarSalidaHumana(texto = "") { return quitarTildes(String(texto ?? "")).replace(/[“”"]/g, "").replace(/\s+/g, " ").trim(); }
+function limitarContexto(ctx = "") { return String(ctx ?? "").split("\n").map((linea) => linea.trim()).filter(Boolean).slice(-MAX_CONTEXT_LINES).join("\n"); }
+function compactarBloque(texto = "", maxChars = 1200) { const limpio = String(texto ?? "").trim(); if (!limpio) return ""; if (limpio.length <= maxChars) return limpio; return limpio.slice(-maxChars); }
 
 function limpiarLinea(texto = "") {
-  return limpiarSalidaHumana(
-    String(texto ?? "").replace(/^\s*\d+[\).\-\s:]*/, "").replace(/^\s*[•\-–—]+\s*/, "")
-  );
+  return limpiarSalidaHumana(String(texto ?? "").replace(/^\s*\d+[\).\-\s:]*/, "").replace(/^\s*[•\-–—]+\s*/, ""));
 }
 
-function extraerBloquesIA(texto = "") {
-  const raw = String(texto ?? "").replace(/\r/g, "").trim();
-  if (!raw) return [];
-
-  const bloques = [];
-  const regex = /(?:^|\n)\s*\d+\s*[\).\-\:]*\s*([\s\S]*?)(?=(?:\n\s*\d+\s*[\).\-\:]*\s)|$)/g;
-  let match;
-  
-  while ((match = regex.exec(raw))) {
-    const bloque = normalizarEspacios(String(match[1] || "").replace(/\n+/g, " "));
-    if (bloque) bloques.push(bloque);
-  }
-
-  if (bloques.length) return bloques;
-
-  return raw.split(/\n+/).map((linea) => normalizarEspacios(linea)).filter(Boolean);
-}
-
-function limpiarTextoIA(texto = "") {
+function parsearArregloJSON(jsonString) {
   const vistos = new Set();
-  return extraerBloquesIA(texto)
-    .map(limpiarLinea)
-    .filter((t) => t.length >= MIN_RESPONSE_LENGTH)
-    .filter((t) => {
-      const clave = normalizarTexto(t);
-      if (!clave || vistos.has(clave)) return false;
-      vistos.add(clave);
-      return true;
-    });
+  try {
+    let arr = JSON.parse(jsonString || "[]");
+    if (!Array.isArray(arr)) return [];
+    
+    return arr
+      .filter((t) => typeof t === "string")
+      .map(limpiarLinea)
+      .filter((t) => t.length >= MIN_RESPONSE_LENGTH)
+      .filter((t) => {
+        const clave = normalizarTexto(t);
+        if (!clave || vistos.has(clave)) return false;
+        vistos.add(clave);
+        return true;
+      });
+  } catch (e) {
+    console.error("Fallo parseo de JSON Gemini:", e);
+    return [];
+  }
 }
 
-function contarCaracteres(texto = "") {
-  return normalizarEspacios(String(texto ?? "")).length;
-}
-
+function contarCaracteres(texto = "") { return normalizarEspacios(String(texto ?? "")).length; }
 function contarPreguntas(texto = "") {
   const t = String(texto ?? "");
   const abiertas = (t.match(/¿/g) || []).length;
@@ -421,17 +310,12 @@ const TARGET_SUGGESTION_SPECS = [
   { min: 200, max: 260, ideal: 230 },
   { min: 320, max: 420, ideal: 370 }
 ];
-
-function obtenerSpecSugerencia(index = 0) {
-  return TARGET_SUGGESTION_SPECS[index] || TARGET_SUGGESTION_SPECS[0];
-}
-
+function obtenerSpecSugerencia(index = 0) { return TARGET_SUGGESTION_SPECS[index] || TARGET_SUGGESTION_SPECS[0]; }
 function cumpleLongitudObjetivo(texto = "", index = 0) {
   const spec = obtenerSpecSugerencia(index);
   const total = contarCaracteres(texto);
   return total >= spec.min && total <= spec.max;
 }
-
 function puntuarLongitud(texto = "", index = 0) {
   const spec = obtenerSpecSugerencia(index);
   const total = contarCaracteres(texto);
@@ -440,131 +324,72 @@ function puntuarLongitud(texto = "", index = 0) {
   const distancia = Math.abs(total - spec.ideal);
   return Math.max(-12, 8 - Math.ceil(distancia / 20));
 }
-
-function setCumpleLongitudes(sugerencias = []) {
-  return sugerencias.length >= 3 && sugerencias.slice(0, 3).every((s, idx) => cumpleLongitudObjetivo(s, idx));
-}
-
+function setCumpleLongitudes(sugerencias = []) { return sugerencias.length >= 3 && sugerencias.slice(0, 3).every((s, idx) => cumpleLongitudObjetivo(s, idx)); }
 function construirReporteLongitudes(sugerencias = []) {
   return TARGET_SUGGESTION_SPECS.map((spec, idx) => {
     const actual = contarCaracteres(sugerencias[idx] || "");
     return `Opcion ${idx + 1}: ${actual} caracteres. Objetivo ${spec.min}-${spec.max}.`;
   }).join("\n");
 }
-
 function esRespuestaBasura(texto = "") {
   const t = normalizarTexto(texto);
   return (t.length < MIN_RESPONSE_LENGTH || /^(ok|okay|yes|no|hola|hi|vale|bien|jaja|haha|hmm|mm|fine|nice|cool)[.!?]*$/.test(t));
 }
-
 function sePareceDemasiado(a = "", b = "") {
   const ta = normalizarTexto(a);
   const tb = normalizarTexto(b);
   if (!ta || !tb) return false;
   if (ta === tb) return true;
-
   const wa = new Set(ta.split(" ").filter(Boolean));
   const wb = tb.split(" ").filter(Boolean);
   if (!wb.length) return false;
-
   const overlap = wb.filter((w) => wa.has(w)).length;
   return overlap / wb.length >= 0.85;
 }
-
 function crearFingerprintSugerencia({ operador = "", textoPlano = "", clientePlano = "", contextoPlano = "", perfilPlano = "" }) {
-  return [
-    normalizarTexto(operador).slice(0, 80),
-    normalizarTexto(textoPlano).slice(0, 500),
-    normalizarTexto(clientePlano).slice(0, 300),
-    normalizarTexto(contextoPlano).slice(-600),
-    normalizarTexto(perfilPlano).slice(0, 200)
-  ].join("||");
+  return [normalizarTexto(operador).slice(0, 80), normalizarTexto(textoPlano).slice(0, 500), normalizarTexto(clientePlano).slice(0, 300), normalizarTexto(contextoPlano).slice(-600), normalizarTexto(perfilPlano).slice(0, 200)].join("||");
 }
-
-function safeNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function redondearDinero(n = 0) {
-  return Number(safeNumber(n, 0).toFixed(6));
-}
-
+function safeNumber(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? n : fallback; }
+function redondearDinero(n = 0) { return Number(safeNumber(n, 0).toFixed(6)); }
 function formatearFechaISO(date = new Date()) {
   const yyyy = date.getUTCFullYear();
   const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(date.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
-
-function primerDiaMesUTC(date = new Date()) {
-  return formatearFechaISO(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)));
-}
-
-function esFechaISOValida(texto = "") {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(texto || ""));
-}
-
+function primerDiaMesUTC(date = new Date()) { return formatearFechaISO(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))); }
+function esFechaISOValida(texto = "") { return /^\d{4}-\d{2}-\d{2}$/.test(String(texto || "")); }
 function sumarDiasISO(fechaISO = "", dias = 0) {
   const d = new Date(`${fechaISO}T00:00:00.000Z`);
   if (Number.isNaN(d.getTime())) return "";
   d.setUTCDate(d.getUTCDate() + dias);
   return formatearFechaISO(d);
 }
-
-function compararFechasISO(a = "", b = "") {
-  return String(a).localeCompare(String(b));
-}
-
+function compararFechasISO(a = "", b = "") { return String(a).localeCompare(String(b)); }
 function construirRangoFechas(fromRaw = "", toRaw = "") {
   const hoy = formatearFechaISO(new Date());
   let from = esFechaISOValida(fromRaw) ? fromRaw : primerDiaMesUTC(new Date());
   let to = esFechaISOValida(toRaw) ? toRaw : hoy;
-
-  if (compararFechasISO(from, to) > 0) {
-    const temp = from;
-    from = to;
-    to = temp;
-  }
-
+  if (compararFechasISO(from, to) > 0) { const temp = from; from = to; to = temp; }
   return { from, to, startIso: `${from}T00:00:00.000Z`, endExclusiveIso: `${sumarDiasISO(to, 1)}T00:00:00.000Z` };
 }
-
-function base64UrlEncode(input = "") {
-  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(String(input), "utf8");
-  return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function base64UrlDecode(input = "") {
-  const normalized = String(input).replace(/-/g, "+").replace(/_/g, "/");
-  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
-  return Buffer.from(normalized + padding, "base64").toString("utf8");
-}
-
-function compararSeguro(a = "", b = "") {
-  const aa = Buffer.from(String(a), "utf8");
-  const bb = Buffer.from(String(b), "utf8");
-  if (aa.length !== bb.length) return false;
-  try { return timingSafeEqual(aa, bb); } catch (_err) { return false; }
-}
-
+function base64UrlEncode(input = "") { const buffer = Buffer.isBuffer(input) ? input : Buffer.from(String(input), "utf8"); return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); }
+function base64UrlDecode(input = "") { const normalized = String(input).replace(/-/g, "+").replace(/_/g, "/"); const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4)); return Buffer.from(normalized + padding, "base64").toString("utf8"); }
+function compararSeguro(a = "", b = "") { const aa = Buffer.from(String(a), "utf8"); const bb = Buffer.from(String(b), "utf8"); if (aa.length !== bb.length) return false; try { return timingSafeEqual(aa, bb); } catch (_err) { return false; } }
 function obtenerCostosPorTipo(tipo = "") {
   const t = String(tipo || "").toUpperCase();
   if (t.startsWith("IA")) return { input: SUGGESTION_INPUT_COST_PER_1M, output: SUGGESTION_OUTPUT_COST_PER_1M, lane: "IA" };
   if (t.startsWith("TRAD")) return { input: TRANSLATE_INPUT_COST_PER_1M, output: TRANSLATE_OUTPUT_COST_PER_1M, lane: "TRAD" };
   return { input: 0, output: 0, lane: "OTRO" };
 }
-
 function calcularCostoEstimado({ tipo = "", prompt_tokens = 0, completion_tokens = 0 }) {
   const costos = obtenerCostosPorTipo(tipo);
   const inputCost = (safeNumber(prompt_tokens) / 1_000_000) * costos.input;
   const outputCost = (safeNumber(completion_tokens) / 1_000_000) * costos.output;
   return redondearDinero(inputCost + outputCost);
 }
-
 async function seleccionarTodasLasPaginas(builderFactory, pageSize = 1000) {
-  let from = 0;
-  const rows = [];
+  let from = 0; const rows = [];
   while (true) {
     const { data, error } = await builderFactory(from, from + pageSize - 1);
     if (error) throw error;
@@ -590,58 +415,34 @@ const PATRONES_ENCUENTRO = [
   /\b(paso por ti|te recojo|pick you up|send me your address|dame tu direccion|mandame tu ubicacion)\b/i,
   /\b(fin de semana juntos|weekend together|viaje juntos|trip together)\b/i
 ];
-
-function contieneTemaEncuentro(texto = "") {
-  const original = String(texto ?? "");
-  const limpio = quitarTildes(original);
-  return PATRONES_ENCUENTRO.some((regex) => regex.test(limpio));
-}
+function contieneTemaEncuentro(texto = "") { return PATRONES_ENCUENTRO.some((regex) => regex.test(quitarTildes(String(texto ?? "")))); }
 
 // ==========================
 // META DEL OPERADOR
 // ==========================
 const META_EDICION_REGEX = /\b(no fui lo suficientemente interesante|no fui suficiente|no fue suficiente|mi mensaje|el mensaje|otro mensaje|mensaje mas interesante|mensaje mejor|captar tu atencion|capturar tu atencion|sonar mas interesante|quiero decirle|como le digo|ayudame a decir|mejorame esto|reescribe esto|hazlo mas atractivo|hazlo mejor|no fui tan interesante|no fui lo bastante interesante)\b/i;
 const META_MISFIRE_RESPONSE_REGEX = /^(espero que no hayas pensado eso|no creo que haya sido eso|a veces es dificil captar|a veces no es facil captar|entiendo que puedas pensar eso|entiendo que pienses eso|no creo que lo hayas tomado asi)\b/i;
-
-function detectarMetaEdicionOperador(texto = "") {
-  const t = normalizarTexto(texto);
-  if (!t) return false;
-  return META_EDICION_REGEX.test(t);
-}
+function detectarMetaEdicionOperador(texto = "") { const t = normalizarTexto(texto); if (!t) return false; return META_EDICION_REGEX.test(t); }
 
 // ==========================
 // CONTEXTO RELEVANTE
 // ==========================
 const STOPWORDS_RELEVANCIA = new Set(["hola", "amor", "mi", "mio", "tu", "tuyo", "que", "como", "estas", "esta", "para", "pero", "porque", "por", "con", "sin", "una", "uno", "unos", "unas", "este", "esta", "estos", "estas", "muy", "mas", "menos", "del", "las", "los", "mis", "tus", "sus", "aqui", "alla", "eso", "esto", "esa", "ese", "soy", "eres", "fue", "fui", "ser", "tener", "tengo", "tiene", "solo", "bien", "vale", "gracias", "ahora", "luego", "despues", "later", "today", "hoy", "clienta", "operador"]);
-
-function tokenizarRelevancia(texto = "") {
-  return [...new Set(normalizarTexto(texto).split(/\s+/).filter((w) => w.length >= 4 && !STOPWORDS_RELEVANCIA.has(w)))];
-}
-
-function extraerLineasContexto(contexto = "") {
-  return String(contexto ?? "").split("\n").map((l) => limpiarSalidaHumana(l)).map((l) => normalizarEspacios(l)).filter(Boolean).filter((l) => /^CLIENTA:|^OPERADOR:/i.test(l));
-}
-
+function tokenizarRelevancia(texto = "") { return [...new Set(normalizarTexto(texto).split(/\s+/).filter((w) => w.length >= 4 && !STOPWORDS_RELEVANCIA.has(w)))]; }
+function extraerLineasContexto(contexto = "") { return String(contexto ?? "").split("\n").map((l) => limpiarSalidaHumana(l)).map((l) => normalizarEspacios(l)).filter(Boolean).filter((l) => /^CLIENTA:|^OPERADOR:/i.test(l)); }
 function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
   const lineas = extraerLineasContexto(contexto);
   if (!lineas.length) return "";
   const ultimas = lineas.slice(-4);
   const tokensObjetivo = new Set([...tokenizarRelevancia(texto), ...tokenizarRelevancia(cliente)]);
-  
-  if (!tokensObjetivo.size) {
-    return [...new Set(ultimas)].slice(-MAX_CONTEXT_LINES).join("\n");
-  }
-
+  if (!tokensObjetivo.size) return [...new Set(ultimas)].slice(-MAX_CONTEXT_LINES).join("\n");
   const scored = lineas.map((linea) => {
     const tokens = tokenizarRelevancia(linea);
     const score = tokens.reduce((acc, token) => acc + (tokensObjetivo.has(token) ? 1 : 0), 0);
     return { linea, score };
   });
-  
   const relevantes = scored.filter((x) => x.score > 0).map((x) => x.linea);
-  const combinadas = [...relevantes, ...ultimas];
-  const unicas = [...new Set(combinadas)];
-  return unicas.slice(-MAX_CONTEXT_LINES).join("\n");
+  return [...new Set([...relevantes, ...ultimas])].slice(-MAX_CONTEXT_LINES).join("\n");
 }
 
 // ==========================
@@ -702,19 +503,16 @@ function detectarElementosClave(texto = "") {
 function faltaElementosClave(sugerencia = "", elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }) {
   const sugNorm = normalizarTexto(sugerencia);
   const nombreSugerencia = extraerNombreEnApertura(sugerencia);
-
   if (elementos.nombreApertura) {
     if (!sugNorm.includes(elementos.nombreApertura)) return true;
     if (nombreSugerencia && nombreSugerencia !== elementos.nombreApertura) return true;
   } else if (nombreSugerencia) {
     return true;
   }
-
   if (elementos.afectivos.length) {
     const faltaAfectivo = elementos.afectivos.some((term) => !sugNorm.includes(term));
     if (faltaAfectivo) return true;
   }
-
   return false;
 }
 
@@ -1013,10 +811,11 @@ Verifica que las 3 opciones:
 - esten listas para enviar
 ${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, respuesta meta equivocada o alusiones a encuentros del intento anterior" : ""}
 
-SALIDA FORMATO ESTRICTO (PRIORIDAD MAXIMA)
-Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
-Una sola opcion por linea.
-ESTRICTAMENTE PROHIBIDO agregar preámbulos, introducciones, conclusiones, asteriscos o formato markdown (ej. nada de "Aquí están las opciones:"). Solo las tres líneas de texto plano numerado.
+SALIDA OBLIGATORIA (FORMATO ESTRICTO DE PRIORIDAD MAXIMA)
+Debes devolver ÚNICAMENTE un arreglo JSON válido con 3 strings.
+NUNCA uses Markdown, no pongas introducciones, no enumere las opciones.
+Ejemplo exacto del output esperado:
+["Opcion 1 corregida y lista para enviar", "Opcion 2 corregida y lista para enviar", "Opcion 3 corregida y lista para enviar"]
 `.trim();
 }
 
@@ -1430,13 +1229,12 @@ async function guardarWarningResumen({ operador = "", extension_id = "", fecha =
 }
 
 // ==========================
-// GEMINI (NUEVO MOTOR MEJORADO)
+// GEMINI (NUEVO MOTOR CON MODO JSON NATIVO)
 // ==========================
 function obtenerOpenAILimiter(lane = "sugerencias") {
   return lane === "traduccion" ? translationOpenAILimiter : suggestionsOpenAILimiter;
 }
 
-// Desactivamos filtros de seguridad que limitan el enganche natural en citas
 const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -1444,7 +1242,7 @@ const SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
 ];
 
-async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.58, maxTokens = 420 }) {
+async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction, prompt, temperature = 0.58, maxTokens = 800, responseMimeType = "text/plain" }) {
   const limiter = obtenerOpenAILimiter(lane);
   return limiter.run(async () => {
     const startedAt = Date.now();
@@ -1466,6 +1264,7 @@ async function llamarGemini({ lane = "sugerencias", modelName, systemInstruction
         generationConfig: {
           temperature,
           maxOutputTokens: maxTokens,
+          responseMimeType: responseMimeType
         }
       });
 
@@ -1524,13 +1323,12 @@ async function generarSugerencias({ textoPlano, clientePlano, contextoPlano, per
     modelName: OPENAI_MODEL_SUGGESTIONS, 
     systemInstruction: sysInstruction1,
     prompt: userPrompt,
-    temperature: 0.56,
-    maxTokens: 360
+    temperature: 0.65,
+    maxTokens: 800,
+    responseMimeType: "application/json"
   });
 
-  const sugerencias1Raw = limpiarTextoIA(data1?.choices?.[0]?.message?.content || "")
-    .map(limpiarSalidaHumana)
-    .filter((s) => !esRespuestaBasura(s));
+  const sugerencias1Raw = parsearArregloJSON(data1?.choices?.[0]?.message?.content);
 
   const sugerencias1 = sugerencias1Raw.filter(
     (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
@@ -1544,7 +1342,6 @@ async function generarSugerencias({ textoPlano, clientePlano, contextoPlano, per
     return { sugerencias: sugerencias1.slice(0, 3), usageData: data1 };
   }
 
-  // RESTAURACIÓN DEL SEGUNDO INTENTO (FALLBACK A LA INTELIGENCIA DE OPENAI AHORA EN GEMINI)
   runtimeStats.suggestions.secondPasses += 1;
 
   const reporteLongitudes1 = construirReporteLongitudes(sugerencias1);
@@ -1581,14 +1378,12 @@ Corrige esto ahora:
     modelName: OPENAI_MODEL_SUGGESTIONS,
     systemInstruction: sysInstruction2,
     prompt: userPrompt2,
-    temperature: 0.62,
-    maxTokens: 440
+    temperature: 0.68,
+    maxTokens: 800,
+    responseMimeType: "application/json"
   });
 
-  const sugerencias2Raw = limpiarTextoIA(data2?.choices?.[0]?.message?.content || "")
-    .map(limpiarSalidaHumana)
-    .filter((s) => !esRespuestaBasura(s));
-
+  const sugerencias2Raw = parsearArregloJSON(data2?.choices?.[0]?.message?.content);
   const sugerencias2 = sugerencias2Raw.filter((s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura));
 
   return {
@@ -1598,14 +1393,15 @@ Corrige esto ahora:
 }
 
 async function traducirTexto(texto = "") {
-  const sysInstruction = `Traduce al ingles natural de chat como una persona real escribiria.\n\nREGLAS\nNo usar comillas\nNo usar simbolos raros\nNo sonar perfecto\nDebe sonar natural y humano\nDevuelve solo una version final sin markdown ni introducciones.`;
+  const sysInstruction = `You are a native US English translator. Traduce el texto al INGLÉS natural de chat. REGLAS: NO respondas en español jamás. NO uses comillas. NO agregues introducciones. Devuelve SOLO la traducción en inglés final.`;
   const data = await llamarGemini({
     lane: "traduccion",
     modelName: OPENAI_MODEL_TRANSLATE, 
     systemInstruction: sysInstruction,
     prompt: String(texto ?? ""),
     temperature: 0.3,
-    maxTokens: 140
+    maxTokens: 140,
+    responseMimeType: "text/plain"
   });
   
   const traducido = limpiarSalidaHumana(data?.choices?.[0]?.message?.content || "");
@@ -1759,7 +1555,7 @@ app.get("/admin.js", (_req, res) => res.sendFile(path.join(__dirname, "admin.js"
 // ==========================
 app.get("/health", (_req, res) => {
   return res.json({
-    ok: true, service: "server pro gemini", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    ok: true, service: "server pro gemini json", uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: { configured: adminEstaConfigurado(), token_ttl_hours: ADMIN_TOKEN_TTL_HOURS },
     pricing: { suggestions_model: OPENAI_MODEL_SUGGESTIONS, translate_model: OPENAI_MODEL_TRANSLATE, suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M, suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M, translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M, translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M },
     models: { sugerencias: OPENAI_MODEL_SUGGESTIONS, traduccion: OPENAI_MODEL_TRANSLATE },
