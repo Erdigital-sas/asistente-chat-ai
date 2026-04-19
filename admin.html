@@ -42,7 +42,7 @@
     }
 
     .wrap {
-      max-width: 1440px;
+      max-width: 1480px;
       margin: 0 auto;
       padding: 24px 18px 60px;
     }
@@ -168,7 +168,7 @@
 
     .analytics-grid {
       display: grid;
-      grid-template-columns: 1.3fr 1fr;
+      grid-template-columns: 1.35fr 0.95fr;
       gap: 18px;
       margin-bottom: 18px;
     }
@@ -208,6 +208,104 @@
       padding: 10px 12px;
       font-size: 13px;
       border-radius: 14px;
+    }
+
+    .operator-filter-wrap {
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      position: relative;
+    }
+
+    .operator-filter-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .selected-operators {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      min-height: 20px;
+    }
+
+    .operator-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #d7f1ff;
+      border: 1px solid rgba(56, 189, 248, 0.24);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .operator-chip button {
+      padding: 0;
+      margin: 0;
+      border: none;
+      background: transparent;
+      color: #d7f1ff;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .operator-filter-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .operator-results {
+      margin-top: 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.02);
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .operator-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 11px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      cursor: pointer;
+      color: #e2e8f0;
+      font-size: 13px;
+    }
+
+    .operator-option:last-child {
+      border-bottom: none;
+    }
+
+    .operator-option:hover {
+      background: rgba(255,255,255,0.04);
+    }
+
+    .operator-option.active {
+      background: rgba(34, 197, 94, 0.08);
+    }
+
+    .operator-option small {
+      color: var(--muted);
+      font-size: 11px;
     }
 
     .analytics-kpis {
@@ -581,8 +679,8 @@
         <h1>Panel administrativo</h1>
         <p>
           Desde aqui crearas, activaras, desactivaras y eliminaras los usuarios operadores
-          que pueden entrar a la extension. Tambien quedara lista la vista para estadisticas
-          de tokens, costos y warnings.
+          que pueden entrar a la extension. Tambien veras estadisticas por fechas,
+          costos, tokens y warnings.
         </p>
       </div>
 
@@ -621,7 +719,7 @@
         </div>
       </div>
 
-      <!-- RESUMEN DE USUARIOS ACTUAL -->
+      <!-- RESUMEN DE USUARIOS -->
       <div class="stats">
         <div class="stat card">
           <div class="stat-label">Operadores totales</div>
@@ -641,13 +739,12 @@
         </div>
       </div>
 
-      <!-- ESTRUCTURA LISTA PARA ANALYTICS -->
+      <!-- ANALYTICS -->
       <div class="analytics-grid">
         <div class="analytics-card card">
           <h3>Estadisticas de IA</h3>
           <p>
-            Aqui quedara la vista de gasto diario y mensual, tokens, requests,
-            costos y operadores con mayor consumo.
+            Filtra por fecha y por uno o varios operadores para seguirlos de cerca.
           </p>
 
           <div class="filters-row">
@@ -680,9 +777,40 @@
             <button id="quick-30d-btn" class="btn-secondary quick-btn" type="button">Ultimos 30 dias</button>
           </div>
 
+          <div class="operator-filter-wrap">
+            <div class="operator-filter-header">
+              <div>
+                <div class="meta"><b>Filtro por operador</b></div>
+                <div class="meta">Busca, selecciona uno o varios y aplica el filtro.</div>
+              </div>
+              <span id="analytics-selected-count" class="tag info">Todos</span>
+            </div>
+
+            <input
+              id="analytics-operator-search"
+              type="text"
+              placeholder="Buscar operador para seguimiento"
+              autocomplete="off"
+            />
+
+            <input id="analytics-operators-value" type="hidden" value="" />
+
+            <div id="analytics-selected-operators" class="selected-operators">
+              <span class="meta">Sin filtro. Mostrando todos los operadores.</span>
+            </div>
+
+            <div class="operator-filter-actions">
+              <button id="analytics-clear-operators-btn" class="btn-warning quick-btn" type="button">
+                Limpiar filtro operadores
+              </button>
+            </div>
+
+            <div id="analytics-operator-results" class="operator-results hidden"></div>
+          </div>
+
           <div class="ghost-note">
-            Esta seccion queda preparada para el siguiente archivo.
-            Aqui veras tokens, costos estimados, gastos por operador y filtro por fecha.
+            El filtro por operador afectara estas 3 secciones:
+            Serie del periodo, Top frases repetidas y Gasto por operador.
           </div>
         </div>
 
@@ -694,7 +822,7 @@
           </p>
 
           <div id="pricing-info" class="ghost-note" style="margin-top:16px;">
-            Pendiente de cargar con el siguiente paso.
+            Pendiente de cargar.
           </div>
         </div>
       </div>
@@ -748,7 +876,7 @@
               </thead>
               <tbody id="analytics-series-body">
                 <tr>
-                  <td colspan="7" class="empty">Pendiente de cargar con el siguiente paso.</td>
+                  <td colspan="7" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
@@ -773,7 +901,7 @@
               </thead>
               <tbody id="analytics-warning-body">
                 <tr>
-                  <td colspan="4" class="empty">Pendiente de cargar con el siguiente paso.</td>
+                  <td colspan="4" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
@@ -807,7 +935,7 @@
               </thead>
               <tbody id="analytics-operators-body">
                 <tr>
-                  <td colspan="10" class="empty">Pendiente de cargar con el siguiente paso.</td>
+                  <td colspan="10" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
