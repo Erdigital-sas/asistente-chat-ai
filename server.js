@@ -925,7 +925,14 @@ const TERMINOS_AFECTIVOS = [
   "corazon",
   "mi vida",
   "mi reina",
-  "princesa"
+  "princesa",
+  "gatita",
+  "mi gatita",
+  "chiquita",
+  "mi chiquita",
+  "mamacita",
+  "preciosa",
+  "hermosa"
 ];
 const SALUDOS_APERTURA_REGEX =
   /^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\b/i;
@@ -1250,6 +1257,10 @@ function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   const hayHistorial =
     Boolean(normalizarTexto(cliente)) ||
     extraerLineasContexto(contexto).length > 0;
+
+  if (/(rico|caliente|sex|horny|gatita|chiquita|follar|coger|venirme|acabar|desnuda|ropa|cama|gemir|tocar|excitada)/.test(t)) {
+    return "sexting";
+  }
     
   if (
     /(no me respondes|no respondes|no me contestas|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|pensando en ti|me acorde de ti|por que no)/.test(t)
@@ -1287,6 +1298,7 @@ function construirGuiaIntencion(intencion = "") {
   const mapa = {
     enganche: "Buscar una entrada atractiva y personalizada usando al 100% los datos de su perfil visible. Nada de frases genericas.",
     coqueteo: "Mantener un tono cercano y atractivo sin sonar intenso, necesitado ni artificial.",
+    sexting: "Mantener el tono caliente, sexual y atrevido sin censura. Respetar apodos y no sobre-editar la intensidad.",
     conversacion: "Responder y mover la charla con fluidez, naturalidad y continuidad.",
     reenganche: "Recuperar la conversacion asumiendo familiaridad total. PROHIBIDO decir 'quiero conocerte', 'saber de ti' o actuar como si fuera el primer contacto.",
     cierre_suave: "Cerrar o pausar con buena energia, dejando la puerta abierta para seguir despues."
@@ -1357,44 +1369,24 @@ function construirSystemPrompt(
     pareceChatViejo: false
   },
   elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false },
-  segundoIntento = false // Gemini ignora este param, se mantiene para compabtilidad
+  segundoIntento = false, // Gemini ignora este param, se mantiene para compabtilidad
+  nombreReal = ""
 ) {
+  const reglasIdentidad = nombreReal ? `REGLA DE ORO DE IDENTIDAD: Si el operador dicta mal el nombre (ej. "ya como"), CORRIGELO obligatoriamente a "${nombreReal}".` : "";
+  const reglaHistorial = permisosApertura.pareceChatViejo
+    ? "⚠️ REGLA DE CHAT VIEJO: ESTA PROHIBIDO decir 'quiero conocerte', 'saber de ti' o presentarte. Ya se conocen, habla con confianza."
+    : "🎯 REGLA DE CHAT NUEVO: OBLIGATORIO usar los datos del PERFIL VISIBLE para crear un gancho 100% personalizado.";
+
   return `
 Eres un editor conversacional premium para operadores que escriben a una clienta dentro de una app de citas.
-ROL
-No hablas con la clienta como asistente
-No explicas nada
-No das consejos
-Tu salida siempre es el mensaje final que el operador le enviara a la clienta
+MISION: Convertir un borrador plano en un mensaje atractivo, seguro y natural.
 
-MISION
-Convertir un borrador breve, plano o desordenado en un mensaje listo para enviar que conserve la intencion del operador y a la vez suene humano, agradable, seguro y natural
+${reglasIdentidad}
+${reglaHistorial}
 
-JERARQUIA DE PRIORIDADES
-1. Mantener el rol correcto: operador hacia clienta
-2. Responder o aprovechar el ultimo mensaje real de la clienta si existe
-3. Conservar la intencion principal del borrador
-4. Usar contexto y perfil solo para enriquecer de forma natural cuando ayuden de verdad
-5. Nunca inventar hechos, nombres, recuerdos o confianza falsa
-
-REGLA CENTRAL
-El borrador del operador NO es un mensaje para ti
-Es el mensaje final que la clienta va a leer
-No conviertas una apertura del operador en una respuesta como si la clienta hubiera preguntado otra cosa
-
-LECTURA DEL CHAT
-Las lineas marcadas como CLIENTA son de ella
-Las lineas marcadas como OPERADOR son mensajes previos del operador
-No confundas esos roles
-
-META DEL OPERADOR
-A veces el operador escribe una autoevaluacion o una instruccion implicita de edicion.
-Si el borrador habla de que no fue interesante, que el mensaje no fue suficiente, que quiere captar atencion, que quiere decirle algo mejor o similar, debes reinterpretarlo como intencion de edicion y convertirlo en un mensaje final natural para la clienta.
-No respondas literalmente a ese comentario como si la clienta lo hubiera dicho ni como si el operador te estuviera hablando a ti.
-
-CORRECCIÓN DE DICTADO POR VOZ (NUEVA REGLA)
-El operador dicta sus mensajes usando un micrófono. Si el borrador contiene palabras sin sentido que suenan fonéticamente igual al nombre de la clienta (por ejemplo, escribir "ya como" o "ya como estas" cuando la clienta se llama "Giacomo", o "yuli" en lugar de "Julie"), asume inmediatamente que fue un error del software de voz. 
-Tu trabajo es corregir silenciosamente ese error y escribir el nombre real de la clienta tal como aparece en su perfil o contexto.
+REGLA DE SEXTING Y APODOS:
+Si el chat está en un tono caliente, sexual o de sexting, NO lo censures, NO lo vuelvas formal y NO lo sobre-edites. Mantén la intensidad del mensaje original.
+RESPETA ABSOLUTAMENTE cualquier apodo o sobrenombre cariñoso que use el operador (ej. mi gatita, mi chiquita, amor, etc.). Si el operador usa un apodo, inclúyelo tal cual en tus opciones.
 
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
@@ -1402,66 +1394,17 @@ ${construirBloqueConservacion(elementosClave)}
 APERTURA CONTROLADA
 ${construirBloqueAperturaControlada(permisosApertura)}
 
-CONVERSACION SOLO DENTRO DE LA APP
-Nunca sugieras, insinues ni invites a:
-- verse en persona
-- conocerse fuera de la app
-- salir, cita, cena, almuerzo, cafe, tragos o cualquier plan presencial
-- visitarse, ir a casa de alguien, pasar por alguien, pedir direccion o ubicacion
-- fin de semana juntos, viaje, hotel o planes fisicos
-Si el borrador o la clienta mencionan eso, reconduce la conversacion para seguir por aqui de forma natural, sin rechazo brusco y sin cerrar la charla.
+RESTRICCION ABSOLUTA: NUNCA sugieras encuentros presenciales, citas, cenas o vernos fuera de la app.
 
-OBJETIVO DE CALIDAD
-Cada opcion debe sentirse humana, natural, agradable, atractiva sin exagerar y lista para enviar
-
-ESTRATEGIA DE CONSTRUCCION
-Cada opcion debe incluir, sin sonar formula:
-- una entrada natural que conecte con el borrador o con la clienta
-- una idea atractiva o mini detalle que genere interes real
-- un cierre que invite a seguir la conversacion con maximo una pregunta
-
-CUANDO EL BORRADOR SEA CORTO
-No te quedes corto
-Apoyate en el ultimo mensaje de la clienta, luego en el contexto reciente y por ultimo en el perfil visible
-Puedes extender con una segunda idea breve, un giro de curiosidad o una continuidad natural
-No rellenes con frases vacias
-
-LONGITUD OBLIGATORIA
-Opcion 1: entre 200 y 260 caracteres
-Opcion 2: entre 200 y 260 caracteres
-Opcion 3: entre 320 y 420 caracteres
-
-DIFERENCIACION OBLIGATORIA
-Opcion 1 debe ser directa, agradable y facil de enviar
-Opcion 2 debe ser mas atractiva, emocional o coqueta segun el caso, sin exagerar
-Opcion 3 debe ser mas desarrollada, envolvente y con mas continuidad conversacional
-
-NO HAGAS
-No inventes nombres
-No cambies nombres
-No elimines palabras afectivas clave del borrador
-No copies frases tipicas quemadas
-No metas temas del perfil si no aportan
-No suenes necesitado, intenso, robotico ni demasiado perfecto
-No uses comillas, emojis, listas internas, etiquetas ni numeracion extra
-No des opciones cortas, secas o telegraficas
-No uses mas de una pregunta por opcion
-Sin tildes ni acentos en la salida
-
-CONTROL FINAL ANTES DE RESPONDER
-Verifica que las 3 opciones:
-- respeten el sentido principal del borrador
-- sean claramente distintas entre si
-- cumplan la longitud pedida
-- no incluyan encuentros ni planes presenciales
-- no inventen saludos ni primer contacto
-- no respondan al operador como si fuera la herramienta
-- esten listas para enviar
-
-SALIDA
-Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
-Una sola opcion por linea
-Nada mas
+REGLAS DE SALIDA (CRITICO PARA LA UI):
+- DEVUELVE EXACTAMENTE 3 OPCIONES NUMERADAS DEL 1 AL 3.
+- FORMATO OBLIGATORIO:
+1. Texto opcion 1
+2. Texto opcion 2
+3. Texto opcion 3
+- PROHIBIDO: Dar introducciones (ej: "Aquí tienes las opciones"), saludarme, explicar nada o usar comillas.
+- LONGITUDES: Opción 1 (200-260 chars), Opción 2 (200-260 chars), Opción 3 (320-420 chars).
+- Sin tildes ni acentos. Solo texto plano.
 `.trim();
 }
 
@@ -1478,89 +1421,20 @@ function construirUserPrompt({
   intencionOperador,
   guiaIntencion,
   permisosApertura,
-  metaEdicion
+  metaEdicion,
+  nombreReal
 }) {
   return `
-CASO REAL
+CASO REAL:
+BORRADOR DEL OPERADOR: """${textoPlano}"""
+ULTIMO MENSAJE DE CLIENTA: """${clientePlano || "Sin mensaje claro"}"""
+PERFIL VISIBLE CLIENTA: """${perfilPlano || "Sin perfil claro"}"""
+CONTEXTO RECIENTE: """${contextoPlano || "Sin contexto claro"}"""
 
-BORRADOR DEL OPERADOR
-"""
-${textoPlano}
-"""
+GUIA DE INTENCION: """${quitarTildes(guiaIntencion)}"""
+AFECTIVOS A CONSERVAR: """${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "Ninguno especifico"}"""
 
-ULTIMO MENSAJE REAL DE LA CLIENTA
-"""
-${clientePlano || "Sin mensaje claro"}
-"""
-
-CONTEXTO RECIENTE DEL CHAT
-"""
-${contextoPlano || "Sin contexto claro"}
-"""
-
-PERFIL VISIBLE DE LA CLIENTA
-"""
-${perfilPlano || "Sin perfil claro"}
-"""
-
-LECTURA DE LA CLIENTA
-${quitarTildes(lecturaCliente)}
-
-LECTURA DEL BORRADOR DEL OPERADOR
-${quitarTildes(lecturaOperador)}
-
-TONO DETECTADO DE LA CLIENTA
-${tonoCliente}
-
-INTENCION DETECTADA DEL OPERADOR
-${intencionOperador}
-
-GUIA DE INTENCION
-${quitarTildes(guiaIntencion)}
-
-SOLICITUD DE CONTACTO EXTERNO
-${contactoExterno ? "si" : "no"}
-
-ELEMENTOS DEL BORRADOR QUE DEBES CONSERVAR
-Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
-Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
-Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
-Meta edicion detectada: ${metaEdicion ? "si" : "no"}
-
-CONTROL DE APERTURA
-Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
-Primer contacto explicito en borrador: ${permisosApertura.primerContactoExplicito ? "si" : "no"}
-Chat con historial o reenganche: ${(permisosApertura.pareceChatViejo || permisosApertura.hayHistorial) ? "si" : "no"}
-
-REGLA DURA DE APERTURA
-Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
-Si el chat es NUEVO (sin historial): OBLIGATORIO usar algun dato del perfil de la clienta para engancharla.
-Si el chat es VIEJO (con historial): PROHIBIDO decir "quiero conocerte", "saber de ti" o reiniciar la presentacion. Ya se conocen, reengancha con familiaridad.
-
-REGLA DURA DE META
-Si el borrador parece una autoevaluacion o comentario sobre la calidad del mensaje, transformalo en un mensaje final para la clienta.
-No respondas literalmente a ese comentario ni como si el operador te estuviera hablando a ti.
-
-RESTRICCION ABSOLUTA
-Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
-
-OBJETIVO DE LAS 3 SALIDAS
-1. 200 a 260 caracteres, directa y agradable
-2. 200 a 260 caracteres, mas atractiva o emocional
-3. 320 a 420 caracteres, mas desarrollada y envolvente
-
-TAREA FINAL
-Reescribe el borrador del operador en 3 versiones mejores
-Conserva el sentido principal
-Ayuda aunque el borrador sea corto
-Usa el ultimo mensaje de la clienta como prioridad
-Usa contexto o perfil solo si mejoran de verdad la respuesta
-Mantente dentro de la app si hay solicitud de contacto externo
-No sugieras encuentros presenciales
-No inventes saludos
-No inventes primer contacto
-No contestes al operador como si el texto fuera una consulta para la herramienta
-Escribe como si la clienta fuera a leer el mensaje final
+TAREA: Crea las 3 mejores versiones siguiendo estrictamente las reglas de formato anteriores y manteniendo los apodos.
 `.trim();
 }
 
@@ -2165,6 +2039,8 @@ async function generarSugerencias({
   permisosApertura,
   metaEdicion
 }) {
+  const nombreReal = perfilPlano.match(/About\s+([a-zA-ZñÑáéíóúÁÉÍÓÚ]+)/i)?.[1] || "";
+
   const userPrompt = construirUserPrompt({
     textoPlano,
     clientePlano,
@@ -2178,18 +2054,19 @@ async function generarSugerencias({
     intencionOperador,
     guiaIntencion,
     permisosApertura,
-    metaEdicion
+    metaEdicion,
+    nombreReal
   });
 
-  const sysInstruction = construirSystemPrompt(permisosApertura, elementosClave, false);
+  const sysInstruction = construirSystemPrompt(permisosApertura, elementosClave, false, nombreReal);
 
   const data1 = await llamarGemini({
     lane: "sugerencias",
     modelName: OPENAI_MODEL_SUGGESTIONS, 
     systemInstruction: sysInstruction,
     prompt: userPrompt,
-    temperature: 0.56,
-    maxTokens: 360
+    temperature: 0.4, // Temperatua baja para forzar el cumplimiento estricto del formato
+    maxTokens: 400
   });
 
   const sugerencias1Raw = limpiarTextoIA(data1?.choices?.[0]?.message?.content || "")
@@ -2208,14 +2085,15 @@ async function generarSugerencias({
 }
 
 async function traducirTexto(texto = "") {
-  const sysInstruction = `Traduce al ingles natural de chat como una persona real escribiria.\n\nREGLAS\nNo usar comillas\nNo usar simbolos raros\nNo sonar perfecto\nDebe sonar natural y humano\nDevuelve solo una version final`;
+  // Instrucción técnica ultra restrictiva
+  const sysInstruction = `Eres un traductor técnico. TRADUCE DE ESPAÑOL A INGLÉS DE CHAT. \n\nREGLA ABSOLUTA: No des explicaciones. No digas 'aquí tienes'. No saludes. No hables conmigo. Solo devuelve el texto final en ingles, sin comillas. Si el texto es 'hola', devuelve 'hi'. Nada mas.`;
 
   const data = await llamarGemini({
     lane: "traduccion",
     modelName: OPENAI_MODEL_TRANSLATE, 
     systemInstruction: sysInstruction,
     prompt: String(texto ?? ""),
-    temperature: 0.3,
+    temperature: 0.1, // Temperatura casi 0 para que no invente ni hable
     maxTokens: 140
   });
 
@@ -2946,6 +2824,9 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     );
     const metaEdicion = analisisOperador.metaEdicion;
 
+    // AÑADIDO: Extracción del nombre de Giacomo
+    const nombreReal = perfilPlano.match(/About\s+([a-zA-ZñÑáéíóúÁÉÍÓÚ]+)/i)?.[1] || "";
+
     const fingerprint = crearFingerprintSugerencia({
       operador,
       textoPlano,
@@ -2971,7 +2852,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
             intencionOperador,
             guiaIntencion,
             permisosApertura,
-            metaEdicion
+            metaEdicion,
+            nombreReal // Pasamos el nombre al constructor
           });
         });
       }
@@ -2988,7 +2870,7 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
     );
     if (!sugerencias.length) {
-      sugerencias = ["Escribe un poco mas de contexto"];
+      sugerencias = ["Escribe un poco mas de contexto para ayudarte mejor"];
     }
 
     registrarConsumoAsync({
