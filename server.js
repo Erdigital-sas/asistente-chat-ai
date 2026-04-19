@@ -15,6 +15,17 @@ function leerEnteroEnv(nombre, fallback, min = 0, max = Number.MAX_SAFE_INTEGER)
   return n;
 }
 
+function leerDecimalEnv(nombre, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[nombre];
+  const n = Number.parseFloat(raw);
+
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+
+  return n;
+}
+
 function crearRequestId() {
   try {
     return randomUUID();
@@ -51,6 +62,13 @@ const runtimeStats = {
     inflightHits: 0,
     lastMs: 0
   },
+  warnings: {
+    total: 0,
+    ok: 0,
+    error: 0,
+    rowsUpserted: 0,
+    lastMs: 0
+  },
   openai: {
     total: 0,
     ok: 0,
@@ -66,7 +84,8 @@ const runtimeStats = {
     operatorList: 0,
     operatorCreate: 0,
     operatorUpdate: 0,
-    operatorDelete: 0
+    operatorDelete: 0,
+    dashboardLoads: 0
   }
 };
 
@@ -109,9 +128,12 @@ const API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const OPERATOR_SHARED_KEY = process.env.OPERATOR_SHARED_KEY || "2026";
+
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
-const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || SUPABASE_KEY || OPERATOR_SHARED_KEY;
+const ADMIN_TOKEN_SECRET =
+  process.env.ADMIN_TOKEN_SECRET || SUPABASE_KEY || OPERATOR_SHARED_KEY;
+
 const PORT = process.env.PORT || 3000;
 
 const OPENAI_URL =
@@ -245,11 +267,54 @@ const ADMIN_LOGIN_MAX_ATTEMPTS = leerEnteroEnv(
   50
 );
 
+const DEFAULT_MODEL_PRICING = {
+  "gpt-4o": { input: 2.5, output: 10 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6 },
+  "gpt-4.1": { input: 2, output: 8 },
+  "gpt-4.1-mini": { input: 0.4, output: 1.6 }
+};
+
 const TARGET_SUGGESTION_SPECS = [
   { min: 200, max: 260, ideal: 230 },
   { min: 200, max: 260, ideal: 230 },
   { min: 320, max: 420, ideal: 370 }
 ];
+
+function obtenerPricingDefaultPorModelo(model = "") {
+  const key = normalizarTexto(model);
+  return DEFAULT_MODEL_PRICING[key] || { input: 0, output: 0 };
+}
+
+const PRICING_SUGGESTION = obtenerPricingDefaultPorModelo(OPENAI_MODEL_SUGGESTIONS);
+const PRICING_TRANSLATE = obtenerPricingDefaultPorModelo(OPENAI_MODEL_TRANSLATE);
+
+const SUGGESTION_INPUT_COST_PER_1M = leerDecimalEnv(
+  "SUGGESTION_INPUT_COST_PER_1M",
+  PRICING_SUGGESTION.input,
+  0,
+  100000
+);
+
+const SUGGESTION_OUTPUT_COST_PER_1M = leerDecimalEnv(
+  "SUGGESTION_OUTPUT_COST_PER_1M",
+  PRICING_SUGGESTION.output,
+  0,
+  100000
+);
+
+const TRANSLATE_INPUT_COST_PER_1M = leerDecimalEnv(
+  "TRANSLATE_INPUT_COST_PER_1M",
+  PRICING_TRANSLATE.input,
+  0,
+  100000
+);
+
+const TRANSLATE_OUTPUT_COST_PER_1M = leerDecimalEnv(
+  "TRANSLATE_OUTPUT_COST_PER_1M",
+  PRICING_TRANSLATE.output,
+  0,
+  100000
+);
 
 // ==========================
 // VALIDACION INICIAL
@@ -707,6 +772,61 @@ function crearFingerprintSugerencia({
   ].join("||");
 }
 
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function redondearDinero(n = 0) {
+  return Number(safeNumber(n, 0).toFixed(6));
+}
+
+function formatearFechaISO(date = new Date()) {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function primerDiaMesUTC(date = new Date()) {
+  return formatearFechaISO(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)));
+}
+
+function esFechaISOValida(texto = "") {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(texto || ""));
+}
+
+function sumarDiasISO(fechaISO = "", dias = 0) {
+  const d = new Date(`${fechaISO}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) return "";
+
+  d.setUTCDate(d.getUTCDate() + dias);
+  return formatearFechaISO(d);
+}
+
+function compararFechasISO(a = "", b = "") {
+  return String(a).localeCompare(String(b));
+}
+
+function construirRangoFechas(fromRaw = "", toRaw = "") {
+  const hoy = formatearFechaISO(new Date());
+  let from = esFechaISOValida(fromRaw) ? fromRaw : primerDiaMesUTC(new Date());
+  let to = esFechaISOValida(toRaw) ? toRaw : hoy;
+
+  if (compararFechasISO(from, to) > 0) {
+    const temp = from;
+    from = to;
+    to = temp;
+  }
+
+  return {
+    from,
+    to,
+    startIso: `${from}T00:00:00.000Z`,
+    endExclusiveIso: `${sumarDiasISO(to, 1)}T00:00:00.000Z`
+  };
+}
+
 function base64UrlEncode(input = "") {
   const buffer = Buffer.isBuffer(input)
     ? input
@@ -742,6 +862,69 @@ function compararSeguro(a = "", b = "") {
   } catch (_err) {
     return false;
   }
+}
+
+function obtenerCostosPorTipo(tipo = "") {
+  const t = String(tipo || "").toUpperCase();
+
+  if (t.startsWith("IA")) {
+    return {
+      input: SUGGESTION_INPUT_COST_PER_1M,
+      output: SUGGESTION_OUTPUT_COST_PER_1M,
+      lane: "IA"
+    };
+  }
+
+  if (t.startsWith("TRAD")) {
+    return {
+      input: TRANSLATE_INPUT_COST_PER_1M,
+      output: TRANSLATE_OUTPUT_COST_PER_1M,
+      lane: "TRAD"
+    };
+  }
+
+  return {
+    input: 0,
+    output: 0,
+    lane: "OTRO"
+  };
+}
+
+function calcularCostoEstimado({
+  tipo = "",
+  prompt_tokens = 0,
+  completion_tokens = 0
+}) {
+  const costos = obtenerCostosPorTipo(tipo);
+
+  const inputCost = (safeNumber(prompt_tokens) / 1_000_000) * costos.input;
+  const outputCost = (safeNumber(completion_tokens) / 1_000_000) * costos.output;
+
+  return redondearDinero(inputCost + outputCost);
+}
+
+async function seleccionarTodasLasPaginas(builderFactory, pageSize = 1000) {
+  let from = 0;
+  const rows = [];
+
+  while (true) {
+    const { data, error } = await builderFactory(from, from + pageSize - 1);
+
+    if (error) {
+      throw error;
+    }
+
+    const chunk = Array.isArray(data) ? data : [];
+    rows.push(...chunk);
+
+    if (chunk.length < pageSize) {
+      break;
+    }
+
+    from += pageSize;
+  }
+
+  return rows;
 }
 
 // ==========================
@@ -1885,7 +2068,7 @@ async function autorizarOperador(req, res, next) {
     const { operador = "", clave = "" } = req.body || {};
     const nombreValido = await validarOperadorAcceso(operador, clave);
     req.operadorAutorizado = nombreValido;
-    next();
+    return next();
   } catch (err) {
     return res.json({
       ok: false,
@@ -1938,6 +2121,81 @@ function registrarConsumoAsync(payload) {
       console.error("Error guardando consumo async:", err.message);
     }
   });
+}
+
+// ==========================
+// WARNINGS
+// ==========================
+function limpiarCountsWarning(counts = {}) {
+  const limpio = {};
+  const entries = Object.entries(counts || {}).slice(0, 100);
+
+  for (const [fraseRaw, cantidadRaw] of entries) {
+    const frase = normalizarEspacios(String(fraseRaw || "")).slice(0, 180);
+    const cantidad = Math.max(0, Math.min(999999, Number.parseInt(cantidadRaw, 10) || 0));
+
+    if (!frase || cantidad <= 0) continue;
+    limpio[frase] = (limpio[frase] || 0) + cantidad;
+  }
+
+  return limpio;
+}
+
+async function guardarWarningResumen({
+  operador = "",
+  extension_id = "",
+  fecha = "",
+  counts = {}
+}) {
+  const operadorFinal = formatearNombreOperador(operador || "");
+  const fechaFinal = esFechaISOValida(fecha) ? fecha : formatearFechaISO(new Date());
+  const countsLimpios = limpiarCountsWarning(counts);
+
+  if (!operadorFinal) {
+    throw new Error("Operador invalido para warning");
+  }
+
+  const frases = Object.keys(countsLimpios);
+  if (!frases.length) {
+    return { rowsUpserted: 0 };
+  }
+
+  const { data: existentes, error: errorRead } = await supabase
+    .from("warning_resumen_diario")
+    .select("frase, cantidad_total")
+    .eq("operador", operadorFinal)
+    .eq("fecha", fechaFinal)
+    .in("frase", frases);
+
+  if (errorRead) {
+    throw new Error("No se pudieron leer los warnings existentes");
+  }
+
+  const actuales = new Map();
+  for (const row of existentes || []) {
+    actuales.set(String(row.frase || ""), safeNumber(row.cantidad_total));
+  }
+
+  const payload = frases.map((frase) => ({
+    operador: operadorFinal,
+    extension_id: normalizarEspacios(extension_id) || "",
+    fecha: fechaFinal,
+    frase,
+    cantidad_total: safeNumber(actuales.get(frase)) + safeNumber(countsLimpios[frase]),
+    updated_at: new Date().toISOString()
+  }));
+
+  const { error } = await supabase
+    .from("warning_resumen_diario")
+    .upsert(payload, {
+      onConflict: "operador,fecha,frase"
+    });
+
+  if (error) {
+    throw new Error(error.message || "No se pudo guardar warning");
+  }
+
+  return { rowsUpserted: payload.length };
 }
 
 // ==========================
@@ -2207,6 +2465,264 @@ Devuelve solo una version final
 }
 
 // ==========================
+// ANALYTICS
+// ==========================
+async function cargarConsumoPorRango(range) {
+  return seleccionarTodasLasPaginas((from, to) =>
+    supabase
+      .from("consumo")
+      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,created_at,extension_id")
+      .gte("created_at", range.startIso)
+      .lt("created_at", range.endExclusiveIso)
+      .order("created_at", { ascending: false })
+      .range(from, to)
+  );
+}
+
+async function cargarWarningsPorRango(range) {
+  return seleccionarTodasLasPaginas((from, to) =>
+    supabase
+      .from("warning_resumen_diario")
+      .select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at")
+      .gte("fecha", range.from)
+      .lte("fecha", range.to)
+      .order("fecha", { ascending: false })
+      .range(from, to)
+  );
+}
+
+function crearSummaryDashboard() {
+  return {
+    total_requests: 0,
+    ok_requests: 0,
+    error_requests: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    cache_hits: 0,
+    shared_hits: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    active_operators: 0,
+    warnings_total: 0,
+    warnings_unique_pairs: 0
+  };
+}
+
+function crearOperatorStat(operador = "") {
+  return {
+    operador,
+    requests_total: 0,
+    ok_requests: 0,
+    error_requests: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    cache_hits: 0,
+    shared_hits: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0,
+    last_activity: ""
+  };
+}
+
+function crearSerieDia(fecha = "") {
+  return {
+    fecha,
+    requests_total: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0
+  };
+}
+
+function construirDashboardAnalytics({
+  consumoRows = [],
+  warningRows = [],
+  range = construirRangoFechas()
+}) {
+  const summary = crearSummaryDashboard();
+  const operatorMap = new Map();
+  const warningOperatorTotals = new Map();
+  const warningTopMap = new Map();
+  const seriesMap = new Map();
+
+  for (const row of consumoRows) {
+    const operador = formatearNombreOperador(row.operador || "anon") || "Anon";
+    const tipo = normalizarEspacios(row.tipo || "");
+    const totalTokens = safeNumber(row.tokens);
+    const promptTokens = safeNumber(row.prompt_tokens);
+    const completionTokens = safeNumber(row.completion_tokens);
+    const requestOk = row.request_ok !== false;
+    const fecha = String(row.created_at || "").slice(0, 10) || range.from;
+
+    const cost = calcularCostoEstimado({
+      tipo,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens
+    });
+
+    summary.total_requests += 1;
+    if (requestOk) summary.ok_requests += 1;
+    else summary.error_requests += 1;
+
+    if (tipo.startsWith("IA")) summary.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) summary.trad_requests += 1;
+    if (tipo.endsWith("_CACHE")) summary.cache_hits += 1;
+    if (tipo.endsWith("_SHARED")) summary.shared_hits += 1;
+
+    summary.total_tokens += totalTokens;
+    summary.prompt_tokens += promptTokens;
+    summary.completion_tokens += completionTokens;
+    summary.estimated_cost_total += cost;
+
+    if (!operatorMap.has(operador)) {
+      operatorMap.set(operador, crearOperatorStat(operador));
+    }
+
+    const op = operatorMap.get(operador);
+    op.requests_total += 1;
+    if (requestOk) op.ok_requests += 1;
+    else op.error_requests += 1;
+    if (tipo.startsWith("IA")) op.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) op.trad_requests += 1;
+    if (tipo.endsWith("_CACHE")) op.cache_hits += 1;
+    if (tipo.endsWith("_SHARED")) op.shared_hits += 1;
+    op.total_tokens += totalTokens;
+    op.prompt_tokens += promptTokens;
+    op.completion_tokens += completionTokens;
+    op.estimated_cost_total += cost;
+
+    if (!op.last_activity || String(row.created_at || "") > op.last_activity) {
+      op.last_activity = String(row.created_at || "");
+    }
+
+    if (!seriesMap.has(fecha)) {
+      seriesMap.set(fecha, crearSerieDia(fecha));
+    }
+
+    const serie = seriesMap.get(fecha);
+    serie.requests_total += 1;
+    if (tipo.startsWith("IA")) serie.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) serie.trad_requests += 1;
+    serie.total_tokens += totalTokens;
+    serie.prompt_tokens += promptTokens;
+    serie.completion_tokens += completionTokens;
+    serie.estimated_cost_total += cost;
+  }
+
+  for (const row of warningRows) {
+    const operador = formatearNombreOperador(row.operador || "anon") || "Anon";
+    const frase = normalizarEspacios(row.frase || "");
+    const cantidad = safeNumber(row.cantidad_total);
+    const fecha = String(row.fecha || "") || range.from;
+
+    summary.warnings_total += cantidad;
+
+    const pairKey = `${operador}||${normalizarTexto(frase)}`;
+    if (!warningTopMap.has(pairKey)) {
+      warningTopMap.set(pairKey, {
+        operador,
+        frase,
+        total_count: 0,
+        last_date: fecha
+      });
+    }
+
+    const top = warningTopMap.get(pairKey);
+    top.total_count += cantidad;
+    if (!top.last_date || fecha > top.last_date) {
+      top.last_date = fecha;
+    }
+
+    warningOperatorTotals.set(
+      operador,
+      safeNumber(warningOperatorTotals.get(operador)) + cantidad
+    );
+
+    if (!seriesMap.has(fecha)) {
+      seriesMap.set(fecha, crearSerieDia(fecha));
+    }
+
+    const serie = seriesMap.get(fecha);
+    serie.warnings_total += cantidad;
+  }
+
+  summary.warnings_unique_pairs = warningTopMap.size;
+
+  for (const [operador, totalWarnings] of warningOperatorTotals.entries()) {
+    if (!operatorMap.has(operador)) {
+      operatorMap.set(operador, crearOperatorStat(operador));
+    }
+
+    operatorMap.get(operador).warnings_total = totalWarnings;
+  }
+
+  summary.active_operators = operatorMap.size;
+  summary.estimated_cost_total = redondearDinero(summary.estimated_cost_total);
+
+  const operatorStats = Array.from(operatorMap.values())
+    .map((op) => ({
+      ...op,
+      estimated_cost_total: redondearDinero(op.estimated_cost_total)
+    }))
+    .sort((a, b) => {
+      if (b.estimated_cost_total !== a.estimated_cost_total) {
+        return b.estimated_cost_total - a.estimated_cost_total;
+      }
+
+      if (b.total_tokens !== a.total_tokens) {
+        return b.total_tokens - a.total_tokens;
+      }
+
+      return a.operador.localeCompare(b.operador);
+    });
+
+  const warningTop = Array.from(warningTopMap.values())
+    .sort((a, b) => {
+      if (b.total_count !== a.total_count) {
+        return b.total_count - a.total_count;
+      }
+
+      return a.operador.localeCompare(b.operador);
+    });
+
+  const series = Array.from(seriesMap.values())
+    .map((x) => ({
+      ...x,
+      estimated_cost_total: redondearDinero(x.estimated_cost_total)
+    }))
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return {
+    generated_at: new Date().toISOString(),
+    range: {
+      from: range.from,
+      to: range.to
+    },
+    summary,
+    operator_stats: operatorStats,
+    warning_top: warningTop,
+    series,
+    pricing: {
+      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
+      translate_model: OPENAI_MODEL_TRANSLATE,
+      suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
+      suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+      translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
+      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
+    }
+  };
+}
+
+// ==========================
 // PANEL ADMIN STATIC
 // ==========================
 app.get(["/admin", "/admin/"], (_req, res) => {
@@ -2228,6 +2744,14 @@ app.get("/health", (_req, res) => {
     admin: {
       configured: adminEstaConfigurado(),
       token_ttl_hours: ADMIN_TOKEN_TTL_HOURS
+    },
+    pricing: {
+      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
+      translate_model: OPENAI_MODEL_TRANSLATE,
+      suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
+      suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+      translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
+      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
     },
     models: {
       sugerencias: OPENAI_MODEL_SUGGESTIONS,
@@ -2519,6 +3043,33 @@ app.delete("/admin-api/operators/:id", autorizarAdmin, async (req, res) => {
   }
 });
 
+app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
+  try {
+    const range = construirRangoFechas(req.query?.from || "", req.query?.to || "");
+
+    const [consumoRows, warningRows] = await Promise.all([
+      cargarConsumoPorRango(range),
+      cargarWarningsPorRango(range)
+    ]);
+
+    runtimeStats.admin.dashboardLoads += 1;
+
+    return res.json({
+      ok: true,
+      ...construirDashboardAnalytics({
+        consumoRows,
+        warningRows,
+        range
+      })
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo cargar el dashboard"
+    });
+  }
+});
+
 // ==========================
 // LOGIN OPERADOR
 // ==========================
@@ -2527,6 +3078,46 @@ app.post("/login", autorizarOperador, async (req, res) => {
     ok: true,
     operador: req.operadorAutorizado
   });
+});
+
+// ==========================
+// WARNING SYNC
+// ==========================
+app.post("/warning-sync", autorizarOperador, async (req, res) => {
+  const startedAt = Date.now();
+  runtimeStats.warnings.total += 1;
+
+  try {
+    const {
+      extension_id = "",
+      fecha = "",
+      counts = {}
+    } = req.body || {};
+
+    const result = await guardarWarningResumen({
+      operador: req.operadorAutorizado,
+      extension_id,
+      fecha,
+      counts
+    });
+
+    runtimeStats.warnings.ok += 1;
+    runtimeStats.warnings.rowsUpserted += safeNumber(result.rowsUpserted);
+    runtimeStats.warnings.lastMs = Date.now() - startedAt;
+
+    return res.json({
+      ok: true,
+      rows_upserted: result.rowsUpserted || 0
+    });
+  } catch (err) {
+    runtimeStats.warnings.error += 1;
+    runtimeStats.warnings.lastMs = Date.now() - startedAt;
+
+    return res.json({
+      ok: false,
+      error: err.message || "No se pudo sincronizar warning"
+    });
+  }
 });
 
 // ==========================
