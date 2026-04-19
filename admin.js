@@ -18,8 +18,11 @@ const state = {
     operator_stats: [],
     warning_top: [],
     series: [],
+    operator_filter: [],
     pricing: {}
   },
+  analyticsSelectedOperators: [],
+  analyticsOperatorSearchOpen: false,
   flashTimer: null
 };
 
@@ -157,8 +160,11 @@ function clearSession() {
     operator_stats: [],
     warning_top: [],
     series: [],
+    operator_filter: [],
     pricing: {}
   };
+  state.analyticsSelectedOperators = [];
+  state.analyticsOperatorSearchOpen = false;
 
   localStorage.removeItem(STORAGE_TOKEN_KEY);
   localStorage.removeItem(STORAGE_USER_KEY);
@@ -336,6 +342,160 @@ function renderOperators() {
   }).join("");
 }
 
+// ==========================
+// OPERADORES PARA FILTRO ANALYTICS
+// ==========================
+function obtenerNombresOperadoresAnalytics() {
+  const nombres = state.operators
+    .map((x) => normalizarEspacios(x.nombre || ""))
+    .filter(Boolean);
+
+  return [...new Set(nombres)].sort((a, b) => a.localeCompare(b, "es"));
+}
+
+function actualizarInputOcultoOperadores() {
+  if (!existeEl("analytics-operators-value")) return;
+  $("analytics-operators-value").value = state.analyticsSelectedOperators.join(",");
+}
+
+function renderSelectedOperatorsCount() {
+  const el = $("analytics-selected-count");
+  if (!el) return;
+
+  const total = state.analyticsSelectedOperators.length;
+
+  if (!total) {
+    el.textContent = "Todos";
+    return;
+  }
+
+  el.textContent = total === 1
+    ? "1 operador"
+    : `${total} operadores`;
+}
+
+function renderSelectedOperatorsChips() {
+  const box = $("analytics-selected-operators");
+  if (!box) return;
+
+  const selected = state.analyticsSelectedOperators;
+
+  if (!selected.length) {
+    box.innerHTML = `<span class="meta">Sin filtro. Mostrando todos los operadores.</span>`;
+    return;
+  }
+
+  box.innerHTML = selected.map((name) => `
+    <span class="operator-chip">
+      ${escapeHtml(name)}
+      <button type="button" data-remove-operator="${escapeHtml(name)}">×</button>
+    </span>
+  `).join("");
+}
+
+function filtrarOperadoresDisponibles(query = "") {
+  const nombres = obtenerNombresOperadoresAnalytics();
+  const q = normalizarEspacios(query).toLowerCase();
+
+  if (!q) return nombres.slice(0, 80);
+
+  return nombres
+    .filter((name) => name.toLowerCase().includes(q))
+    .slice(0, 80);
+}
+
+function renderOperatorSearchResults() {
+  const results = $("analytics-operator-results");
+  const input = $("analytics-operator-search");
+
+  if (!results || !input) return;
+
+  const show = state.analyticsOperatorSearchOpen;
+  const query = input.value || "";
+  const filtered = filtrarOperadoresDisponibles(query);
+
+  if (!show) {
+    results.classList.add("hidden");
+    results.innerHTML = "";
+    return;
+  }
+
+  if (!filtered.length) {
+    results.classList.remove("hidden");
+    results.innerHTML = `<div class="operator-option"><span>No se encontraron operadores</span></div>`;
+    return;
+  }
+
+  results.classList.remove("hidden");
+  results.innerHTML = filtered.map((name) => {
+    const selected = state.analyticsSelectedOperators.includes(name);
+
+    return `
+      <div class="operator-option ${selected ? "active" : ""}" data-operator-option="${escapeHtml(name)}">
+        <span>${escapeHtml(name)}</span>
+        <small>${selected ? "Seleccionado" : "Agregar"}</small>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderAnalyticsOperatorFilter() {
+  actualizarInputOcultoOperadores();
+  renderSelectedOperatorsCount();
+  renderSelectedOperatorsChips();
+  renderOperatorSearchResults();
+}
+
+function limpiarBusquedaOperadorAnalytics() {
+  if (!existeEl("analytics-operator-search")) return;
+  $("analytics-operator-search").value = "";
+}
+
+function agregarOperadorAnalytics(nombre = "") {
+  const limpio = normalizarEspacios(nombre);
+  if (!limpio) return false;
+  if (state.analyticsSelectedOperators.includes(limpio)) return false;
+
+  state.analyticsSelectedOperators.push(limpio);
+  state.analyticsSelectedOperators.sort((a, b) => a.localeCompare(b, "es"));
+  return true;
+}
+
+function removerOperadorAnalytics(nombre = "") {
+  const limpio = normalizarEspacios(nombre);
+  const prev = state.analyticsSelectedOperators.length;
+
+  state.analyticsSelectedOperators = state.analyticsSelectedOperators.filter((x) => x !== limpio);
+  return prev !== state.analyticsSelectedOperators.length;
+}
+
+function alternarOperadorAnalytics(nombre = "") {
+  const limpio = normalizarEspacios(nombre);
+  if (!limpio) return false;
+
+  if (state.analyticsSelectedOperators.includes(limpio)) {
+    return removerOperadorAnalytics(limpio);
+  }
+
+  return agregarOperadorAnalytics(limpio);
+}
+
+function limpiarFiltroOperadoresAnalytics() {
+  state.analyticsSelectedOperators = [];
+  renderAnalyticsOperatorFilter();
+}
+
+function depurarFiltroOperadoresAnalytics() {
+  const disponibles = new Set(obtenerNombresOperadoresAnalytics());
+  const prev = state.analyticsSelectedOperators.join("||");
+
+  state.analyticsSelectedOperators = state.analyticsSelectedOperators.filter((name) => disponibles.has(name));
+
+  renderAnalyticsOperatorFilter();
+
+  return prev !== state.analyticsSelectedOperators.join("||");
+}
+
 async function loadOperators() {
   const data = await api("/admin-api/operators");
   state.operators = Array.isArray(data.operators) ? data.operators : [];
@@ -347,6 +507,9 @@ async function loadOperators() {
 
   renderSummary();
   renderOperators();
+
+  const filtroCambio = depurarFiltroOperadoresAnalytics();
+  return { filtroCambio };
 }
 
 // ==========================
@@ -386,6 +549,10 @@ function getAnalyticsRange() {
 
 function getAnalyticsGroupMode() {
   return existeEl("analytics-group") ? $("analytics-group").value : "day";
+}
+
+function getAnalyticsOperatorQueryValue() {
+  return state.analyticsSelectedOperators.join(",");
 }
 
 function renderPricingInfo() {
@@ -490,7 +657,7 @@ function renderSeriesTable() {
   const rows = agruparSeries(series, mode);
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">No hay datos para ese rango.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="empty">No hay datos para ese rango o filtro.</td></tr>`;
     return;
   }
 
@@ -514,7 +681,7 @@ function renderWarningTable() {
   const rows = Array.isArray(state.dashboard?.warning_top) ? state.dashboard.warning_top : [];
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="4" class="empty">No hay warnings en este rango.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="4" class="empty">No hay warnings en este rango o filtro.</td></tr>`;
     return;
   }
 
@@ -535,7 +702,7 @@ function renderOperatorAnalyticsTable() {
   const rows = Array.isArray(state.dashboard?.operator_stats) ? state.dashboard.operator_stats : [];
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="10" class="empty">No hay consumo para ese rango.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="empty">No hay consumo para ese rango o filtro.</td></tr>`;
     return;
   }
 
@@ -570,6 +737,11 @@ async function loadDashboard() {
   if (range.from) params.set("from", range.from);
   if (range.to) params.set("to", range.to);
 
+  const operadores = getAnalyticsOperatorQueryValue();
+  if (operadores) {
+    params.set("operadores", operadores);
+  }
+
   const data = await api(`/admin-api/dashboard?${params.toString()}`);
   state.dashboard = data || {
     generated_at: "",
@@ -578,6 +750,7 @@ async function loadDashboard() {
     operator_stats: [],
     warning_top: [],
     series: [],
+    operator_filter: [],
     pricing: {}
   };
 
@@ -590,6 +763,7 @@ async function loadDashboard() {
 async function hydrateSession() {
   await loadHealth();
   initAnalyticsDates();
+  renderAnalyticsOperatorFilter();
 
   if (!state.token) {
     setView(false);
@@ -605,13 +779,14 @@ async function hydrateSession() {
     setView(true);
     renderSummary();
 
+    await loadOperators();
+
     const results = await Promise.allSettled([
-      loadOperators(),
       loadDashboard(),
       loadHealth()
     ]);
 
-    const dashboardError = results[1]?.status === "rejected" ? results[1].reason : null;
+    const dashboardError = results[0]?.status === "rejected" ? results[0].reason : null;
     if (dashboardError) {
       setAnalyticsEmptyState(dashboardError?.message || "No se pudo cargar analytics.");
       showFlash(dashboardError?.message || "No se pudo cargar analytics", "warning");
@@ -654,13 +829,14 @@ async function onLoginSubmit(e) {
     setView(true);
     renderSummary();
 
+    await loadOperators();
+
     const results = await Promise.allSettled([
-      loadOperators(),
       loadDashboard(),
       loadHealth()
     ]);
 
-    const dashboardError = results[1]?.status === "rejected" ? results[1].reason : null;
+    const dashboardError = results[0]?.status === "rejected" ? results[0].reason : null;
     if (dashboardError) {
       setAnalyticsEmptyState(dashboardError?.message || "No se pudo cargar analytics.");
       showFlash(dashboardError?.message || "Sesion iniciada, pero fallo analytics", "warning");
@@ -709,7 +885,11 @@ async function onCreateOperator(e) {
     };
 
     showFlash(mapa[data.action] || "Operador guardado", "success");
-    await loadOperators();
+
+    const { filtroCambio } = await loadOperators();
+    if (filtroCambio) {
+      await loadDashboard();
+    }
   } catch (err) {
     showFlash(err.message || "No se pudo guardar", "error");
   } finally {
@@ -751,8 +931,14 @@ async function onBulkCreate(e) {
 
     state.operators = Array.isArray(data.operators) ? data.operators : [];
     state.summary = data.summary || state.summary;
+
     renderSummary();
     renderOperators();
+
+    const filtroCambio = depurarFiltroOperadoresAnalytics();
+    if (filtroCambio) {
+      await loadDashboard();
+    }
 
     showFlash(
       partes.join(" · ") || "Alta masiva completada",
@@ -777,7 +963,10 @@ async function toggleOperator(id, activo) {
     activo ? "success" : "warning"
   );
 
-  await loadOperators();
+  const { filtroCambio } = await loadOperators();
+  if (filtroCambio) {
+    await loadDashboard();
+  }
 }
 
 async function deleteOperator(id, nombre = "") {
@@ -786,7 +975,11 @@ async function deleteOperator(id, nombre = "") {
   });
 
   showFlash(`Operador eliminado: ${nombre || id}`, "error");
-  await loadOperators();
+
+  const { filtroCambio } = await loadOperators();
+  if (filtroCambio) {
+    await loadDashboard();
+  }
 }
 
 // ==========================
@@ -821,25 +1014,16 @@ function bindEvents() {
     setView(false);
     renderSummary();
     renderOperators();
+    renderAnalyticsOperatorFilter();
     setAnalyticsEmptyState("Sesion admin cerrada.");
     showFlash("Sesion admin cerrada", "info");
   });
 
   $("refresh-btn").addEventListener("click", async () => {
     try {
-      const results = await Promise.allSettled([
-        loadHealth(),
-        loadOperators(),
-        loadDashboard()
-      ]);
-
-      const dashboardError = results[2]?.status === "rejected" ? results[2].reason : null;
-      if (dashboardError) {
-        setAnalyticsEmptyState(dashboardError?.message || "No se pudo cargar analytics.");
-        showFlash(dashboardError?.message || "Panel actualizado con analytics incompleto", "warning");
-        return;
-      }
-
+      await loadHealth();
+      await loadOperators();
+      await loadDashboard();
       showFlash("Panel actualizado", "success");
     } catch (err) {
       showFlash(err.message || "No se pudo actualizar", "error");
@@ -921,6 +1105,92 @@ function bindEvents() {
       aplicarRangoRapido(getStartOfLastNDays(30), getTodayLocal());
     });
   }
+
+  if (existeEl("analytics-operator-search")) {
+    $("analytics-operator-search").addEventListener("focus", () => {
+      state.analyticsOperatorSearchOpen = true;
+      renderOperatorSearchResults();
+    });
+
+    $("analytics-operator-search").addEventListener("input", () => {
+      state.analyticsOperatorSearchOpen = true;
+      renderOperatorSearchResults();
+    });
+
+    $("analytics-operator-search").addEventListener("keydown", async (e) => {
+      if (e.key === "Escape") {
+        state.analyticsOperatorSearchOpen = false;
+        renderOperatorSearchResults();
+      }
+
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const options = filtrarOperadoresDisponibles($("analytics-operator-search").value || "");
+        if (!options.length) return;
+
+        const changed = alternarOperadorAnalytics(options[0]);
+        limpiarBusquedaOperadorAnalytics();
+        state.analyticsOperatorSearchOpen = false;
+        renderAnalyticsOperatorFilter();
+
+        if (changed) {
+          await aplicarFiltroAnalytics();
+        }
+      }
+    });
+  }
+
+  if (existeEl("analytics-operator-results")) {
+    $("analytics-operator-results").addEventListener("click", async (e) => {
+      const item = e.target.closest("[data-operator-option]");
+      if (!item) return;
+
+      const name = normalizarEspacios(item.getAttribute("data-operator-option") || "");
+      const changed = alternarOperadorAnalytics(name);
+
+      limpiarBusquedaOperadorAnalytics();
+      state.analyticsOperatorSearchOpen = false;
+      renderAnalyticsOperatorFilter();
+
+      if (changed) {
+        await aplicarFiltroAnalytics();
+      }
+    });
+  }
+
+  if (existeEl("analytics-selected-operators")) {
+    $("analytics-selected-operators").addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-remove-operator]");
+      if (!btn) return;
+
+      const name = normalizarEspacios(btn.getAttribute("data-remove-operator") || "");
+      const changed = removerOperadorAnalytics(name);
+      renderAnalyticsOperatorFilter();
+
+      if (changed) {
+        await aplicarFiltroAnalytics();
+      }
+    });
+  }
+
+  if (existeEl("analytics-clear-operators-btn")) {
+    $("analytics-clear-operators-btn").addEventListener("click", async () => {
+      limpiarFiltroOperadoresAnalytics();
+      await aplicarFiltroAnalytics();
+    });
+  }
+
+  document.addEventListener("click", (e) => {
+    const input = $("analytics-operator-search");
+    const results = $("analytics-operator-results");
+    const wrap = input?.closest(".operator-filter-wrap");
+
+    if (!wrap) return;
+    if (wrap.contains(e.target)) return;
+
+    state.analyticsOperatorSearchOpen = false;
+    renderOperatorSearchResults();
+  });
 }
 
 bindEvents();
