@@ -950,6 +950,21 @@ function contieneTemaEncuentro(texto = "") {
 }
 
 // ==========================
+// META DEL OPERADOR
+// ==========================
+const META_EDICION_REGEX =
+  /\b(no fui lo suficientemente interesante|no fui suficiente|no fue suficiente|mi mensaje|el mensaje|otro mensaje|mensaje mas interesante|mensaje mejor|captar tu atencion|capturar tu atencion|sonar mas interesante|quiero decirle|como le digo|ayudame a decir|mejorame esto|reescribe esto|hazlo mas atractivo|hazlo mejor|no fui tan interesante|no fui lo bastante interesante)\b/i;
+
+const META_MISFIRE_RESPONSE_REGEX =
+  /^(espero que no hayas pensado eso|no creo que haya sido eso|a veces es dificil captar|a veces no es facil captar|entiendo que puedas pensar eso|entiendo que pienses eso|no creo que lo hayas tomado asi)\b/i;
+
+function detectarMetaEdicionOperador(texto = "") {
+  const t = normalizarTexto(texto);
+  if (!t) return false;
+  return META_EDICION_REGEX.test(t);
+}
+
+// ==========================
 // CONTEXTO RELEVANTE
 // ==========================
 const STOPWORDS_RELEVANCIA = new Set([
@@ -1195,11 +1210,17 @@ function esSugerenciaDebil(
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
   if (violaReglasApertura(texto, permisosApertura)) return true;
+  if (META_MISFIRE_RESPONSE_REGEX.test(t)) return true;
 
   if (
     originalEsInicioOEnganche(original) &&
     pareceResponderComoSiLaClientaLeHubieraPreguntado(texto)
   ) {
+    return true;
+  }
+
+  if (detectarMetaEdicionOperador(original) &&
+      /^(espero|no creo|entiendo que|a veces es dificil|a veces no es facil)/.test(t)) {
     return true;
   }
 
@@ -1433,6 +1454,7 @@ function analizarMensajeOperador(texto = "") {
     /(vi que|me llamo la atencion|tu perfil|intereses en comun|libro favorito|lectura|travel|music|cooking|conocer mas de ti)/.test(t);
 
   const encuentroPresencial = contieneTemaEncuentro(original);
+  const metaEdicion = detectarMetaEdicionOperador(original);
 
   const palabras = t.split(/\s+/).filter(Boolean);
 
@@ -1445,12 +1467,17 @@ function analizarMensajeOperador(texto = "") {
     mezclaDeIdeas,
     primerContacto,
     encuentroPresencial,
-    mensajeCorto: palabras.length <= 9 || t.length < 55
+    mensajeCorto: palabras.length <= 9 || t.length < 55,
+    metaEdicion
   };
 }
 
 function construirLecturaOperador(analisis) {
   const reglas = [];
+
+  if (analisis.metaEdicion) {
+    reglas.push("El borrador parece una autoevaluacion o instruccion implicita del operador. Debes convertirlo en un mensaje final para la clienta, no responderle a la herramienta.");
+  }
 
   if (analisis.preguntaGenerica) {
     reglas.push("La pregunta del operador esta generica. Mejora el gancho.");
@@ -1652,6 +1679,11 @@ Las lineas marcadas como CLIENTA son de ella
 Las lineas marcadas como OPERADOR son mensajes previos del operador
 No confundas esos roles
 
+META DEL OPERADOR
+A veces el operador escribe una autoevaluacion o una instruccion implicita de edicion.
+Si el borrador habla de que no fue interesante, que el mensaje no fue suficiente, que quiere captar atencion, que quiere decirle algo mejor o similar, debes reinterpretarlo como intencion de edicion y convertirlo en un mensaje final natural para la clienta.
+No respondas literalmente a ese comentario como si la clienta lo hubiera dicho ni como si el operador te estuviera hablando a ti.
+
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
 
@@ -1711,8 +1743,9 @@ Verifica que las 3 opciones:
 - cumplan la longitud pedida
 - no incluyan encuentros ni planes presenciales
 - no inventen saludos ni primer contacto
+- no respondan al operador como si fuera la herramienta
 - esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado o alusiones a encuentros del intento anterior" : ""}
+${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, respuesta meta equivocada o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA
 Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
@@ -1733,7 +1766,8 @@ function construirUserPrompt({
   elementosClave,
   intencionOperador,
   guiaIntencion,
-  permisosApertura
+  permisosApertura,
+  metaEdicion
 }) {
   return `
 CASO REAL
@@ -1780,6 +1814,7 @@ ELEMENTOS DEL BORRADOR QUE DEBES CONSERVAR
 Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
 Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
 Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
+Meta edicion detectada: ${metaEdicion ? "si" : "no"}
 
 CONTROL DE APERTURA
 Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
@@ -1790,6 +1825,10 @@ REGLA DURA DE APERTURA
 Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
 Si el operador no escribio una intencion de primer contacto, no metas frases como conocerte, conocer mas de ti, saber mas de ti, romper el hielo o similares.
 Si el chat ya tiene historial, no lo trates como cliente nuevo.
+
+REGLA DURA DE META
+Si el borrador parece una autoevaluacion o comentario sobre la calidad del mensaje, transformalo en un mensaje final para la clienta.
+No respondas literalmente a ese comentario ni como si el operador te estuviera hablando a ti.
 
 RESTRICCION ABSOLUTA
 Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
@@ -1809,6 +1848,7 @@ Mantente dentro de la app si hay solicitud de contacto externo
 No sugieras encuentros presenciales
 No inventes saludos
 No inventes primer contacto
+No contestes al operador como si el texto fuera una consulta para la herramienta
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
 }
@@ -2463,6 +2503,7 @@ function elegirMejorSet(
     score += new Set(arr.map(normalizarTexto)).size * 5;
     score += arr.reduce((acc, s, idx) => acc + puntuarLongitud(s, idx), 0);
     score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
+    score += arr.filter((s) => !META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s))).length * 3;
     score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos, permisosApertura)).length * 8;
     score -= arr.filter((s) => contieneTemaEncuentro(s)).length * 20;
     score -= arr.filter((s) => violaReglasApertura(s, permisosApertura)).length * 20;
@@ -2486,7 +2527,8 @@ async function generarSugerencias({
   elementosClave,
   intencionOperador,
   guiaIntencion,
-  permisosApertura
+  permisosApertura,
+  metaEdicion
 }) {
   const userPrompt = construirUserPrompt({
     textoPlano,
@@ -2500,7 +2542,8 @@ async function generarSugerencias({
     elementosClave,
     intencionOperador,
     guiaIntencion,
-    permisosApertura
+    permisosApertura,
+    metaEdicion
   });
 
   const data1 = await llamarOpenAI({
@@ -2527,6 +2570,7 @@ async function generarSugerencias({
 
   const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
   const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, permisosApertura));
+  const huboMetaMisfire1 = sugerencias1Raw.some((s) => META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)));
 
   if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave, permisosApertura)) {
     return {
@@ -2546,6 +2590,10 @@ async function generarSugerencias({
     ? "Se detectaron saludos o frases de primer contacto no autorizadas. No abras con hola ni metas frases para conocerla si el operador no lo escribio."
     : "No inventes saludos ni frases de primer contacto si no vienen en el borrador del operador.";
 
+  const correccionMeta = huboMetaMisfire1 || metaEdicion
+    ? "Se detecto una respuesta meta equivocada o el borrador parece una autoevaluacion del operador. No respondas a esa autoevaluacion. Convierte esa intencion en un mensaje final real para la clienta."
+    : "No respondas al operador como si el borrador fuera una consulta para la herramienta.";
+
   const userPrompt2 = `
 ${userPrompt}
 
@@ -2557,6 +2605,7 @@ ${reporteLongitudes1}
 
 ${correccionEncuentro}
 ${correccionApertura}
+${correccionMeta}
 
 Corrige esto ahora:
 - opcion 1 entre 200 y 260 caracteres
@@ -2568,6 +2617,7 @@ Corrige esto ahora:
 - cero relleno
 - respeta por completo nombres, afectivos e intencion
 - no respondas como si la clienta hubiera dicho otra cosa
+- no respondas al operador como si el borrador fuera una consulta a la herramienta
 - no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
 - no inventes saludos
 - no inventes primer contacto
@@ -3381,6 +3431,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       280
     );
 
+    const metaEdicion = analisisOperador.metaEdicion;
+
     const fingerprint = crearFingerprintSugerencia({
       operador,
       textoPlano,
@@ -3406,7 +3458,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
             elementosClave,
             intencionOperador,
             guiaIntencion,
-            permisosApertura
+            permisosApertura,
+            metaEdicion
           });
         });
       }
