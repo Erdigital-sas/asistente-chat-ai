@@ -69,6 +69,21 @@ const runtimeStats = {
     rowsUpserted: 0,
     lastMs: 0
   },
+  stt: {
+    secretTotal: 0,
+    secretOk: 0,
+    secretError: 0,
+    claimTotal: 0,
+    claimOk: 0,
+    claimDenied: 0,
+    heartbeatTotal: 0,
+    heartbeatOk: 0,
+    heartbeatError: 0,
+    releaseTotal: 0,
+    releaseOk: 0,
+    releaseError: 0,
+    lastMs: 0
+  },
   openai: {
     total: 0,
     ok: 0,
@@ -148,6 +163,24 @@ const OPENAI_MODEL_TRANSLATE =
   process.env.OPENAI_MODEL_TRANSLATE ||
   process.env.OPENAI_MODEL_FAST ||
   "gpt-4o-mini";
+
+// STT separado
+const STT_OPENAI_API_KEY = process.env.STT_OPENAI_API_KEY || API_KEY;
+const STT_CLIENT_SECRETS_URL =
+  process.env.STT_CLIENT_SECRETS_URL || "https://api.openai.com/v1/realtime/client_secrets";
+const STT_TRANSCRIBE_MODEL =
+  process.env.STT_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+const STT_LANGUAGE = process.env.STT_LANGUAGE || "es";
+const STT_PROMPT = process.env.STT_PROMPT || "";
+const STT_SECRET_TTL_SECONDS = leerEnteroEnv("STT_SECRET_TTL_SECONDS", 600, 10, 7200);
+const STT_LOCK_TTL_MS = leerEnteroEnv("STT_LOCK_TTL_MS", 15000, 5000, 120000);
+const STT_TURN_THRESHOLD = leerDecimalEnv("STT_TURN_THRESHOLD", 0.5, 0, 1);
+const STT_PREFIX_PADDING_MS = leerEnteroEnv("STT_PREFIX_PADDING_MS", 300, 0, 2000);
+const STT_SILENCE_DURATION_MS = leerEnteroEnv("STT_SILENCE_DURATION_MS", 450, 150, 5000);
+const STT_DEFAULT_NOISE_REDUCTION =
+  process.env.STT_DEFAULT_NOISE_REDUCTION === "far_field"
+    ? "far_field"
+    : "near_field";
 
 // ==========================
 // CONFIG
@@ -339,6 +372,7 @@ const translationCache = new Map();
 const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
 const adminLoginAttempts = new Map();
+const operatorDictationLocks = new Map();
 
 /*
 IMPORTANTE
@@ -575,7 +609,7 @@ function getSharedInFlight(map, key, factory) {
       }
     });
 
-  map.set(key, promise);
+    map.set(key, promise);
 
   return {
     shared: false,
@@ -928,6 +962,245 @@ async function seleccionarTodasLasPaginas(builderFactory, pageSize = 1000) {
 }
 
 // ==========================
+// STT LOCKS
+// ==========================
+function cleanupExpiredDictationLocks() {
+  const now = Date.now();
+
+  for (const [key, lock] of operatorDictationLocks.entries()) {
+    if (!lock || !lock.expires_at || lock.expires_at <= now) {
+      operatorDictationLocks.delete(key);
+    }
+  }
+}
+
+function obtenerClaveLockOperador(operador = "") {
+  return normalizarTexto(operador || "");
+}
+
+function obtenerSnapshotLocks() {
+  cleanupExpiredDictationLocks();
+
+  return Array.from(operatorDictationLocks.values()).map((lock) => ({
+    operador: lock.operador,
+    extension_id: lock.extension_id,
+    acquired_at: lock.acquired_at,
+    expires_at: lock.expires_at
+  }));
+}
+
+function adquirirLockDictado({
+  operador = "",
+  extension_id = ""
+}) {
+  cleanupExpiredDictationLocks();
+
+  const operadorKey = obtenerClaveLockOperador(operador);
+  const extensionId = normalizarEspacios(extension_id);
+
+  if (!operadorKey || !extensionId) {
+    return {
+      ok: false,
+      error: "Faltan datos para el lock de dictado"
+    };
+  }
+
+  const ahora = Date.now();
+  const actual = operatorDictationLocks.get(operadorKey);
+
+  if (!actual) {
+    const nuevo = {
+      operador,
+      extension_id: extensionId,
+      acquired_at: ahora,
+      expires_at: ahora + STT_LOCK_TTL_MS
+    };
+
+    operatorDictationLocks.set(operadorKey, nuevo);
+
+    return {
+      ok: true,
+      owner: true,
+      reused: false,
+      lock: nuevo
+    };
+  }
+
+  if (actual.extension_id === extensionId) {
+    actual.expires_at = ahora + STT_LOCK_TTL_MS;
+    operatorDictationLocks.set(operadorKey, actual);
+
+    return {
+      ok: true,
+      owner: true,
+      reused: true,
+      lock: actual
+    };
+  }
+
+  return {
+    ok: false,
+    owner: false,
+    error: "Este operador ya esta dictando en otro perfil",
+    lock: actual,
+    remaining_ms: Math.max(0, actual.expires_at - ahora)
+  };
+}
+
+function renovarLockDictado({
+  operador = "",
+  extension_id = ""
+}) {
+  cleanupExpiredDictationLocks();
+
+  const operadorKey = obtenerClaveLockOperador(operador);
+  const extensionId = normalizarEspacios(extension_id);
+  const actual = operatorDictationLocks.get(operadorKey);
+
+  if (!actual) {
+    return {
+      ok: false,
+      error: "No hay lock activo para renovar"
+    };
+  }
+
+  if (actual.extension_id !== extensionId) {
+    return {
+      ok: false,
+      error: "El lock pertenece a otro perfil"
+    };
+  }
+
+  actual.expires_at = Date.now() + STT_LOCK_TTL_MS;
+  operatorDictationLocks.set(operadorKey, actual);
+
+  return {
+    ok: true,
+    lock: actual
+  };
+}
+
+function liberarLockDictado({
+  operador = "",
+  extension_id = ""
+}) {
+  cleanupExpiredDictationLocks();
+
+  const operadorKey = obtenerClaveLockOperador(operador);
+  const extensionId = normalizarEspacios(extension_id);
+  const actual = operatorDictationLocks.get(operadorKey);
+
+  if (!actual) {
+    return {
+      ok: true,
+      released: false
+    };
+  }
+
+  if (actual.extension_id !== extensionId) {
+    return {
+      ok: false,
+      error: "El lock pertenece a otro perfil"
+    };
+  }
+
+  operatorDictationLocks.delete(operadorKey);
+
+  return {
+    ok: true,
+    released: true
+  };
+}
+
+async function crearClientSecretSTT({
+  noise_reduction = STT_DEFAULT_NOISE_REDUCTION,
+  language = STT_LANGUAGE,
+  prompt = STT_PROMPT
+}) {
+  const startedAt = Date.now();
+  runtimeStats.stt.secretTotal += 1;
+
+  const body = {
+    expires_after: {
+      anchor: "created_at",
+      seconds: STT_SECRET_TTL_SECONDS
+    },
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          format: {
+            type: "audio/pcm",
+            rate: 24000
+          },
+          noise_reduction: {
+            type: noise_reduction === "far_field" ? "far_field" : "near_field"
+          },
+          transcription: {
+            model: STT_TRANSCRIBE_MODEL,
+            language: String(language || STT_LANGUAGE).trim() || STT_LANGUAGE,
+            ...(String(prompt || STT_PROMPT).trim()
+              ? { prompt: String(prompt || STT_PROMPT).trim() }
+              : {})
+          },
+          turn_detection: {
+            type: "server_vad",
+            threshold: STT_TURN_THRESHOLD,
+            prefix_padding_ms: STT_PREFIX_PADDING_MS,
+            silence_duration_ms: STT_SILENCE_DURATION_MS
+          }
+        }
+      },
+      include: ["item.input_audio_transcription.logprobs"]
+    }
+  };
+
+  try {
+    const res = await fetch(STT_CLIENT_SECRETS_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${STT_OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      throw new Error(data?.error?.message || "No se pudo crear client secret STT");
+    }
+
+    const value =
+      data?.value ||
+      data?.client_secret?.value ||
+      data?.session?.client_secret?.value ||
+      "";
+
+    if (!value) {
+      throw new Error("OpenAI no devolvio client secret STT");
+    }
+
+    runtimeStats.stt.secretOk += 1;
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    return {
+      value,
+      expires_at:
+        data?.expires_at ||
+        data?.client_secret?.expires_at ||
+        data?.session?.client_secret?.expires_at ||
+        null,
+      session: data?.session || null
+    };
+  } catch (err) {
+    runtimeStats.stt.secretError += 1;
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+    throw err;
+  }
+}
+
+// ==========================
 // BLOQUEO DE ENCUENTROS
 // ==========================
 const PATRONES_ENCUENTRO = [
@@ -1032,15 +1305,6 @@ const TERMINOS_AFECTIVOS = [
   "princesa"
 ];
 
-const SALUDOS_APERTURA_REGEX =
-  /^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\b/i;
-
-const FRASES_PRIMER_CONTACTO_OPERADOR_REGEX =
-  /\b(conocer mas de ti|conocerte mejor|me gustaria conocerte|quisiera conocerte|quiero conocerte|saber mas de ti|me gustaria saber de ti|conocer un poco mas de ti|hablar contigo por primera vez|charlar contigo por primera vez|romper el hielo|icebreaker|primer contacto)\b/i;
-
-const FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX =
-  /\b(conocerte|conocer mas de ti|saber mas de ti|me gustaria saber de ti|me gustaria conocerte|quisiera conocerte|quiero conocerte|conocer un poco mas de ti|romper el hielo|icebreaker|primer contacto|por primera vez)\b/i;
-
 function extraerNombreEnApertura(texto = "") {
   const limpio = normalizarEspacios(String(texto ?? ""));
   const match = limpio.match(
@@ -1061,64 +1325,6 @@ function extraerNombreEnApertura(texto = "") {
 function extraerAfectivosPresentes(texto = "") {
   const norm = normalizarTexto(texto);
   return TERMINOS_AFECTIVOS.filter((term) => norm.includes(term));
-}
-
-function detectarPermisosApertura({
-  texto = "",
-  cliente = "",
-  contexto = ""
-}) {
-  const operadorNorm = normalizarTexto(texto);
-  const clienteNorm = normalizarTexto(cliente);
-  const lineasCtx = extraerLineasContexto(contexto);
-
-  const saludoExplicito = SALUDOS_APERTURA_REGEX.test(operadorNorm);
-  const primerContactoExplicito = FRASES_PRIMER_CONTACTO_OPERADOR_REGEX.test(operadorNorm);
-
-  const hayHistorial =
-    Boolean(clienteNorm) ||
-    lineasCtx.length > 0;
-
-  const pareceChatViejo =
-    hayHistorial ||
-    /(no me respondes|no respondes|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|otra vez|de nuevo|retomando|seguimos|ya habiamos hablado)/.test(operadorNorm);
-
-  return {
-    saludoExplicito,
-    primerContactoExplicito,
-    hayHistorial,
-    pareceChatViejo
-  };
-}
-
-function violaReglasApertura(
-  sugerencia = "",
-  permisosApertura = {
-    saludoExplicito: false,
-    primerContactoExplicito: false,
-    hayHistorial: false,
-    pareceChatViejo: false
-  }
-) {
-  const sugNorm = normalizarTexto(sugerencia);
-  if (!sugNorm) return false;
-
-  if (!permisosApertura.saludoExplicito && SALUDOS_APERTURA_REGEX.test(sugNorm)) {
-    return true;
-  }
-
-  if (!permisosApertura.primerContactoExplicito &&
-      FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX.test(sugNorm)) {
-    return true;
-  }
-
-  if (permisosApertura.pareceChatViejo &&
-      !permisosApertura.primerContactoExplicito &&
-      /\b(romper el hielo|primer contacto|por primera vez por aqui|conocer mas de ti|saber mas de ti)\b/.test(sugNorm)) {
-    return true;
-  }
-
-  return false;
 }
 
 function detectarElementosClave(texto = "") {
@@ -1175,13 +1381,7 @@ function originalEsInicioOEnganche(original = "") {
 function esSugerenciaDebil(
   texto = "",
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
-  permisosApertura = {
-    saludoExplicito: false,
-    primerContactoExplicito: false,
-    hayHistorial: false,
-    pareceChatViejo: false
-  }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
 ) {
   const t = normalizarTexto(texto);
 
@@ -1190,7 +1390,6 @@ function esSugerenciaDebil(
   if (contieneTemaEncuentro(texto)) return true;
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
-  if (violaReglasApertura(texto, permisosApertura)) return true;
 
   if (
     originalEsInicioOEnganche(original) &&
@@ -1221,21 +1420,12 @@ function esSugerenciaDebil(
 function necesitaSegundoIntento(
   sugerencias = [],
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
-  permisosApertura = {
-    saludoExplicito: false,
-    primerContactoExplicito: false,
-    hayHistorial: false,
-    pareceChatViejo: false
-  }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
 ) {
   if (sugerencias.length < 3) return true;
   if (!setCumpleLongitudes(sugerencias)) return true;
 
-  const debiles = sugerencias.filter((s) =>
-    esSugerenciaDebil(s, original, elementos, permisosApertura)
-  ).length;
-
+  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original, elementos)).length;
   const distintas = new Set(sugerencias.map(normalizarTexto)).size;
 
   return debiles >= 1 || distintas < 3;
@@ -1493,9 +1683,6 @@ function construirLecturaOperador(analisis) {
 
 function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   const t = normalizarTexto(texto);
-  const hayHistorial =
-    Boolean(normalizarTexto(cliente)) ||
-    extraerLineasContexto(contexto).length > 0;
 
   if (
     /(no me respondes|no respondes|no me contestas|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|pensando en ti|me acorde de ti|por que no)/.test(t)
@@ -1516,13 +1703,9 @@ function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   }
 
   if (
-    /(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) &&
-    !hayHistorial
+    /(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) ||
+    ((!cliente && !contexto) && /^(hola|hey|hi)\b/.test(t))
   ) {
-    return "enganche";
-  }
-
-  if (!hayHistorial && /^(hola|hey|hi)\b/.test(t)) {
     return "enganche";
   }
 
@@ -1573,49 +1756,7 @@ function construirBloqueConservacion(elementosClave) {
   return partes.join("\n");
 }
 
-function construirBloqueAperturaControlada(permisosApertura) {
-  const partes = [];
-
-  if (permisosApertura.saludoExplicito) {
-    partes.push(
-      "El operador si escribio un saludo explicito. Puedes conservarlo sin duplicarlo ni cambiarlo."
-    );
-  } else {
-    partes.push(
-      "El operador NO escribio un saludo explicito. No puedes abrir con hola, hey, hi, buenas ni ningun saludo equivalente."
-    );
-  }
-
-  if (permisosApertura.primerContactoExplicito) {
-    partes.push(
-      "El operador si escribio una intencion explicita de primer contacto. Puedes conservarla sin exagerar."
-    );
-  } else {
-    partes.push(
-      "El operador NO pidio primer contacto. No puedes meter frases para conocerla, saber mas de ella, romper el hielo o similares."
-    );
-  }
-
-  if (permisosApertura.pareceChatViejo) {
-    partes.push(
-      "Este chat ya tiene historial o parece reenganche. No lo trates como nuevo ni reinicies la conversacion."
-    );
-  }
-
-  partes.push(
-    "Nunca inventes aperturas, saludos o frases de primer contacto solo para sonar mas natural."
-  );
-
-  return partes.join("\n");
-}
-
 function construirSystemPrompt(
-  permisosApertura = {
-    saludoExplicito: false,
-    primerContactoExplicito: false,
-    hayHistorial: false,
-    pareceChatViejo: false
-  },
   elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false },
   segundoIntento = false
 ) {
@@ -1650,9 +1791,6 @@ No confundas esos roles
 
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
-
-APERTURA CONTROLADA
-${construirBloqueAperturaControlada(permisosApertura)}
 
 CONVERSACION SOLO DENTRO DE LA APP
 Nunca sugieras, insinues ni invites a:
@@ -1706,9 +1844,8 @@ Verifica que las 3 opciones:
 - sean claramente distintas entre si
 - cumplan la longitud pedida
 - no incluyan encuentros ni planes presenciales
-- no inventen saludos ni primer contacto
 - esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado o alusiones a encuentros del intento anterior" : ""}
+${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA
 Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
@@ -1728,8 +1865,7 @@ function construirUserPrompt({
   contactoExterno,
   elementosClave,
   intencionOperador,
-  guiaIntencion,
-  permisosApertura
+  guiaIntencion
 }) {
   return `
 CASO REAL
@@ -1777,16 +1913,6 @@ Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
 Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
 Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
 
-CONTROL DE APERTURA
-Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
-Primer contacto explicito en borrador: ${permisosApertura.primerContactoExplicito ? "si" : "no"}
-Chat con historial o reenganche: ${permisosApertura.pareceChatViejo ? "si" : "no"}
-
-REGLA DURA DE APERTURA
-Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
-Si el operador no escribio una intencion de primer contacto, no metas frases como conocerte, conocer mas de ti, saber mas de ti, romper el hielo o similares.
-Si el chat ya tiene historial, no lo trates como cliente nuevo.
-
 RESTRICCION ABSOLUTA
 Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
 
@@ -1803,8 +1929,6 @@ Usa el ultimo mensaje de la clienta como prioridad
 Usa contexto o perfil solo si mejoran de verdad la respuesta
 Mantente dentro de la app si hay solicitud de contacto externo
 No sugieras encuentros presenciales
-No inventes saludos
-No inventes primer contacto
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
 }
@@ -2144,14 +2268,14 @@ async function crearOReactivarOperadorAdmin(nombre = "") {
     .select("id, nombre, activo, created_at")
     .single();
 
-  if (error || !data) {
-    throw new Error(error?.message || "No se pudo crear el operador");
-  }
+    if (error || !data) {
+      throw new Error(error?.message || "No se pudo crear el operador");
+    }
 
-  return {
-    action: "created",
-    operator: data
-  };
+    return {
+      action: "created",
+      operator: data
+    };
 }
 
 function parsearNombresBulk(raw = "") {
@@ -2434,13 +2558,7 @@ function elegirMejorSet(
   primary = [],
   secondary = [],
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
-  permisosApertura = {
-    saludoExplicito: false,
-    primerContactoExplicito: false,
-    hayHistorial: false,
-    pareceChatViejo: false
-  }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
 ) {
   const puntuar = (arr) => {
     if (!arr.length) return -999;
@@ -2450,9 +2568,8 @@ function elegirMejorSet(
     score += new Set(arr.map(normalizarTexto)).size * 5;
     score += arr.reduce((acc, s, idx) => acc + puntuarLongitud(s, idx), 0);
     score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
-    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos, permisosApertura)).length * 8;
+    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos)).length * 8;
     score -= arr.filter((s) => contieneTemaEncuentro(s)).length * 20;
-    score -= arr.filter((s) => violaReglasApertura(s, permisosApertura)).length * 20;
     score += setCumpleLongitudes(arr) ? 18 : -18;
 
     return score;
@@ -2472,8 +2589,7 @@ async function generarSugerencias({
   contactoExterno,
   elementosClave,
   intencionOperador,
-  guiaIntencion,
-  permisosApertura
+  guiaIntencion
 }) {
   const userPrompt = construirUserPrompt({
     textoPlano,
@@ -2486,15 +2602,14 @@ async function generarSugerencias({
     contactoExterno,
     elementosClave,
     intencionOperador,
-    guiaIntencion,
-    permisosApertura
+    guiaIntencion
   });
 
   const data1 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
-      { role: "system", content: construirSystemPrompt(permisosApertura, elementosClave, false) },
+      { role: "system", content: construirSystemPrompt(elementosClave, false) },
       { role: "user", content: userPrompt }
     ],
     temperature: 0.56,
@@ -2508,14 +2623,10 @@ async function generarSugerencias({
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
 
-  const sugerencias1 = sugerencias1Raw.filter(
-    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
-  );
-
+  const sugerencias1 = sugerencias1Raw.filter((s) => !contieneTemaEncuentro(s));
   const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
-  const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, permisosApertura));
 
-  if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave, permisosApertura)) {
+  if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave)) {
     return {
       sugerencias: sugerencias1.slice(0, 3),
       usageData: data1
@@ -2529,10 +2640,6 @@ async function generarSugerencias({
     ? "Se detectaron alusiones prohibidas a verse en persona, cena, cafe, salida o plan presencial. Corrigelo por completo."
     : "No incluyas ninguna alusion a verse en persona ni a planes presenciales.";
 
-  const correccionApertura = huboAperturaInvalida1
-    ? "Se detectaron saludos o frases de primer contacto no autorizadas. No abras con hola ni metas frases para conocerla si el operador no lo escribio."
-    : "No inventes saludos ni frases de primer contacto si no vienen en el borrador del operador.";
-
   const userPrompt2 = `
 ${userPrompt}
 
@@ -2543,7 +2650,6 @@ Reporte del intento anterior:
 ${reporteLongitudes1}
 
 ${correccionEncuentro}
-${correccionApertura}
 
 Corrige esto ahora:
 - opcion 1 entre 200 y 260 caracteres
@@ -2556,15 +2662,13 @@ Corrige esto ahora:
 - respeta por completo nombres, afectivos e intencion
 - no respondas como si la clienta hubiera dicho otra cosa
 - no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
-- no inventes saludos
-- no inventes primer contacto
 `.trim();
 
   const data2 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
-      { role: "system", content: construirSystemPrompt(permisosApertura, elementosClave, true) },
+      { role: "system", content: construirSystemPrompt(elementosClave, true) },
       { role: "user", content: userPrompt2 }
     ],
     temperature: 0.62,
@@ -2578,17 +2682,14 @@ Corrige esto ahora:
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
 
-  const sugerencias2 = sugerencias2Raw.filter(
-    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
-  );
+  const sugerencias2 = sugerencias2Raw.filter((s) => !contieneTemaEncuentro(s));
 
   return {
     sugerencias: elegirMejorSet(
       sugerencias1,
       sugerencias2,
       textoPlano,
-      elementosClave,
-      permisosApertura
+      elementosClave
     ).slice(0, 3),
     usageData: sumarUsage(data1, data2)
   };
@@ -2639,40 +2740,28 @@ Devuelve solo una version final
 // ==========================
 // ANALYTICS
 // ==========================
-async function cargarConsumoPorRango(range, operadoresFiltrados = []) {
-  return seleccionarTodasLasPaginas((from, to) => {
-    let query = supabase
+async function cargarConsumoPorRango(range) {
+  return seleccionarTodasLasPaginas((from, to) =>
+    supabase
       .from("consumo")
-      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,request_ok,created_at,extension_id")
+      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,created_at,extension_id")
       .gte("created_at", range.startIso)
       .lt("created_at", range.endExclusiveIso)
       .order("created_at", { ascending: false })
-      .range(from, to);
-
-    if (operadoresFiltrados.length) {
-      query = query.in("operador", operadoresFiltrados);
-    }
-
-    return query;
-  });
+      .range(from, to)
+  );
 }
 
-async function cargarWarningsPorRango(range, operadoresFiltrados = []) {
-  return seleccionarTodasLasPaginas((from, to) => {
-    let query = supabase
+async function cargarWarningsPorRango(range) {
+  return seleccionarTodasLasPaginas((from, to) =>
+    supabase
       .from("warning_resumen_diario")
       .select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at")
       .gte("fecha", range.from)
       .lte("fecha", range.to)
       .order("fecha", { ascending: false })
-      .range(from, to);
-
-    if (operadoresFiltrados.length) {
-      query = query.in("operador", operadoresFiltrados);
-    }
-
-    return query;
-  });
+      .range(from, to)
+  );
 }
 
 function crearSummaryDashboard() {
@@ -2730,8 +2819,7 @@ function crearSerieDia(fecha = "") {
 function construirDashboardAnalytics({
   consumoRows = [],
   warningRows = [],
-  range = construirRangoFechas(),
-  operadoresFiltrados = []
+  range = construirRangoFechas()
 }) {
   const summary = crearSummaryDashboard();
   const operatorMap = new Map();
@@ -2896,7 +2984,6 @@ function construirDashboardAnalytics({
     operator_stats: operatorStats,
     warning_top: warningTop,
     series,
-    operator_filter: operadoresFiltrados,
     pricing: {
       suggestions_model: OPENAI_MODEL_SUGGESTIONS,
       translate_model: OPENAI_MODEL_TRANSLATE,
@@ -2906,15 +2993,6 @@ function construirDashboardAnalytics({
       translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
     }
   };
-}
-
-function parsearFiltroOperadores(raw = "") {
-  const nombres = String(raw ?? "")
-    .split(",")
-    .map((x) => formatearNombreOperador(x))
-    .filter(Boolean);
-
-  return [...new Set(nombres.map((x) => x))].slice(0, 100);
 }
 
 // ==========================
@@ -2950,7 +3028,16 @@ app.get("/health", (_req, res) => {
     },
     models: {
       sugerencias: OPENAI_MODEL_SUGGESTIONS,
-      traduccion: OPENAI_MODEL_TRANSLATE
+      traduccion: OPENAI_MODEL_TRANSLATE,
+      stt: STT_TRANSCRIBE_MODEL
+    },
+    stt: {
+      key_configured: Boolean(STT_OPENAI_API_KEY),
+      client_secret_ttl_seconds: STT_SECRET_TTL_SECONDS,
+      lock_ttl_ms: STT_LOCK_TTL_MS,
+      default_noise_reduction: STT_DEFAULT_NOISE_REDUCTION,
+      active_locks: operatorDictationLocks.size,
+      locks: obtenerSnapshotLocks()
     },
     queues: {
       operator_suggestions: {
@@ -3241,11 +3328,10 @@ app.delete("/admin-api/operators/:id", autorizarAdmin, async (req, res) => {
 app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
   try {
     const range = construirRangoFechas(req.query?.from || "", req.query?.to || "");
-    const operadoresFiltrados = parsearFiltroOperadores(req.query?.operadores || "");
 
     const [consumoRows, warningRows] = await Promise.all([
-      cargarConsumoPorRango(range, operadoresFiltrados),
-      cargarWarningsPorRango(range, operadoresFiltrados)
+      cargarConsumoPorRango(range),
+      cargarWarningsPorRango(range)
     ]);
 
     runtimeStats.admin.dashboardLoads += 1;
@@ -3255,8 +3341,7 @@ app.get("/admin-api/dashboard", autorizarAdmin, async (req, res) => {
       ...construirDashboardAnalytics({
         consumoRows,
         warningRows,
-        range,
-        operadoresFiltrados
+        range
       })
     });
   } catch (err) {
@@ -3275,6 +3360,182 @@ app.post("/login", autorizarOperador, async (req, res) => {
     ok: true,
     operador: req.operadorAutorizado
   });
+});
+
+// ==========================
+// STT SESSION
+// ==========================
+app.post("/stt/client-secret", autorizarOperador, async (req, res) => {
+  try {
+    const secret = await crearClientSecretSTT({
+      noise_reduction: req.body?.noise_reduction || STT_DEFAULT_NOISE_REDUCTION,
+      language: req.body?.language || STT_LANGUAGE,
+      prompt: req.body?.prompt || STT_PROMPT
+    });
+
+    return res.json({
+      ok: true,
+      operator: req.operadorAutorizado,
+      client_secret: secret.value,
+      expires_at: secret.expires_at,
+      session: secret.session
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo crear client secret STT"
+    });
+  }
+});
+
+app.post("/stt/claim", autorizarOperador, async (req, res) => {
+  runtimeStats.stt.claimTotal += 1;
+  const startedAt = Date.now();
+
+  try {
+    const extension_id = normalizarEspacios(req.body?.extension_id || "");
+
+    if (!extension_id) {
+      runtimeStats.stt.claimDenied += 1;
+      runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+      return res.status(400).json({
+        ok: false,
+        error: "Falta extension_id"
+      });
+    }
+
+    const lock = adquirirLockDictado({
+      operador: req.operadorAutorizado,
+      extension_id
+    });
+
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    if (!lock.ok) {
+      runtimeStats.stt.claimDenied += 1;
+      return res.status(409).json({
+        ok: false,
+        error: lock.error || "Dictado ocupado",
+        lock: lock.lock || null,
+        remaining_ms: lock.remaining_ms || 0
+      });
+    }
+
+    runtimeStats.stt.claimOk += 1;
+
+    return res.json({
+      ok: true,
+      lock: lock.lock,
+      reused: Boolean(lock.reused)
+    });
+  } catch (err) {
+    runtimeStats.stt.claimDenied += 1;
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo reclamar lock de dictado"
+    });
+  }
+});
+
+app.post("/stt/heartbeat", autorizarOperador, async (req, res) => {
+  runtimeStats.stt.heartbeatTotal += 1;
+  const startedAt = Date.now();
+
+  try {
+    const extension_id = normalizarEspacios(req.body?.extension_id || "");
+
+    if (!extension_id) {
+      runtimeStats.stt.heartbeatError += 1;
+      runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+      return res.status(400).json({
+        ok: false,
+        error: "Falta extension_id"
+      });
+    }
+
+    const result = renovarLockDictado({
+      operador: req.operadorAutorizado,
+      extension_id
+    });
+
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    if (!result.ok) {
+      runtimeStats.stt.heartbeatError += 1;
+      return res.status(409).json({
+        ok: false,
+        error: result.error || "No se pudo renovar lock"
+      });
+    }
+
+    runtimeStats.stt.heartbeatOk += 1;
+
+    return res.json({
+      ok: true,
+      lock: result.lock
+    });
+  } catch (err) {
+    runtimeStats.stt.heartbeatError += 1;
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo renovar lock STT"
+    });
+  }
+});
+
+app.post("/stt/release", autorizarOperador, async (req, res) => {
+  runtimeStats.stt.releaseTotal += 1;
+  const startedAt = Date.now();
+
+  try {
+    const extension_id = normalizarEspacios(req.body?.extension_id || "");
+
+    if (!extension_id) {
+      runtimeStats.stt.releaseError += 1;
+      runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+      return res.status(400).json({
+        ok: false,
+        error: "Falta extension_id"
+      });
+    }
+
+    const result = liberarLockDictado({
+      operador: req.operadorAutorizado,
+      extension_id
+    });
+
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    if (!result.ok) {
+      runtimeStats.stt.releaseError += 1;
+      return res.status(409).json({
+        ok: false,
+        error: result.error || "No se pudo liberar lock"
+      });
+    }
+
+    runtimeStats.stt.releaseOk += 1;
+
+    return res.json({
+      ok: true,
+      released: Boolean(result.released)
+    });
+  } catch (err) {
+    runtimeStats.stt.releaseError += 1;
+    runtimeStats.stt.lastMs = Date.now() - startedAt;
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo liberar lock STT"
+    });
+  }
 });
 
 // ==========================
@@ -3350,12 +3611,6 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     const lecturaOperador = construirLecturaOperador(analisisOperador);
 
     const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
-    const permisosApertura = detectarPermisosApertura({
-      texto,
-      cliente,
-      contexto
-    });
-
     const intencionOperador = detectarIntencionOperador(
       texto,
       cliente,
@@ -3401,8 +3656,7 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
             contactoExterno: analisisCliente.contacto,
             elementosClave,
             intencionOperador,
-            guiaIntencion,
-            permisosApertura
+            guiaIntencion
           });
         });
       }
@@ -3417,9 +3671,7 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       ? resultado.sugerencias
       : [];
 
-    sugerencias = sugerencias.filter(
-      (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
-    );
+    sugerencias = sugerencias.filter((s) => !contieneTemaEncuentro(s));
 
     if (!sugerencias.length) {
       sugerencias = ["Escribe un poco mas de contexto"];
@@ -3585,6 +3837,9 @@ app.listen(PORT, () => {
   console.log(`Server PRO activo en puerto ${PORT}`);
   console.log(
     `Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`
+  );
+  console.log(
+    `STT => modelo: ${STT_TRANSCRIBE_MODEL} | lock_ttl_ms: ${STT_LOCK_TTL_MS} | secret_ttl_seconds: ${STT_SECRET_TTL_SECONDS}`
   );
   console.log(
     `Lanes OpenAI => sugerencias: ${SUGGESTION_OPENAI_CONCURRENCY} | traduccion: ${TRANSLATION_OPENAI_CONCURRENCY}`
