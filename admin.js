@@ -1182,7 +1182,6 @@ function bindEvents() {
 
   document.addEventListener("click", (e) => {
     const input = $("analytics-operator-search");
-    const results = $("analytics-operator-results");
     const wrap = input?.closest(".operator-filter-wrap");
 
     if (!wrap) return;
