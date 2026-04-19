@@ -339,6 +339,13 @@ const translationCache = new Map();
 const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
 const adminLoginAttempts = new Map();
+
+/*
+IMPORTANTE
+Esta cola por operador vive en memoria de esta replica.
+Si luego activas 2 o mas replicas en Railway, el siguiente paso correcto
+es mover esta cola a Redis o a un store compartido.
+*/
 const operatorSuggestionQueues = new Map();
 
 // ==========================
@@ -749,22 +756,6 @@ function sePareceDemasiado(a = "", b = "") {
   return overlap / wb.length >= 0.85;
 }
 
-function crearFingerprintSugerencia({
-  operador = "",
-  textoPlano = "",
-  clientePlano = "",
-  contextoPlano = "",
-  perfilPlano = ""
-}) {
-  return [
-    normalizarTexto(operador).slice(0, 80),
-    normalizarTexto(textoPlano).slice(0, 500),
-    normalizarTexto(clientePlano).slice(0, 300),
-    normalizarTexto(contextoPlano).slice(-600),
-    normalizarTexto(perfilPlano).slice(0, 200)
-  ].join("||");
-}
-
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -920,6 +911,30 @@ async function seleccionarTodasLasPaginas(builderFactory, pageSize = 1000) {
   return rows;
 }
 
+function dedupeStrings(items = []) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of items) {
+    const limpio = normalizarEspacios(item);
+    const key = normalizarTexto(limpio);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(limpio);
+  }
+
+  return result;
+}
+
+function partirPipe(texto = "") {
+  return dedupeStrings(
+    String(texto ?? "")
+      .split("|")
+      .map((x) => normalizarEspacios(x))
+      .filter(Boolean)
+  );
+}
+
 // ==========================
 // BLOQUEO DE ENCUENTROS
 // ==========================
@@ -989,6 +1004,13 @@ function extraerLineasContexto(contexto = "") {
     .filter((l) => /^CLIENTA:|^OPERADOR:/i.test(l));
 }
 
+function extraerLineasPorRol(contexto = "", role = "CLIENTA") {
+  const prefijo = String(role || "").toUpperCase();
+  return extraerLineasContexto(contexto)
+    .filter((linea) => linea.toUpperCase().startsWith(`${prefijo}:`))
+    .map((linea) => normalizarEspacios(linea.replace(/^CLIENTA:\s*/i, "").replace(/^OPERADOR:\s*/i, "")));
+}
+
 function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
   const lineas = extraerLineasContexto(contexto);
   if (!lineas.length) return "";
@@ -1021,6 +1043,112 @@ function filtrarContextoRelevante(contexto = "", texto = "", cliente = "") {
   const unicas = [...new Set(combinadas)];
 
   return unicas.slice(-MAX_CONTEXT_LINES).join("\n");
+}
+
+// ==========================
+// PERFIL ESTRUCTURADO
+// ==========================
+function parsearPerfilEstructurado(perfilPlano = "") {
+  const lines = String(perfilPlano ?? "")
+    .split("\n")
+    .map((l) => normalizarEspacios(l))
+    .filter(Boolean);
+
+  const data = {
+    reglaPerfil: "",
+    interesesEnComun: [],
+    interesesClienta: [],
+    datosClienta: []
+  };
+
+  for (const line of lines) {
+    if (/^REGLA_PERFIL:/i.test(line)) {
+      data.reglaPerfil = normalizarEspacios(line.replace(/^REGLA_PERFIL:/i, ""));
+      continue;
+    }
+
+    if (/^INTERESES_EN_COMUN:/i.test(line)) {
+      data.interesesEnComun = partirPipe(line.replace(/^INTERESES_EN_COMUN:/i, ""));
+      continue;
+    }
+
+    if (/^INTERESES_CLIENTA:/i.test(line)) {
+      data.interesesClienta = partirPipe(line.replace(/^INTERESES_CLIENTA:/i, ""));
+      continue;
+    }
+
+    if (/^DATOS_CLIENTA:/i.test(line)) {
+      data.datosClienta = partirPipe(line.replace(/^DATOS_CLIENTA:/i, ""));
+    }
+  }
+
+  return data;
+}
+
+function detectarChatNuevoOperativo(clientePlano = "", contextoPlano = "") {
+  const clienteNorm = normalizarTexto(clientePlano || "");
+  const lineasClienta = extraerLineasPorRol(contextoPlano, "CLIENTA");
+  const lineasOperador = extraerLineasPorRol(contextoPlano, "OPERADOR");
+
+  return !clienteNorm && lineasClienta.length === 0 && lineasOperador.length <= 3;
+}
+
+function construirGuiaPerfil(perfil = {}, esChatNuevo = false) {
+  const reglas = [];
+
+  if (perfil.interesesEnComun.length) {
+    reglas.push("Prioriza primero los INTERESES_EN_COMUN. Tienen mas valor que los intereses solo de la clienta.");
+    if (esChatNuevo) {
+      reglas.push("Si el chat es nuevo o casi vacio, puedes enganchar usando primero un interes en comun, de forma natural y especifica.");
+    }
+  }
+
+  if (!perfil.interesesEnComun.length && perfil.interesesClienta.length) {
+    reglas.push("Si no hay intereses en comun, puedes usar INTERESES_CLIENTA como apoyo, sin fingir que el operador comparte esa aficion.");
+  }
+
+  if (perfil.interesesClienta.length) {
+    reglas.push("Nunca digas que algo esta en comun si aparece solo en INTERESES_CLIENTA.");
+  }
+
+  if (perfil.datosClienta.length) {
+    reglas.push("DATOS_CLIENTA solo sirven para enriquecer de forma prudente. No inventes conexion falsa.");
+  }
+
+  return reglas.join(" ");
+}
+
+// ==========================
+// GEOGRAFIA DEL OPERADOR
+// ==========================
+const GEO_TRIGGER_PATTERNS = [
+  /\b(?:vivo en|soy de|estoy en|vivi en|naci en|resido en|me mude a|me mudé a|vengo de|ahora estoy en)\s+([a-zA-ZÀ-ÿ' .\-]{2,80})/gi,
+  /\b(?:i live in|i am from|i'm from|i was born in|i moved to|i am in|i'm in)\s+([a-zA-ZÀ-ÿ' .\-]{2,80})/gi
+];
+
+function limpiarMencionGeografica(raw = "") {
+  let texto = normalizarEspacios(String(raw || ""))
+    .replace(/[.,;:!?]+$/g, "")
+    .trim();
+
+  texto = texto.split(/\b(?: y | pero | porque | and | but | because )\b/i)[0].trim();
+  return texto.slice(0, 80);
+}
+
+function extraerMencionesGeograficasOperador(texto = "") {
+  const resultado = [];
+
+  for (const regex of GEO_TRIGGER_PATTERNS) {
+    let match;
+    while ((match = regex.exec(String(texto || "")))) {
+      const lugar = limpiarMencionGeografica(match[1] || "");
+      if (lugar) {
+        resultado.push(lugar);
+      }
+    }
+  }
+
+  return dedupeStrings(resultado).slice(0, 5);
 }
 
 // ==========================
@@ -1582,6 +1710,44 @@ function construirGuiaIntencion(intencion = "") {
 }
 
 // ==========================
+// HECHOS SENSIBLES DE CLIENTA
+// ==========================
+function detectarHechosClienteSensibles(lineasClienta = []) {
+  const bloque = normalizarTexto((lineasClienta || []).join(" || "));
+
+  return {
+    birthday: /\b(birthday|cumpleanos|cumpleanos|celebrating|celebracion|cumple)\b/.test(bloque),
+    family: /\b(my family|mi familia|my son|mi hijo|my daughter|mi hija|my grandson|mi nieto|daughter in law|nuera|my wife|mi esposa)\b/.test(bloque)
+  };
+}
+
+function violaPropiedadHechosCliente(sugerencia = "", hechos = {}, originalOperador = "") {
+  const s = normalizarTexto(sugerencia);
+  const o = normalizarTexto(originalOperador);
+
+  if (
+    hechos.birthday &&
+    !/\b(cumpleanos|birthday)\b/.test(o) &&
+    (
+      /\b(mi cumpleanos|hoy es mi cumpleanos|es mi cumpleanos|my birthday|today is my birthday)\b/.test(s) ||
+      /\b(voy a celebrar mi cumpleanos|celebrare mi cumpleanos)\b/.test(s)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    hechos.family &&
+    !/\b(mi familia|mi hijo|mi hija|mis hijos|mi nieto|mi nuera|my family|my son|my daughter|my grandson)\b/.test(o) &&
+    /\b(mi familia|mi hijo|mi hija|mis hijos|mi nieto|mi nuera|my family|my son|my daughter|my grandson)\b/.test(s)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+// ==========================
 // PROMPTS
 // ==========================
 function construirBloqueConservacion(elementosClave) {
@@ -1688,24 +1854,44 @@ Las lineas marcadas como CLIENTA son de ella
 Las lineas marcadas como OPERADOR son mensajes previos del operador
 No confundas esos roles
 
+REGLA DURA DE PROPIEDAD DE HECHOS
+Cada hecho pertenece a quien lo dijo
+Si una linea es CLIENTA y dice un hecho en primera persona, ese hecho pertenece a la clienta
+Nunca conviertas un hecho de CLIENTA en primera persona del operador
+Ejemplo: si CLIENTA dice que es su cumpleanos, tu respuesta no puede decir que es el cumpleanos del operador
+Lo mismo aplica a familia, planes, estados personales, recuerdos y situaciones
+
 MODO GHOSTWRITER
-Si el borrador viene corto, flojo, generico, quemado, meta o con reclamo, no debes copiar su debilidad.
-Debes reconstruirlo en algo mas interesante y con mas valor conversacional.
-Puedes usar el ultimo mensaje de la clienta, el contexto reciente y el perfil visible para crear un mensaje mejor.
-Si el borrador es casi vacio, debes elevarlo de verdad, no dejarlo simple.
-Si hay un reclamo, transformalo en reapertura positiva, segura y atractiva.
-Nunca respondas como si el operador te estuviera pidiendo consuelo o como si la clienta hubiera dicho el comentario meta.
+Si el borrador viene corto, flojo, generico, quemado, meta o con reclamo, no debes copiar su debilidad
+Debes reconstruirlo en algo mas interesante y con mas valor conversacional
+Puedes usar el ultimo mensaje de la clienta, el contexto reciente y el perfil visible para crear un mensaje mejor
+Si el borrador es casi vacio, debes elevarlo de verdad, no dejarlo simple
+Si hay un reclamo, transformalo en reapertura positiva, segura y atractiva
+Nunca respondas como si el operador te estuviera pidiendo consuelo o como si la clienta hubiera dicho el comentario meta
 
 META DEL OPERADOR
-A veces el operador escribe una autoevaluacion o una instruccion implicita de edicion.
-Si el borrador habla de que no fue interesante, que el mensaje no fue suficiente, que quiere captar atencion, que quiere decirle algo mejor o similar, debes reinterpretarlo como intencion de edicion y convertirlo en un mensaje final natural para la clienta.
-No respondas literalmente a ese comentario como si la clienta lo hubiera dicho ni como si el operador te estuviera hablando a ti.
+A veces el operador escribe una autoevaluacion o una instruccion implicita de edicion
+Si el borrador habla de que no fue interesante, que el mensaje no fue suficiente, que quiere captar atencion, que quiere decirle algo mejor o similar, debes reinterpretarlo como intencion de edicion y convertirlo en un mensaje final natural para la clienta
+No respondas literalmente a ese comentario como si la clienta lo hubiera dicho ni como si el operador te estuviera hablando a ti
 
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
 
 APERTURA CONTROLADA
 ${construirBloqueAperturaControlada(permisosApertura)}
+
+REGLA DE INTERESES
+Si existen INTERESES_EN_COMUN, tienen prioridad total sobre INTERESES_CLIENTA
+Si no existen INTERESES_EN_COMUN, puedes usar INTERESES_CLIENTA como apoyo
+Nunca digas que algo esta en comun si solo aparece en INTERESES_CLIENTA
+Si el chat es nuevo o casi vacio y hay INTERESES_EN_COMUN, puedes usarlos para enganchar de forma natural
+
+REGLA GEOGRAFICA
+Solo puedes usar ciudad, pais o estado si el operador lo escribio en el borrador actual
+Puedes corregir la ortografia del MISMO lugar escrito por el operador
+No puedes cambiar un lugar por otro distinto
+No puedes reducir un pais a una ciudad o estado
+No puedes inventar una ciudad tomada del perfil o del contexto si el operador no la escribio
 
 CONVERSACION SOLO DENTRO DE LA APP
 Nunca sugieras, insinues ni invites a:
@@ -1714,7 +1900,7 @@ Nunca sugieras, insinues ni invites a:
 - salir, cita, cena, almuerzo, cafe, tragos o cualquier plan presencial
 - visitarse, ir a casa de alguien, pasar por alguien, pedir direccion o ubicacion
 - fin de semana juntos, viaje, hotel o planes fisicos
-Si el borrador o la clienta mencionan eso, reconduce la conversacion para seguir por aqui de forma natural, sin rechazo brusco y sin cerrar la charla.
+Si el borrador o la clienta mencionan eso, reconduce la conversacion para seguir por aqui de forma natural, sin rechazo brusco y sin cerrar la charla
 
 OBJETIVO DE CALIDAD
 Cada opcion debe sentirse humana, natural, agradable, atractiva sin exagerar y lista para enviar
@@ -1758,14 +1944,16 @@ Sin tildes ni acentos en la salida
 CONTROL FINAL ANTES DE RESPONDER
 Verifica que las 3 opciones:
 - respeten el sentido principal del borrador
+- respeten quien dijo cada hecho
 - eleven el nivel si el borrador venia flojo
 - sean claramente distintas entre si
 - cumplan la longitud pedida
 - no incluyan encuentros ni planes presenciales
 - no inventen saludos ni primer contacto
 - no respondan al operador como si fuera la herramienta
+- no inventen ciudades ni cambien un lugar por otro
 - esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, respuesta meta equivocada o alusiones a encuentros del intento anterior" : ""}
+${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado, apropiacion de hechos de la clienta, errores de geografia o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA
 Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
@@ -1788,7 +1976,13 @@ function construirUserPrompt({
   guiaIntencion,
   permisosApertura,
   metaEdicion,
-  ghostwriterMode
+  ghostwriterMode,
+  perfilEstructurado,
+  guiaPerfil,
+  esChatNuevoOperativo,
+  lineasClienteRecientes,
+  lineasOperadorRecientes,
+  mencionesGeograficasOperador
 }) {
   return `
 CASO REAL
@@ -1808,7 +2002,25 @@ CONTEXTO RECIENTE DEL CHAT
 ${contextoPlano || "Sin contexto claro"}
 """
 
-PERFIL VISIBLE DE LA CLIENTA
+ULTIMAS LINEAS DE CLIENTA
+"""
+${(lineasClienteRecientes || []).join("\n") || "Sin lineas recientes de clienta"}
+"""
+
+ULTIMAS LINEAS DE OPERADOR
+"""
+${(lineasOperadorRecientes || []).join("\n") || "Sin lineas recientes de operador"}
+"""
+
+PERFIL ESTRUCTURADO
+"""
+REGLA_PERFIL: ${perfilEstructurado.reglaPerfil || "Sin regla"}
+INTERESES_EN_COMUN: ${(perfilEstructurado.interesesEnComun || []).join(" | ") || "Ninguno"}
+INTERESES_CLIENTA: ${(perfilEstructurado.interesesClienta || []).join(" | ") || "Ninguno"}
+DATOS_CLIENTA: ${(perfilEstructurado.datosClienta || []).join(" | ") || "Ninguno"}
+"""
+  
+PERFIL VISIBLE ORIGINAL
 """
 ${perfilPlano || "Sin perfil claro"}
 """
@@ -1828,6 +2040,9 @@ ${intencionOperador}
 GUIA DE INTENCION
 ${quitarTildes(guiaIntencion)}
 
+GUIA DE PERFIL
+${quitarTildes(guiaPerfil || "Sin guia")}
+
 SOLICITUD DE CONTACTO EXTERNO
 ${contactoExterno ? "si" : "no"}
 
@@ -1837,27 +2052,43 @@ Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos
 Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
 Meta edicion detectada: ${metaEdicion ? "si" : "no"}
 Ghostwriter activo: ${ghostwriterMode ? "si" : "no"}
+Chat nuevo o casi vacio: ${esChatNuevoOperativo ? "si" : "no"}
+
+MENCIONES GEOGRAFICAS DEL OPERADOR
+${mencionesGeograficasOperador.length ? mencionesGeograficasOperador.join(" | ") : "ninguna"}
 
 CONTROL DE APERTURA
 Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
 Primer contacto explicito en borrador: ${permisosApertura.primerContactoExplicito ? "si" : "no"}
 Chat con historial o reenganche: ${permisosApertura.pareceChatViejo ? "si" : "no"}
 
+REGLA DURA DE ROLES
+Todo lo que este en CLIENTA pertenece a la clienta
+Todo lo que este en OPERADOR pertenece al operador
+No conviertas hechos de CLIENTA en primera persona del operador
+
 REGLA DURA DE APERTURA
-Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
-Si el operador no escribio una intencion de primer contacto, no metas frases como conocerte, conocer mas de ti, saber mas de ti, romper el hielo o similares.
-Si el chat ya tiene historial, no lo trates como cliente nuevo.
+Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente
+Si el operador no escribio una intencion de primer contacto, no metas frases como conocerte, conocer mas de ti, saber mas de ti, romper el hielo o similares
+Si el chat ya tiene historial, no lo trates como cliente nuevo
+
+REGLA DURA DE INTERESES
+Si hay INTERESES_EN_COMUN, usalos primero
+Si no hay INTERESES_EN_COMUN, puedes usar INTERESES_CLIENTA
+No digas que algo esta en comun si solo aparece en INTERESES_CLIENTA
+
+REGLA DURA DE GEOGRAFIA
+Si el operador menciona un lugar, puedes corregir la ortografia de ese mismo lugar
+No puedes cambiarlo por otro distinto
+Si el operador no menciona ningun lugar, no inventes ciudad, estado o pais
+Si el operador dice un pais, no lo reduzcas a una ciudad
 
 REGLA DURA DE META
-Si el borrador parece una autoevaluacion o comentario sobre la calidad del mensaje, transformalo en un mensaje final para la clienta.
-No respondas literalmente a ese comentario ni como si el operador te estuviera hablando a ti.
-
-REGLA DURA DE GHOSTWRITER
-Si el borrador viene flojo, corto, generico o con reclamo, debes subirle mucho el nivel.
-Usa el perfil visible y el contexto real para construir algo mas atractivo y mas interesante, sin inventar hechos que no esten respaldados.
+Si el borrador parece una autoevaluacion o comentario sobre la calidad del mensaje, transformalo en un mensaje final para la clienta
+No respondas literalmente a ese comentario ni como si el operador te estuviera hablando a ti
 
 RESTRICCION ABSOLUTA
-Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
+Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial
 
 OBJETIVO DE LAS 3 SALIDAS
 1. 200 a 260 caracteres, directa y agradable
@@ -1876,6 +2107,7 @@ No sugieras encuentros presenciales
 No inventes saludos
 No inventes primer contacto
 No contestes al operador como si el texto fuera una consulta para la herramienta
+No conviertas hechos de la clienta en hechos del operador
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
 }
@@ -2556,7 +2788,14 @@ async function generarSugerencias({
   guiaIntencion,
   permisosApertura,
   metaEdicion,
-  ghostwriterMode
+  ghostwriterMode,
+  perfilEstructurado,
+  guiaPerfil,
+  esChatNuevoOperativo,
+  lineasClienteRecientes,
+  lineasOperadorRecientes,
+  hechosClienteSensibles,
+  mencionesGeograficasOperador
 }) {
   const userPrompt = construirUserPrompt({
     textoPlano,
@@ -2572,7 +2811,13 @@ async function generarSugerencias({
     guiaIntencion,
     permisosApertura,
     metaEdicion,
-    ghostwriterMode
+    ghostwriterMode,
+    perfilEstructurado,
+    guiaPerfil,
+    esChatNuevoOperativo,
+    lineasClienteRecientes,
+    lineasOperadorRecientes,
+    mencionesGeograficasOperador
   });
 
   const data1 = await llamarOpenAI({
@@ -2583,7 +2828,7 @@ async function generarSugerencias({
       { role: "user", content: userPrompt }
     ],
     temperature: ghostwriterMode ? 0.68 : 0.56,
-    maxTokens: ghostwriterMode ? 460 : 360,
+    maxTokens: ghostwriterMode ? 520 : 420,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
@@ -2594,12 +2839,16 @@ async function generarSugerencias({
     .filter((s) => !esRespuestaBasura(s));
 
   const sugerencias1 = sugerencias1Raw.filter(
-    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+    (s) =>
+      !contieneTemaEncuentro(s) &&
+      !violaReglasApertura(s, permisosApertura) &&
+      !violaPropiedadHechosCliente(s, hechosClienteSensibles, textoPlano)
   );
 
   const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
   const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, permisosApertura));
   const huboMetaMisfire1 = sugerencias1Raw.some((s) => META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)));
+  const huboPropiedadHechos1 = sugerencias1Raw.some((s) => violaPropiedadHechosCliente(s, hechosClienteSensibles, textoPlano));
 
   if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave, permisosApertura)) {
     return {
@@ -2623,9 +2872,21 @@ async function generarSugerencias({
     ? "Se detecto una respuesta meta equivocada o el borrador parece una autoevaluacion del operador. No respondas a esa autoevaluacion. Convierte esa intencion en un mensaje final real para la clienta."
     : "No respondas al operador como si el borrador fuera una consulta para la herramienta.";
 
+  const correccionPropiedad = huboPropiedadHechos1
+    ? "Se detecto apropiacion de hechos de la clienta. No conviertas hechos de CLIENTA en primera persona del operador."
+    : "Respeta la propiedad de los hechos por rol.";
+
   const correccionGhostwriter = ghostwriterMode
     ? "El borrador venia flojo, corto, generico o con reclamo. Debes elevarlo mucho mas y usar mejor el perfil y el contexto para que parezca un mensaje atractivo real."
     : "Manten el mensaje fuerte, natural y util.";
+
+  const correccionPerfil = perfilEstructurado.interesesEnComun.length
+    ? "Si usas intereses, primero usa INTERESES_EN_COMUN."
+    : "Si usas intereses, solo puedes usar INTERESES_CLIENTA como apoyo sin fingir que estan en comun.";
+
+  const correccionGeo = mencionesGeograficasOperador.length
+    ? "Si aparece una ubicacion, solo puedes corregir la ortografia del mismo lugar mencionado por el operador. No cambies a otra ciudad."
+    : "No inventes ciudad, estado o pais.";
 
   const userPrompt2 = `
 ${userPrompt}
@@ -2639,7 +2900,10 @@ ${reporteLongitudes1}
 ${correccionEncuentro}
 ${correccionApertura}
 ${correccionMeta}
+${correccionPropiedad}
 ${correccionGhostwriter}
+${correccionPerfil}
+${correccionGeo}
 
 Corrige esto ahora:
 - opcion 1 entre 200 y 260 caracteres
@@ -2650,10 +2914,14 @@ Corrige esto ahora:
 - mas utilidad real para el operador
 - cero relleno
 - respeta por completo nombres, afectivos e intencion
+- respeta quien dijo cada hecho
 - no respondas como si la clienta hubiera dicho otra cosa
 - no respondas al operador como si el borrador fuera una consulta a la herramienta
 - si el borrador venia flojo, subele mucho el nivel
 - usa mejor el perfil visible si aporta
+- prioriza intereses en comun
+- no inventes geografia
+- no cambies un lugar por otro
 - no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
 - no inventes saludos
 - no inventes primer contacto
@@ -2667,7 +2935,7 @@ Corrige esto ahora:
       { role: "user", content: userPrompt2 }
     ],
     temperature: ghostwriterMode ? 0.74 : 0.62,
-    maxTokens: ghostwriterMode ? 520 : 440,
+    maxTokens: ghostwriterMode ? 580 : 460,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
@@ -2678,7 +2946,10 @@ Corrige esto ahora:
     .filter((s) => !esRespuestaBasura(s));
 
   const sugerencias2 = sugerencias2Raw.filter(
-    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+    (s) =>
+      !contieneTemaEncuentro(s) &&
+      !violaReglasApertura(s, permisosApertura) &&
+      !violaPropiedadHechosCliente(s, hechosClienteSensibles, textoPlano)
   );
 
   return {
@@ -3464,19 +3735,35 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     );
     const perfilPlano = compactarBloque(
       quitarTildes(limitarContexto(perfil) || "Sin perfil"),
-      280
+      500
     );
 
     const metaEdicion = analisisOperador.metaEdicion;
     const ghostwriterMode = analisisOperador.ghostwriterMode;
 
-    const fingerprint = crearFingerprintSugerencia({
-      operador,
-      textoPlano,
-      clientePlano,
-      contextoPlano,
-      perfilPlano
-    });
+    const perfilEstructurado = parsearPerfilEstructurado(perfilPlano);
+    const esChatNuevoOperativo = detectarChatNuevoOperativo(clientePlano, contextoPlano);
+    const guiaPerfil = construirGuiaPerfil(perfilEstructurado, esChatNuevoOperativo);
+
+    const lineasClienteRecientes = dedupeStrings([
+      ...extraerLineasPorRol(contextoPlano, "CLIENTA").slice(-4),
+      clientePlano || ""
+    ]).slice(-4);
+
+    const lineasOperadorRecientes = dedupeStrings(
+      extraerLineasPorRol(contextoPlano, "OPERADOR").slice(-4)
+    ).slice(-4);
+
+    const hechosClienteSensibles = detectarHechosClienteSensibles(lineasClienteRecientes);
+    const mencionesGeograficasOperador = extraerMencionesGeograficasOperador(texto);
+
+    const fingerprint = [
+      normalizarTexto(operador).slice(0, 80),
+      normalizarTexto(textoPlano).slice(0, 500),
+      normalizarTexto(clientePlano).slice(0, 300),
+      normalizarTexto(contextoPlano).slice(-600),
+      normalizarTexto(perfilPlano).slice(0, 300)
+    ].join("||");
 
     const sharedJob = getSharedInFlight(
       inflightSuggestionJobs,
@@ -3497,7 +3784,14 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
             guiaIntencion,
             permisosApertura,
             metaEdicion,
-            ghostwriterMode
+            ghostwriterMode,
+            perfilEstructurado,
+            guiaPerfil,
+            esChatNuevoOperativo,
+            lineasClienteRecientes,
+            lineasOperadorRecientes,
+            hechosClienteSensibles,
+            mencionesGeograficasOperador
           });
         });
       }
@@ -3513,7 +3807,10 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       : [];
 
     sugerencias = sugerencias.filter(
-      (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+      (s) =>
+        !contieneTemaEncuentro(s) &&
+        !violaReglasApertura(s, permisosApertura) &&
+        !violaPropiedadHechosCliente(s, hechosClienteSensibles, textoPlano)
     );
 
     if (!sugerencias.length) {
