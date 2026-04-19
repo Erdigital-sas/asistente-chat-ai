@@ -1032,6 +1032,15 @@ const TERMINOS_AFECTIVOS = [
   "princesa"
 ];
 
+const SALUDOS_APERTURA_REGEX =
+  /^(hola|hey|hi|buenas|buen dia|buenos dias|buenas tardes|buenas noches)\b/i;
+
+const FRASES_PRIMER_CONTACTO_OPERADOR_REGEX =
+  /\b(conocer mas de ti|conocerte mejor|me gustaria conocerte|quisiera conocerte|quiero conocerte|saber mas de ti|me gustaria saber de ti|conocer un poco mas de ti|hablar contigo por primera vez|charlar contigo por primera vez|romper el hielo|icebreaker|primer contacto)\b/i;
+
+const FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX =
+  /\b(conocerte|conocer mas de ti|saber mas de ti|me gustaria saber de ti|me gustaria conocerte|quisiera conocerte|quiero conocerte|conocer un poco mas de ti|romper el hielo|icebreaker|primer contacto|por primera vez)\b/i;
+
 function extraerNombreEnApertura(texto = "") {
   const limpio = normalizarEspacios(String(texto ?? ""));
   const match = limpio.match(
@@ -1052,6 +1061,64 @@ function extraerNombreEnApertura(texto = "") {
 function extraerAfectivosPresentes(texto = "") {
   const norm = normalizarTexto(texto);
   return TERMINOS_AFECTIVOS.filter((term) => norm.includes(term));
+}
+
+function detectarPermisosApertura({
+  texto = "",
+  cliente = "",
+  contexto = ""
+}) {
+  const operadorNorm = normalizarTexto(texto);
+  const clienteNorm = normalizarTexto(cliente);
+  const lineasCtx = extraerLineasContexto(contexto);
+
+  const saludoExplicito = SALUDOS_APERTURA_REGEX.test(operadorNorm);
+  const primerContactoExplicito = FRASES_PRIMER_CONTACTO_OPERADOR_REGEX.test(operadorNorm);
+
+  const hayHistorial =
+    Boolean(clienteNorm) ||
+    lineasCtx.length > 0;
+
+  const pareceChatViejo =
+    hayHistorial ||
+    /(no me respondes|no respondes|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|otra vez|de nuevo|retomando|seguimos|ya habiamos hablado)/.test(operadorNorm);
+
+  return {
+    saludoExplicito,
+    primerContactoExplicito,
+    hayHistorial,
+    pareceChatViejo
+  };
+}
+
+function violaReglasApertura(
+  sugerencia = "",
+  permisosApertura = {
+    saludoExplicito: false,
+    primerContactoExplicito: false,
+    hayHistorial: false,
+    pareceChatViejo: false
+  }
+) {
+  const sugNorm = normalizarTexto(sugerencia);
+  if (!sugNorm) return false;
+
+  if (!permisosApertura.saludoExplicito && SALUDOS_APERTURA_REGEX.test(sugNorm)) {
+    return true;
+  }
+
+  if (!permisosApertura.primerContactoExplicito &&
+      FRASES_PRIMER_CONTACTO_SUGERENCIA_REGEX.test(sugNorm)) {
+    return true;
+  }
+
+  if (permisosApertura.pareceChatViejo &&
+      !permisosApertura.primerContactoExplicito &&
+      /\b(romper el hielo|primer contacto|por primera vez por aqui|conocer mas de ti|saber mas de ti)\b/.test(sugNorm)) {
+    return true;
+  }
+
+  return false;
 }
 
 function detectarElementosClave(texto = "") {
@@ -1108,7 +1175,13 @@ function originalEsInicioOEnganche(original = "") {
 function esSugerenciaDebil(
   texto = "",
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
+  permisosApertura = {
+    saludoExplicito: false,
+    primerContactoExplicito: false,
+    hayHistorial: false,
+    pareceChatViejo: false
+  }
 ) {
   const t = normalizarTexto(texto);
 
@@ -1117,6 +1190,7 @@ function esSugerenciaDebil(
   if (contieneTemaEncuentro(texto)) return true;
   if (sePareceDemasiado(texto, original)) return true;
   if (faltaElementosClave(texto, elementos)) return true;
+  if (violaReglasApertura(texto, permisosApertura)) return true;
 
   if (
     originalEsInicioOEnganche(original) &&
@@ -1147,12 +1221,21 @@ function esSugerenciaDebil(
 function necesitaSegundoIntento(
   sugerencias = [],
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
+  permisosApertura = {
+    saludoExplicito: false,
+    primerContactoExplicito: false,
+    hayHistorial: false,
+    pareceChatViejo: false
+  }
 ) {
   if (sugerencias.length < 3) return true;
   if (!setCumpleLongitudes(sugerencias)) return true;
 
-  const debiles = sugerencias.filter((s) => esSugerenciaDebil(s, original, elementos)).length;
+  const debiles = sugerencias.filter((s) =>
+    esSugerenciaDebil(s, original, elementos, permisosApertura)
+  ).length;
+
   const distintas = new Set(sugerencias.map(normalizarTexto)).size;
 
   return debiles >= 1 || distintas < 3;
@@ -1410,6 +1493,9 @@ function construirLecturaOperador(analisis) {
 
 function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   const t = normalizarTexto(texto);
+  const hayHistorial =
+    Boolean(normalizarTexto(cliente)) ||
+    extraerLineasContexto(contexto).length > 0;
 
   if (
     /(no me respondes|no respondes|no me contestas|sigues ahi|sigues por aqui|te perdi|apareciste|desapareciste|pensando en ti|me acorde de ti|por que no)/.test(t)
@@ -1430,9 +1516,13 @@ function detectarIntencionOperador(texto = "", cliente = "", contexto = "") {
   }
 
   if (
-    /(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) ||
-    ((!cliente && !contexto) && /^(hola|hey|hi)\b/.test(t))
+    /(vi que|tu perfil|me llamo la atencion|intereses en comun|conocer mas de ti)/.test(t) &&
+    !hayHistorial
   ) {
+    return "enganche";
+  }
+
+  if (!hayHistorial && /^(hola|hey|hi)\b/.test(t)) {
     return "enganche";
   }
 
@@ -1483,7 +1573,49 @@ function construirBloqueConservacion(elementosClave) {
   return partes.join("\n");
 }
 
+function construirBloqueAperturaControlada(permisosApertura) {
+  const partes = [];
+
+  if (permisosApertura.saludoExplicito) {
+    partes.push(
+      "El operador si escribio un saludo explicito. Puedes conservarlo sin duplicarlo ni cambiarlo."
+    );
+  } else {
+    partes.push(
+      "El operador NO escribio un saludo explicito. No puedes abrir con hola, hey, hi, buenas ni ningun saludo equivalente."
+    );
+  }
+
+  if (permisosApertura.primerContactoExplicito) {
+    partes.push(
+      "El operador si escribio una intencion explicita de primer contacto. Puedes conservarla sin exagerar."
+    );
+  } else {
+    partes.push(
+      "El operador NO pidio primer contacto. No puedes meter frases para conocerla, saber mas de ella, romper el hielo o similares."
+    );
+  }
+
+  if (permisosApertura.pareceChatViejo) {
+    partes.push(
+      "Este chat ya tiene historial o parece reenganche. No lo trates como nuevo ni reinicies la conversacion."
+    );
+  }
+
+  partes.push(
+    "Nunca inventes aperturas, saludos o frases de primer contacto solo para sonar mas natural."
+  );
+
+  return partes.join("\n");
+}
+
 function construirSystemPrompt(
+  permisosApertura = {
+    saludoExplicito: false,
+    primerContactoExplicito: false,
+    hayHistorial: false,
+    pareceChatViejo: false
+  },
   elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false },
   segundoIntento = false
 ) {
@@ -1518,6 +1650,9 @@ No confundas esos roles
 
 CONSERVACION OBLIGATORIA
 ${construirBloqueConservacion(elementosClave)}
+
+APERTURA CONTROLADA
+${construirBloqueAperturaControlada(permisosApertura)}
 
 CONVERSACION SOLO DENTRO DE LA APP
 Nunca sugieras, insinues ni invites a:
@@ -1571,8 +1706,9 @@ Verifica que las 3 opciones:
 - sean claramente distintas entre si
 - cumplan la longitud pedida
 - no incluyan encuentros ni planes presenciales
+- no inventen saludos ni primer contacto
 - esten listas para enviar
-${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco o alusiones a encuentros del intento anterior" : ""}
+${segundoIntento ? "- corrijan por completo cualquier problema de longitud, genericidad, falta de foco, saludos no autorizados, primer contacto no autorizado o alusiones a encuentros del intento anterior" : ""}
 
 SALIDA
 Devuelve exactamente 3 lineas numeradas como 1. 2. y 3.
@@ -1592,7 +1728,8 @@ function construirUserPrompt({
   contactoExterno,
   elementosClave,
   intencionOperador,
-  guiaIntencion
+  guiaIntencion,
+  permisosApertura
 }) {
   return `
 CASO REAL
@@ -1640,6 +1777,16 @@ Nombre en apertura: ${elementosClave.nombreApertura || "ninguno"}
 Terminos afectivos: ${elementosClave.afectivos.length ? elementosClave.afectivos.join(", ") : "ninguno"}
 Mensaje corto: ${elementosClave.mensajeCorto ? "si" : "no"}
 
+CONTROL DE APERTURA
+Saludo explicito en borrador: ${permisosApertura.saludoExplicito ? "si" : "no"}
+Primer contacto explicito en borrador: ${permisosApertura.primerContactoExplicito ? "si" : "no"}
+Chat con historial o reenganche: ${permisosApertura.pareceChatViejo ? "si" : "no"}
+
+REGLA DURA DE APERTURA
+Si el operador no escribio saludo, no abras con hola, hey, hi, buenas ni equivalente.
+Si el operador no escribio una intencion de primer contacto, no metas frases como conocerte, conocer mas de ti, saber mas de ti, romper el hielo o similares.
+Si el chat ya tiene historial, no lo trates como cliente nuevo.
+
 RESTRICCION ABSOLUTA
 Nunca propongas vernos, salir, cenar, tomar algo, conocernos en persona, visitarnos ni ningun plan presencial.
 
@@ -1656,6 +1803,8 @@ Usa el ultimo mensaje de la clienta como prioridad
 Usa contexto o perfil solo si mejoran de verdad la respuesta
 Mantente dentro de la app si hay solicitud de contacto externo
 No sugieras encuentros presenciales
+No inventes saludos
+No inventes primer contacto
 Escribe como si la clienta fuera a leer el mensaje final
 `.trim();
 }
@@ -2285,7 +2434,13 @@ function elegirMejorSet(
   primary = [],
   secondary = [],
   original = "",
-  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false }
+  elementos = { nombreApertura: "", afectivos: [], mensajeCorto: false },
+  permisosApertura = {
+    saludoExplicito: false,
+    primerContactoExplicito: false,
+    hayHistorial: false,
+    pareceChatViejo: false
+  }
 ) {
   const puntuar = (arr) => {
     if (!arr.length) return -999;
@@ -2295,8 +2450,9 @@ function elegirMejorSet(
     score += new Set(arr.map(normalizarTexto)).size * 5;
     score += arr.reduce((acc, s, idx) => acc + puntuarLongitud(s, idx), 0);
     score += arr.filter((s) => !sePareceDemasiado(s, original)).length * 2;
-    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos)).length * 8;
+    score -= arr.filter((s) => esSugerenciaDebil(s, original, elementos, permisosApertura)).length * 8;
     score -= arr.filter((s) => contieneTemaEncuentro(s)).length * 20;
+    score -= arr.filter((s) => violaReglasApertura(s, permisosApertura)).length * 20;
     score += setCumpleLongitudes(arr) ? 18 : -18;
 
     return score;
@@ -2316,7 +2472,8 @@ async function generarSugerencias({
   contactoExterno,
   elementosClave,
   intencionOperador,
-  guiaIntencion
+  guiaIntencion,
+  permisosApertura
 }) {
   const userPrompt = construirUserPrompt({
     textoPlano,
@@ -2329,14 +2486,15 @@ async function generarSugerencias({
     contactoExterno,
     elementosClave,
     intencionOperador,
-    guiaIntencion
+    guiaIntencion,
+    permisosApertura
   });
 
   const data1 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
-      { role: "system", content: construirSystemPrompt(elementosClave, false) },
+      { role: "system", content: construirSystemPrompt(permisosApertura, elementosClave, false) },
       { role: "user", content: userPrompt }
     ],
     temperature: 0.56,
@@ -2350,10 +2508,14 @@ async function generarSugerencias({
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
 
-  const sugerencias1 = sugerencias1Raw.filter((s) => !contieneTemaEncuentro(s));
-  const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
+  const sugerencias1 = sugerencias1Raw.filter(
+    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+  );
 
-  if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave)) {
+  const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
+  const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, permisosApertura));
+
+  if (!necesitaSegundoIntento(sugerencias1, textoPlano, elementosClave, permisosApertura)) {
     return {
       sugerencias: sugerencias1.slice(0, 3),
       usageData: data1
@@ -2367,6 +2529,10 @@ async function generarSugerencias({
     ? "Se detectaron alusiones prohibidas a verse en persona, cena, cafe, salida o plan presencial. Corrigelo por completo."
     : "No incluyas ninguna alusion a verse en persona ni a planes presenciales.";
 
+  const correccionApertura = huboAperturaInvalida1
+    ? "Se detectaron saludos o frases de primer contacto no autorizadas. No abras con hola ni metas frases para conocerla si el operador no lo escribio."
+    : "No inventes saludos ni frases de primer contacto si no vienen en el borrador del operador.";
+
   const userPrompt2 = `
 ${userPrompt}
 
@@ -2377,6 +2543,7 @@ Reporte del intento anterior:
 ${reporteLongitudes1}
 
 ${correccionEncuentro}
+${correccionApertura}
 
 Corrige esto ahora:
 - opcion 1 entre 200 y 260 caracteres
@@ -2389,13 +2556,15 @@ Corrige esto ahora:
 - respeta por completo nombres, afectivos e intencion
 - no respondas como si la clienta hubiera dicho otra cosa
 - no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
+- no inventes saludos
+- no inventes primer contacto
 `.trim();
 
   const data2 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
-      { role: "system", content: construirSystemPrompt(elementosClave, true) },
+      { role: "system", content: construirSystemPrompt(permisosApertura, elementosClave, true) },
       { role: "user", content: userPrompt2 }
     ],
     temperature: 0.62,
@@ -2409,14 +2578,17 @@ Corrige esto ahora:
     .map(limpiarSalidaHumana)
     .filter((s) => !esRespuestaBasura(s));
 
-  const sugerencias2 = sugerencias2Raw.filter((s) => !contieneTemaEncuentro(s));
+  const sugerencias2 = sugerencias2Raw.filter(
+    (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+  );
 
   return {
     sugerencias: elegirMejorSet(
       sugerencias1,
       sugerencias2,
       textoPlano,
-      elementosClave
+      elementosClave,
+      permisosApertura
     ).slice(0, 3),
     usageData: sumarUsage(data1, data2)
   };
@@ -3153,6 +3325,12 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
     const lecturaOperador = construirLecturaOperador(analisisOperador);
 
     const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
+    const permisosApertura = detectarPermisosApertura({
+      texto,
+      cliente,
+      contexto
+    });
+
     const intencionOperador = detectarIntencionOperador(
       texto,
       cliente,
@@ -3198,7 +3376,8 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
             contactoExterno: analisisCliente.contacto,
             elementosClave,
             intencionOperador,
-            guiaIntencion
+            guiaIntencion,
+            permisosApertura
           });
         });
       }
@@ -3213,7 +3392,9 @@ app.post("/sugerencias", autorizarOperador, async (req, res) => {
       ? resultado.sugerencias
       : [];
 
-    sugerencias = sugerencias.filter((s) => !contieneTemaEncuentro(s));
+    sugerencias = sugerencias.filter(
+      (s) => !contieneTemaEncuentro(s) && !violaReglasApertura(s, permisosApertura)
+    );
 
     if (!sugerencias.length) {
       sugerencias = ["Escribe un poco mas de contexto"];
