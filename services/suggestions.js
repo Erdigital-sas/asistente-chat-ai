@@ -8,6 +8,7 @@ const {
   compactarBloque,
   limpiarSalidaHumana,
   normalizarTexto,
+  normalizarEspacios,
   dedupeStrings,
   contarCaracteres
 } = require("../lib/utils");
@@ -51,16 +52,24 @@ const CONTACTO_REGEX =
   /\b(whatsapp|telegram|phone|number|numero|telefono|instagram|facebook|snapchat|snap|discord|mail|correo|email|contact|wechat|line|kik|skype|intercambiar numeros|pasarte mi numero|darte mi numero|hablar por fuera|escribir por fuera)\b/i;
 
 const GHOSTING_REGEX =
-  /\b(visto|me dejaste en visto|me has dejado en visto|no respondes|no me respondes|no me contestas|desapareciste|te perdi|sigues ahi|por que no respondes)\b/i;
+  /\b(visto|me dejaste en visto|me has dejado en visto|no respondes|no me respondes|no me contestas|desapareciste|te perdi|sigues ahi|por que no respondes|sinfin de mensajes|sinfIn de mensajes|no he obtenido respuesta)\b/i;
 
 const MEDIA_REGEX =
-  /\b(foto|selfie|imagen|video|audio|voz|pic|picture|photo|snapshot|video clip|voice note)\b/i;
+  /\b(foto|selfie|imagen|video|audio|voz|pic|picture|photo|snapshot|voice note)\b/i;
 
 const CONFLICT_REGEX =
-  /\b(discutir|discutiendo|discusion|pelea|malentendido|no quiero seguir asi|si esto va a ser asi|frustrante|cortamos|relacion aqui|bothering|boring you|sorry for bothering)\b/i;
+  /\b(discutir|discutiendo|discusion|pelea|malentendido|si esto va a ser asi|frustrante|cortamos|relacion aqui|bothering|boring you|sorry for bothering|dinamica|tension)\b/i;
 
 const MULETILLA_REGEX =
   /\b(me gustaria saber mas de ti|mas sobre ti|me encantaria hablar contigo|podemos encontrar un terreno comun|lo que te inspira|lo que te apasiona|seguir conversando|me gustaria conocer mas de ti)\b/i;
+
+const STOPWORDS_ANCLA = new Set([
+  "hola", "como", "estas", "esta", "pero", "porque", "por", "para", "quiero",
+  "saber", "gustaria", "hablar", "conversar", "mensaje", "mensajes", "respuesta",
+  "respuestas", "quieres", "quiero", "tengo", "tiene", "tener", "buen", "buena",
+  "sobre", "algo", "este", "esta", "esto", "esas", "esos", "aqui", "alla",
+  "muy", "poco", "mucho", "tambien", "solo", "igual", "donde", "cuando"
+]);
 
 function sumarUsage(...datas) {
   const usage = {
@@ -79,7 +88,36 @@ function sumarUsage(...datas) {
   return { usage };
 }
 
-function detectarMode(caso = {}) {
+function extraerPrimerJson(texto = "") {
+  const raw = String(texto || "").trim();
+  if (!raw) return null;
+
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end < 0 || end <= start) return null;
+
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch (_err) {
+    return null;
+  }
+}
+
+function tokenizarAnchor(anchor = "") {
+  return normalizarTexto(anchor)
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !STOPWORDS_ANCLA.has(w));
+}
+
+function tieneAnclaReal(sugerencia = "", anchor = "") {
+  const tokens = tokenizarAnchor(anchor);
+  if (!tokens.length) return true;
+
+  const salida = new Set(normalizarTexto(sugerencia).split(/\s+/).filter(Boolean));
+  return tokens.some((t) => salida.has(t));
+}
+
+function detectarModeHeuristico(caso = {}) {
   const bloque = [
     caso.textoPlano || "",
     caso.clientePlano || "",
@@ -103,26 +141,39 @@ function detectarMode(caso = {}) {
   return "DEFAULT";
 }
 
-function detectarAnchor(caso = {}) {
-  if (caso.mode === "CONTACT_BLOCK") {
-    return "mantener la conversacion dentro de la app y redirigir a un tema concreto";
+function detectarAnchorHeuristico(caso = {}, mode = "DEFAULT") {
+  if (mode === "CONTACT_BLOCK") {
+    const cand = [
+      caso.clientePlano,
+      ...(caso.lineasClienteRecientes || []),
+      caso.textoPlano
+    ].find((x) => CONTACTO_REGEX.test(x || ""));
+    return cand
+      ? limpiarSalidaHumana(cand).slice(0, 180)
+      : "mantener la conversacion dentro de la app y redirigir a un tema concreto";
   }
 
-  if (caso.mode === "MEDIA_REPLY") {
-    const bloque = [
-      caso.textoPlano || "",
-      caso.clientePlano || "",
+  if (mode === "MEDIA_REPLY") {
+    const cand = [
+      caso.textoPlano,
+      caso.clientePlano,
       ...(caso.lineasClienteRecientes || [])
     ].find((x) => MEDIA_REGEX.test(x || ""));
-    if (bloque) return limpiarSalidaHumana(bloque).slice(0, 180);
+    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
   }
 
-  if (caso.mode === "GHOSTING") {
-    return "el borrador del operador habla del silencio o de dejar en visto";
+  if (mode === "GHOSTING") {
+    return limpiarSalidaHumana(caso.textoPlano || "").slice(0, 180);
   }
 
-  if (caso.mode === "CONFLICT_REFRAME") {
-    return "hay tension o malentendido en el chat y la respuesta debe bajar la friccion";
+  if (mode === "CONFLICT_REFRAME") {
+    const cand = [
+      caso.textoPlano,
+      caso.clientePlano,
+      ...(caso.lineasClienteRecientes || [])
+    ].find((x) => CONFLICT_REGEX.test(x || ""));
+    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
+    return "hay tension o malentendido y la respuesta debe bajar la friccion";
   }
 
   if (caso.anclarEnUltimoMensajeCliente && caso.lineasClienteRecientes?.length) {
@@ -139,10 +190,159 @@ function detectarAnchor(caso = {}) {
     "";
 
   if (interes) {
-    return `interes concreto del perfil: ${interes}`;
+    return `interes del perfil: ${interes}`;
   }
 
   return "anclarse al borrador del operador sin volverse abstracto";
+}
+
+function planHeuristico(caso = {}) {
+  const mode = detectarModeHeuristico(caso);
+  const anchor = detectarAnchorHeuristico(caso, mode);
+
+  const useProfileInterest =
+    mode === "NEW_CHAT" ||
+    mode === "PROFILE_SUPPORT";
+
+  const chosenInterest =
+    useProfileInterest
+      ? (
+          caso.perfilEstructurado?.interesesEnComun?.[0] ||
+          caso.perfilEstructurado?.interesesClienta?.[0] ||
+          ""
+        )
+      : "";
+
+  const forbidden = [
+    "muletillas abstractas",
+    "continuidad falsa",
+    "desviarse del ancla"
+  ];
+
+  if (caso.temaContactoExterno) forbidden.push("repetir numero o validar contacto externo");
+
+  const summaryMap = {
+    NEW_CHAT: "enganche directo y concreto usando perfil solo si aporta",
+    REPLY_LAST_MESSAGE: "responder primero a lo ultimo que ella dijo",
+    GHOSTING: "reapertura segura, concreta y sin resentimiento",
+    CONTACT_BLOCK: "mantener la charla dentro de la app con redireccion concreta",
+    MEDIA_REPLY: "anclarse al contenido multimedia antes que al perfil",
+    CONFLICT_REFRAME: "bajar tension y responder con tacto",
+    PROFILE_SUPPORT: "usar un interes concreto como apoyo, no como muletilla",
+    DEFAULT: "seguir el borrador real y evitar deriva generica"
+  };
+
+  return {
+    mode,
+    anchor,
+    use_profile_interest: Boolean(chosenInterest),
+    chosen_interest: chosenInterest,
+    summary: summaryMap[mode] || summaryMap.DEFAULT,
+    forbidden
+  };
+}
+
+async function planificarCaso(caso = {}) {
+  const plannerSystem = `
+Eres un analista conversacional para un operador que escribe a una clienta dentro de una app.
+No redactas el mensaje final.
+Solo devuelves un JSON corto y util.
+
+MODOS VALIDOS
+NEW_CHAT
+REPLY_LAST_MESSAGE
+GHOSTING
+CONTACT_BLOCK
+MEDIA_REPLY
+CONFLICT_REFRAME
+PROFILE_SUPPORT
+DEFAULT
+
+OBJETIVO
+Clasificar el caso correctamente y fijar una ancla obligatoria.
+La ancla debe ser concreta, no abstracta.
+
+REGLAS
+- Si hay contacto externo, prioriza CONTACT_BLOCK
+- Si hay foto, video, audio o imagen como tema real, prioriza MEDIA_REPLY
+- Si el borrador habla de dejar en visto o silencio, prioriza GHOSTING
+- Si hay tension o malentendido, usa CONFLICT_REFRAME
+- Si no hay respuesta real previa, usa NEW_CHAT
+- Si hay ultimo mensaje real de la clienta y el operador no trae tema propio, usa REPLY_LAST_MESSAGE
+- PROFILE_SUPPORT solo si el perfil realmente ayuda
+- No inventes datos
+- Devuelve solo JSON valido
+`.trim();
+
+  const plannerUser = `
+BORRADOR
+${caso.textoPlano}
+
+ULTIMO MENSAJE REAL DE LA CLIENTA
+${caso.clientePlano || "Sin mensaje claro"}
+
+ULTIMAS LINEAS DE CLIENTA
+${(caso.lineasClienteRecientes || []).join(" | ") || "Sin lineas"}
+
+CONTEXTO
+${caso.contextoPlano || "Sin contexto"}
+
+INTERESES_EN_COMUN
+${(caso.perfilEstructurado?.interesesEnComun || []).join(" | ") || "Ninguno"}
+
+INTERESES_CLIENTA
+${(caso.perfilEstructurado?.interesesClienta || []).join(" | ") || "Ninguno"}
+
+DATOS
+hay_conversacion_real=${caso.estadoConversacion?.hayConversacionReal ? "si" : "no"}
+operador_trae_tema_propio=${caso.operadorTraeTemaPropio ? "si" : "no"}
+tema_contacto_externo=${caso.temaContactoExterno ? "si" : "no"}
+
+Devuelve este JSON:
+{
+  "mode": "",
+  "anchor": "",
+  "use_profile_interest": false,
+  "chosen_interest": "",
+  "summary": "",
+  "forbidden": []
+}
+`.trim();
+
+  const data = await llamarOpenAI({
+    lane: "sugerencias",
+    model: OPENAI_MODEL_SUGGESTIONS,
+    messages: [
+      { role: "system", content: plannerSystem },
+      { role: "user", content: plannerUser }
+    ],
+    temperature: 0.1,
+    maxTokens: 120,
+    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
+  });
+
+  const parsed = extraerPrimerJson(data?.choices?.[0]?.message?.content || "");
+
+  if (!parsed || !parsed.mode || !parsed.anchor) {
+    return {
+      plan: planHeuristico(caso),
+      usageData: data
+    };
+  }
+
+  return {
+    plan: {
+      mode: String(parsed.mode || "DEFAULT").trim(),
+      anchor: limpiarSalidaHumana(String(parsed.anchor || "")),
+      use_profile_interest: Boolean(parsed.use_profile_interest),
+      chosen_interest: limpiarSalidaHumana(String(parsed.chosen_interest || "")),
+      summary: limpiarSalidaHumana(String(parsed.summary || "")),
+      forbidden: Array.isArray(parsed.forbidden)
+        ? parsed.forbidden.map((x) => limpiarSalidaHumana(String(x || ""))).filter(Boolean).slice(0, 8)
+        : []
+    },
+    usageData: data
+  };
 }
 
 function prepararCasoSugerencias({
@@ -258,12 +458,11 @@ function prepararCasoSugerencias({
     mencionesGeograficasOperador
   };
 
-  const mode = detectarMode(baseCaso);
-  const anchor = detectarAnchor({ ...baseCaso, mode });
+  const heuristico = planHeuristico(baseCaso);
 
   const fingerprint = [
-    "premium-v3",
-    mode,
+    "premium-planner-writer-v1",
+    heuristico.mode,
     normalizarTexto(textoPlano).slice(0, 420),
     normalizarTexto(clientePlano).slice(0, 260),
     normalizarTexto(contextoPlano).slice(-500),
@@ -272,8 +471,8 @@ function prepararCasoSugerencias({
 
   return {
     ...baseCaso,
-    mode,
-    anchor,
+    mode: heuristico.mode,
+    anchor: heuristico.anchor,
     fingerprint
   };
 }
@@ -311,7 +510,7 @@ function violaReglaContactoExterno(sugerencia = "", caso = {}) {
 function violaReglaModo(sugerencia = "", caso = {}) {
   const t = normalizarTexto(sugerencia);
 
-  if (caso.mode === "MEDIA_REPLY" && !MEDIA_REGEX.test(`${caso.anchor} ${sugerencia}`)) {
+  if (caso.mode === "MEDIA_REPLY" && !tieneAnclaReal(sugerencia, caso.anchor)) {
     return true;
   }
 
@@ -351,39 +550,40 @@ function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
 
 function construirFallbackSugerencias(caso = {}) {
   const interes =
+    caso.plan?.chosen_interest ||
     caso.perfilEstructurado?.interesesEnComun?.[0] ||
     caso.perfilEstructurado?.interesesClienta?.[0] ||
     "";
 
   const fallbacks = {
     CONTACT_BLOCK: [
-      "Me caes bien, pero por ahora prefiero que sigamos aqui y dejemos que la charla tome mas forma. Me quede con curiosidad por algo mas simple: que detalle de tu dia suele ponerte de mejor humor?"
+      "Entiendo que prefieras cambiar la forma en que hablamos, pero por ahora me siento mas comodo aqui. Si te parece, sigamos con algo mas simple: que fue lo mejor que te dejo tu dia?"
     ],
     GHOSTING: [
       "No queria quedarme en la parte incomoda del silencio, sino escribirte algo mejor. Si te nace seguir, me basta una respuesta sincera y ligera para retomar esto con mejor energia y sin presion."
     ],
     MEDIA_REPLY: [
-      "La imagen que compartiste deja una impresion muy clara y se nota que hay una energia real ahi. Mas que quedarme en lo obvio, me dio curiosidad saber que detalle de ese momento te gusto mas a ti cuando decidiste enviarlo."
+      "Lo que compartiste deja una impresion muy clara y se nota que hubo una intencion real al enviarlo. Mas que quedarme en lo obvio, me dio curiosidad saber que detalle de ese momento fue el que mas te gusto a ti."
     ],
     CONFLICT_REFRAME: [
-      "No quiero que esto se quede en una tension innecesaria. Prefiero que hablemos con mas calma y de una forma mas clara, porque cuando una conversacion vale la pena tambien merece un poco mas de cuidado."
+      "No quiero que esto se quede en una dinamica pesada. Prefiero que hablemos con mas calma y de una forma mas clara, porque cuando una charla vale la pena tambien merece un poco mas de cuidado."
     ],
     NEW_CHAT: interes
       ? [
-          `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes.toLowerCase()} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque suele decir bastante mas de alguien que una descripcion rapida.`
+          `Vi que ${interes.toLowerCase()} aparece en tu perfil y preferi escribirte algo mas concreto. Siempre me llama la atencion cuando un gusto no esta ahi por adornar, sino porque realmente dice algo de como es alguien.`
         ]
       : [
-          "No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia."
+          "No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia."
         ],
     REPLY_LAST_MESSAGE: [
       "Me quede pensando en lo ultimo que compartiste y preferi responderte con mas intencion y menos piloto automatico. Hay algo en tu forma de decir las cosas que deja curiosidad, y eso siempre vuelve mas interesante una charla."
     ],
     PROFILE_SUPPORT: interes
       ? [
-          `Vi que ${interes.toLowerCase()} aparece en tu perfil y preferi ir por algo mas concreto. Siempre me llama la atencion cuando un gusto no esta ahi por adornar, sino porque realmente dice algo de como es alguien.`
+          `Vi que ${interes.toLowerCase()} aparece en tu perfil y me fui por algo mas concreto que una curiosidad comun. A veces un gusto bien elegido dice mucho mas de alguien que una presentacion armada.`
         ]
       : [
-          "No queria dejarte algo comun, asi que preferi escribirte mejor. A veces un detalle concreto dice mucho mas que una presentacion armada, y me dio curiosidad saber que es lo que mas te representa de verdad."
+          "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. A veces un detalle concreto dice mucho mas que una presentacion armada, y me dio curiosidad saber que es lo que mas te representa de verdad."
         ],
     DEFAULT: [
       "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, gusto o forma de ver las cosas es la que mas te representa cuando de verdad estas en tu mejor energia."
@@ -393,46 +593,18 @@ function construirFallbackSugerencias(caso = {}) {
   return fallbacks[caso.mode] || fallbacks.DEFAULT;
 }
 
-function construirRescuePrompt(caso = {}, candidata = "") {
-  return `
-La respuesta anterior no fue valida o no fue lo bastante precisa.
-
-RESPUESTA ANTERIOR
-"""
-${candidata || "vacia"}
-"""
-
-REPARA ESTO AHORA
-- una sola respuesta entre 170 y 300 caracteres
-- mucho mas concreta
-- humana y premium
-- RESPETA EL MODO: ${caso.mode}
-- RESPETA EL ANCLA: ${caso.anchor}
-- si hay tema de contacto externo, manten todo dentro de la app y no menciones numeros ni canales externos
-- si no hay respuesta real previa de la clienta, no uses continuidad falsa
-- si hay un interes del perfil disponible, usa uno concreto
-- no uses frases gastadas ni abstractas
-- no inventes saludos
-- no inventes nombres
-- no propongas encuentros
-- devuelve solo el mensaje final
-`.trim();
-}
-
-function necesitaRescue(caso = {}, candidata = "") {
-  const t = normalizarTexto(candidata || "");
-
-  if (!candidata || !cumpleLongitudPremium(candidata)) return true;
-  if (MULETILLA_REGEX.test(t)) return true;
-  if (caso.mode === "CONTACT_BLOCK") return true;
-
-  return ["GHOSTING", "MEDIA_REPLY", "CONFLICT_REFRAME"].includes(caso.mode);
-}
-
 async function generarSugerencias(caso = {}) {
+  const planned = await planificarCaso(caso);
+  const plan = planned.plan || planHeuristico(caso);
+
+  caso.mode = plan.mode || caso.mode || "DEFAULT";
+  caso.anchor = plan.anchor || caso.anchor || detectarAnchorHeuristico(caso, caso.mode);
+  caso.plan = plan;
+
   const userPrompt = construirUserPrompt({
     mode: caso.mode,
     anchor: caso.anchor,
+    planSummary: plan.summary || "",
     textoPlano: caso.textoPlano,
     clientePlano: caso.clientePlano,
     contextoPlano: caso.contextoPlano,
@@ -458,7 +630,7 @@ async function generarSugerencias(caso = {}) {
     permisosApertura: caso.permisosApertura
   });
 
-  const data1 = await llamarOpenAI({
+  const dataWriter = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
@@ -475,63 +647,21 @@ async function generarSugerencias(caso = {}) {
         content: userPrompt
       }
     ],
-    temperature: caso.ghostwriterMode ? 0.66 : 0.58,
+    temperature: caso.ghostwriterMode ? 0.62 : 0.54,
     maxTokens: 150,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const candidata1 = extraerPrimeraSugerenciaPremium(
-    data1?.choices?.[0]?.message?.content || ""
+  const candidata = extraerPrimeraSugerenciaPremium(
+    dataWriter?.choices?.[0]?.message?.content || ""
   );
 
-  const sugerencias1 = filtrarSugerenciasFinales([candidata1], caso);
+  const sugerencias = filtrarSugerenciasFinales([candidata], caso);
 
-  if (sugerencias1.length && !necesitaRescue(caso, sugerencias1[0])) {
+  if (sugerencias.length) {
     return {
-      sugerencias: [sugerencias1[0]],
-      usageData: data1
-    };
-  }
-
-  if (!necesitaRescue(caso, candidata1)) {
-    return {
-      sugerencias: [candidata1],
-      usageData: data1
-    };
-  }
-
-  const data2 = await llamarOpenAI({
-    lane: "sugerencias",
-    model: OPENAI_MODEL_SUGGESTIONS,
-    messages: [
-      {
-        role: "system",
-        content: construirSystemPrompt(
-          caso.permisosApertura,
-          caso.elementosClave,
-          caso.mode
-        )
-      },
-      {
-        role: "user",
-        content: `${userPrompt}\n\n${construirRescuePrompt(caso, candidata1)}`
-      }
-    ],
-    temperature: 0.38,
-    maxTokens: 150,
-    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
-  });
-
-  const candidata2 = extraerPrimeraSugerenciaPremium(
-    data2?.choices?.[0]?.message?.content || ""
-  );
-
-  const sugerencias2 = filtrarSugerenciasFinales([candidata2], caso);
-
-  if (sugerencias2.length) {
-    return {
-      sugerencias: [sugerencias2[0]],
-      usageData: sumarUsage(data1, data2)
+      sugerencias: [sugerencias[0]],
+      usageData: sumarUsage(planned.usageData, dataWriter)
     };
   }
 
@@ -543,7 +673,7 @@ async function generarSugerencias(caso = {}) {
   if (fallback.length) {
     return {
       sugerencias: [fallback[0]],
-      usageData: sumarUsage(data1, data2)
+      usageData: sumarUsage(planned.usageData, dataWriter)
     };
   }
 
@@ -551,7 +681,7 @@ async function generarSugerencias(caso = {}) {
     sugerencias: [
       "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, gusto o forma de ver las cosas es la que mas te representa cuando de verdad estas en tu mejor energia."
     ],
-    usageData: sumarUsage(data1, data2)
+    usageData: sumarUsage(planned.usageData, dataWriter)
   };
 }
 
