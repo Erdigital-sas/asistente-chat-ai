@@ -1,4 +1,3 @@
-// services/suggestions.js
 const {
   OPENAI_MODEL_SUGGESTIONS,
   OPENAI_TIMEOUT_SUGGESTIONS_MS
@@ -36,7 +35,8 @@ const {
   parsearPerfilEstructurado,
   construirGuiaPerfil,
   detectarHechosClienteSensibles,
-  extraerMencionesGeograficasOperador
+  extraerMencionesGeograficasOperador,
+  esSolicitudContacto
 } = require("../lib/text");
 
 const { construirSystemPrompt } = require("../prompts/systemPrompt");
@@ -45,7 +45,9 @@ const { llamarOpenAI } = require("./openai");
 
 const PREMIUM_MIN_CHARS = 170;
 const PREMIUM_MAX_CHARS = 300;
-const PREMIUM_IDEAL_CHARS = 230;
+
+const CONTACTO_REGEX =
+  /\b(whatsapp|telegram|phone|number|numero|telefono|instagram|facebook|snapchat|snap|discord|mail|correo|email|contact|wechat|line|kik|skype|intercambiar numeros|pasarte mi numero|darte mi numero|hablar por fuera|escribir por fuera)\b/i;
 
 function sumarUsage(...datas) {
   const usage = {
@@ -78,15 +80,15 @@ function prepararCasoSugerencias({
   const lecturaCliente = construirLecturaCliente(analisisCliente);
 
   const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
-  const textoPlano = compactarBloque(texto, 760);
-  const clientePlano = compactarBloque(cliente, 420);
+  const textoPlano = compactarBloque(texto, 820);
+  const clientePlano = compactarBloque(cliente, 520);
   const contextoPlano = compactarBloque(
     limitarContexto(contextoFiltrado),
-    620
+    900
   );
   const perfilPlano = compactarBloque(
     limitarContexto(perfil),
-    320
+    420
   );
 
   const estadoConversacion = construirEstadoConversacion(clientePlano, contextoPlano);
@@ -114,12 +116,12 @@ function prepararCasoSugerencias({
   const guiaPerfil = construirGuiaPerfil(perfilEstructurado, esChatNuevoOperativo);
 
   const lineasClienteRecientes = dedupeStrings(
-    estadoConversacion.lineasClienta.slice(-2)
-  ).slice(-2);
+    estadoConversacion.lineasClienta.slice(-3)
+  ).slice(-3);
 
   const lineasOperadorRecientes = dedupeStrings(
-    estadoConversacion.lineasOperador.slice(-2)
-  ).slice(-2);
+    estadoConversacion.lineasOperador.slice(-3)
+  ).slice(-3);
 
   const anclarEnUltimoMensajeCliente =
     estadoConversacion.hayConversacionReal &&
@@ -138,13 +140,16 @@ function prepararCasoSugerencias({
 
   const hechosClienteSensibles = detectarHechosClienteSensibles(lineasClienteRecientes);
   const mencionesGeograficasOperador = extraerMencionesGeograficasOperador(texto);
+  const contactoEnBorrador = esSolicitudContacto(texto);
+  const temaContactoExterno = Boolean(analisisCliente.contacto || contactoEnBorrador);
 
   const fingerprint = [
-    "premium-v1",
+    "premium-v2",
     normalizarTexto(textoPlano).slice(0, 420),
-    normalizarTexto(clientePlano).slice(0, 240),
-    normalizarTexto(contextoPlano).slice(-420),
-    normalizarTexto(perfilPlano).slice(0, 220)
+    normalizarTexto(clientePlano).slice(0, 260),
+    normalizarTexto(contextoPlano).slice(-500),
+    normalizarTexto(perfilPlano).slice(0, 260),
+    temaContactoExterno ? "contacto-si" : "contacto-no"
   ].join("||");
 
   return {
@@ -164,6 +169,8 @@ function prepararCasoSugerencias({
     lecturaOperador,
     tonoCliente: analisisCliente.tono,
     contactoExterno: analisisCliente.contacto,
+    contactoEnBorrador,
+    temaContactoExterno,
     estadoConversacion,
     permisosApertura,
     intencionOperador,
@@ -204,13 +211,13 @@ function cumpleLongitudPremium(texto = "") {
   return total >= PREMIUM_MIN_CHARS && total <= PREMIUM_MAX_CHARS;
 }
 
-function puntuarLongitudPremium(texto = "") {
-  const total = contarCaracteres(texto);
-  if (!total) return -20;
-  if (cumpleLongitudPremium(texto)) return 10;
+function violaReglaContactoExterno(sugerencia = "", caso = {}) {
+  if (!caso.temaContactoExterno) return false;
 
-  const distancia = Math.abs(total - PREMIUM_IDEAL_CHARS);
-  return Math.max(-10, 6 - Math.ceil(distancia / 20));
+  const t = normalizarTexto(sugerencia);
+  if (CONTACTO_REGEX.test(t)) return true;
+
+  return !/\b(aqui|por aqui|seguir aqui|mejor aqui|prefiero aqui|prefiero por aqui|desde aqui)\b/.test(t);
 }
 
 function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
@@ -222,6 +229,7 @@ function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
     .filter((s) => !violaReglasApertura(s, caso.permisosApertura))
     .filter((s) => !violaPropiedadHechosCliente(s, caso.hechosClienteSensibles, caso.textoPlano))
     .filter((s) => !violaReglaContinuidad(s, caso.estadoConversacion, caso.operadorTraeTemaPropio))
+    .filter((s) => !violaReglaContactoExterno(s, caso))
     .filter((s) => !META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)))
     .filter((s) => !esSugerenciaDebil(
       s,
@@ -237,7 +245,8 @@ function construirFallbackSugerencias({
   texto = "",
   cliente = "",
   estadoConversacion = null,
-  perfilEstructurado = null
+  perfilEstructurado = null,
+  temaContactoExterno = false
 }) {
   const textoLimpio = limpiarSalidaHumana(texto || "");
   const estado = estadoConversacion || { hayConversacionReal: false };
@@ -246,17 +255,23 @@ function construirFallbackSugerencias({
     perfilEstructurado?.interesesClienta?.[0] ||
     "";
 
+  if (temaContactoExterno) {
+    return [
+      "Me caes bien, pero por ahora prefiero que sigamos aqui y dejemos que la charla tome mas forma. Me quede con curiosidad por algo mas simple: que es lo que mas disfrutas cuando de verdad tienes un rato solo para ti?"
+    ];
+  }
+
   if (!estado.hayConversacionReal) {
     if (interesPerfil) {
       const interes = limpiarSalidaHumana(interesPerfil).toLowerCase();
 
       return [
-        `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque siempre dice bastante mas de alguien que cualquier descripcion rapida.`
+        `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque suele decir bastante mas de alguien que una descripcion rapida.`
       ];
     }
 
     return [
-      `No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia.`
+      "No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia."
     ];
   }
 
@@ -265,8 +280,32 @@ function construirFallbackSugerencias({
     : "Queria responderte mejor";
 
   return [
-    `${base}. Me quede pensando en lo ultimo que compartiste y preferi contestarte con mas intencion y menos piloto automatico, porque tu forma de decir las cosas deja curiosidad y eso siempre me parece mucho mas interesante que una charla vacia.`
+    `${base}. Me quede pensando en lo ultimo que compartiste y preferi contestarte con mas intencion y menos piloto automatico, porque tu forma de decir las cosas deja curiosidad y eso siempre me parece mas interesante que una charla vacia.`
   ].map(normalizarSugerenciaPremium);
+}
+
+function construirRescuePrompt(caso = {}, candidata = "") {
+  return `
+La respuesta anterior no fue valida o no fue lo bastante precisa.
+
+RESPUESTA ANTERIOR
+"""
+${candidata || "vacia"}
+"""
+
+REPARA ESTO AHORA
+- una sola respuesta entre 170 y 300 caracteres
+- mucho mas concreta
+- humana y premium
+- si hay tema de contacto externo, manten todo dentro de la app y no menciones numeros ni canales externos
+- si no hay respuesta real previa de la clienta, no uses continuidad falsa
+- si hay un interes del perfil disponible, usa uno concreto
+- no uses frases gastadas ni abstractas
+- no inventes saludos
+- no inventes nombres
+- no propongas encuentros
+- devuelve solo el mensaje final
+`.trim();
 }
 
 async function generarSugerencias(caso = {}) {
@@ -278,6 +317,7 @@ async function generarSugerencias(caso = {}) {
     lecturaOperador: caso.lecturaOperador,
     tonoCliente: caso.tonoCliente,
     contactoExterno: caso.contactoExterno,
+    contactoEnBorrador: caso.contactoEnBorrador,
     elementosClave: caso.elementosClave,
     intencionOperador: caso.intencionOperador,
     guiaIntencion: caso.guiaIntencion,
@@ -292,10 +332,11 @@ async function generarSugerencias(caso = {}) {
     mencionesGeograficasOperador: caso.mencionesGeograficasOperador,
     estadoConversacion: caso.estadoConversacion,
     operadorTraeTemaPropio: caso.operadorTraeTemaPropio,
-    anclarEnUltimoMensajeCliente: caso.anclarEnUltimoMensajeCliente
+    anclarEnUltimoMensajeCliente: caso.anclarEnUltimoMensajeCliente,
+    permisosApertura: caso.permisosApertura
   });
 
-  const data = await llamarOpenAI({
+  const data1 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
@@ -319,16 +360,53 @@ async function generarSugerencias(caso = {}) {
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const candidata = extraerPrimeraSugerenciaPremium(
-    data?.choices?.[0]?.message?.content || ""
+  const candidata1 = extraerPrimeraSugerenciaPremium(
+    data1?.choices?.[0]?.message?.content || ""
   );
 
-  const sugerencias = filtrarSugerenciasFinales([candidata], caso);
+  const sugerencias1 = filtrarSugerenciasFinales([candidata1], caso);
 
-  if (sugerencias.length) {
+  if (sugerencias1.length) {
     return {
-      sugerencias: [sugerencias[0]],
-      usageData: data
+      sugerencias: [sugerencias1[0]],
+      usageData: data1
+    };
+  }
+
+  const data2 = await llamarOpenAI({
+    lane: "sugerencias",
+    model: OPENAI_MODEL_SUGGESTIONS,
+    messages: [
+      {
+        role: "system",
+        content: construirSystemPrompt(
+          caso.permisosApertura,
+          caso.elementosClave,
+          false,
+          caso.estadoConversacion,
+          caso.operadorTraeTemaPropio
+        )
+      },
+      {
+        role: "user",
+        content: `${userPrompt}\n\n${construirRescuePrompt(caso, candidata1)}`
+      }
+    ],
+    temperature: 0.42,
+    maxTokens: 140,
+    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
+  });
+
+  const candidata2 = extraerPrimeraSugerenciaPremium(
+    data2?.choices?.[0]?.message?.content || ""
+  );
+
+  const sugerencias2 = filtrarSugerenciasFinales([candidata2], caso);
+
+  if (sugerencias2.length) {
+    return {
+      sugerencias: [sugerencias2[0]],
+      usageData: sumarUsage(data1, data2)
     };
   }
 
@@ -337,7 +415,8 @@ async function generarSugerencias(caso = {}) {
       texto: caso.textoPlano,
       cliente: caso.clientePlano,
       estadoConversacion: caso.estadoConversacion,
-      perfilEstructurado: caso.perfilEstructurado
+      perfilEstructurado: caso.perfilEstructurado,
+      temaContactoExterno: caso.temaContactoExterno
     }),
     caso
   );
@@ -345,7 +424,7 @@ async function generarSugerencias(caso = {}) {
   if (fallback.length) {
     return {
       sugerencias: [fallback[0]],
-      usageData: data
+      usageData: sumarUsage(data1, data2)
     };
   }
 
@@ -353,7 +432,7 @@ async function generarSugerencias(caso = {}) {
     sugerencias: [
       "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, gusto o forma de ver las cosas es la que mas te representa cuando de verdad estas en tu mejor energia."
     ],
-    usageData: data
+    usageData: sumarUsage(data1, data2)
   };
 }
 
@@ -364,6 +443,5 @@ module.exports = {
   generarSugerencias,
   construirFallbackSugerencias,
   normalizarSugerenciaPremium,
-  cumpleLongitudPremium,
-  puntuarLongitudPremium
+  cumpleLongitudPremium
 };
