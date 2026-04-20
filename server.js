@@ -171,14 +171,14 @@ const OPENAI_TIMEOUT_TRANSLATE_MS = leerEnteroEnv(
 
 const SUGGESTION_OPENAI_CONCURRENCY = leerEnteroEnv(
   "SUGGESTION_OPENAI_CONCURRENCY",
-  6,
+  10,
   1,
   20
 );
 
 const TRANSLATION_OPENAI_CONCURRENCY = leerEnteroEnv(
   "TRANSLATION_OPENAI_CONCURRENCY",
-  2,
+  4,
   1,
   10
 );
@@ -213,7 +213,7 @@ const TRANSLATION_OPENAI_QUEUE_WAIT_MS = leerEnteroEnv(
 
 const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = leerEnteroEnv(
   "PER_OPERATOR_SUGGESTION_QUEUE_LIMIT",
-  3,
+  4,
   1,
   10
 );
@@ -339,13 +339,6 @@ const translationCache = new Map();
 const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
 const adminLoginAttempts = new Map();
-
-/*
-IMPORTANTE
-Esta cola por operador vive en memoria de esta replica.
-Si luego activas 2 o mas replicas en Railway, el siguiente paso correcto
-es mover esta cola a Redis o a un store compartido.
-*/
 const operatorSuggestionQueues = new Map();
 
 // ==========================
@@ -973,7 +966,7 @@ function detectarMetaEdicionOperador(texto = "") {
 }
 
 // ==========================
-// CONTEXTO RELEVANTE
+// CONTEXTO RELEVANTE Y ROLES
 // ==========================
 const STOPWORDS_RELEVANCIA = new Set([
   "hola", "amor", "mi", "mio", "tu", "tuyo", "que", "como", "estas", "esta",
@@ -1122,7 +1115,7 @@ function construirGuiaPerfil(perfil = {}, esChatNuevo = false) {
 // GEOGRAFIA DEL OPERADOR
 // ==========================
 const GEO_TRIGGER_PATTERNS = [
-  /\b(?:vivo en|soy de|estoy en|vivi en|naci en|resido en|me mude a|me mudé a|vengo de|ahora estoy en)\s+([a-zA-ZÀ-ÿ' .\-]{2,80})/gi,
+  /\b(?:vivo en|soy de|estoy en|vivi en|naci en|resido en|vengo de|me mude a|me mudé a)\s+([a-zA-ZÀ-ÿ' .\-]{2,80})/gi,
   /\b(?:i live in|i am from|i'm from|i was born in|i moved to|i am in|i'm in)\s+([a-zA-ZÀ-ÿ' .\-]{2,80})/gi
 ];
 
@@ -1710,36 +1703,65 @@ function construirGuiaIntencion(intencion = "") {
 }
 
 // ==========================
-// HECHOS SENSIBLES DE CLIENTA
+// HECHOS SENSIBLES POR ROL
 // ==========================
 function detectarHechosClienteSensibles(lineasClienta = []) {
   const bloque = normalizarTexto((lineasClienta || []).join(" || "));
 
   return {
-    birthday: /\b(birthday|cumpleanos|cumpleanos|celebrating|celebracion|cumple)\b/.test(bloque),
-    family: /\b(my family|mi familia|my son|mi hijo|my daughter|mi hija|my grandson|mi nieto|daughter in law|nuera|my wife|mi esposa)\b/.test(bloque)
+    birthday:
+      /\b(birthday|cumpleanos|cumpleanos|celebrating|celebracion|cumple)\b/.test(bloque),
+    familyVisit:
+      /\b(family|familia|son|hijo|daughter|hija|grandson|nieto|wife|esposa|daughter in law|nuera|coming|visit|visita)\b/.test(bloque),
+    busyLater:
+      /\b(busy|ocupad|later|mas tarde|despues|if i can|cuando pueda|cant talk|cannot talk|text you later|te escribire luego)\b/.test(bloque)
   };
+}
+
+function temaYaEstaEnOperador(original = "", tema = "") {
+  const t = normalizarTexto(original);
+
+  if (tema === "birthday") {
+    return /\b(cumpleanos|birthday|celebrar mi cumple|mi cumple)\b/.test(t);
+  }
+
+  if (tema === "familyVisit") {
+    return /\b(mi familia|my family|mi hijo|my son|mi hija|my daughter|mi niet|my grandson|mi nuera|my daughter in law|mi esposa|my wife)\b/.test(t);
+  }
+
+  if (tema === "busyLater") {
+    return /\b(estoy ocupad|i am busy|i'm busy|no puedo ahora|cant talk|te escribire luego|luego te escribo|mas tarde te escribo)\b/.test(t);
+  }
+
+  return false;
 }
 
 function violaPropiedadHechosCliente(sugerencia = "", hechos = {}, originalOperador = "") {
   const s = normalizarTexto(sugerencia);
-  const o = normalizarTexto(originalOperador);
 
   if (
     hechos.birthday &&
-    !/\b(cumpleanos|birthday)\b/.test(o) &&
+    !temaYaEstaEnOperador(originalOperador, "birthday") &&
     (
-      /\b(mi cumpleanos|hoy es mi cumpleanos|es mi cumpleanos|my birthday|today is my birthday)\b/.test(s) ||
-      /\b(voy a celebrar mi cumpleanos|celebrare mi cumpleanos)\b/.test(s)
+      /\b(mi cumpleanos|es mi cumpleanos|hoy es mi cumpleanos|my birthday|today is my birthday)\b/.test(s) ||
+      /\b(celebrare mi cumpleanos|estoy celebrando mi cumpleanos|i am celebrating my birthday)\b/.test(s)
     )
   ) {
     return true;
   }
 
   if (
-    hechos.family &&
-    !/\b(mi familia|mi hijo|mi hija|mis hijos|mi nieto|mi nuera|my family|my son|my daughter|my grandson)\b/.test(o) &&
-    /\b(mi familia|mi hijo|mi hija|mis hijos|mi nieto|mi nuera|my family|my son|my daughter|my grandson)\b/.test(s)
+    hechos.familyVisit &&
+    !temaYaEstaEnOperador(originalOperador, "familyVisit") &&
+    /\b(mi familia|my family|mi hijo|my son|mi hija|my daughter|mi niet|my grandson|mi nuera|my daughter in law|mi esposa|my wife)\b/.test(s)
+  ) {
+    return true;
+  }
+
+  if (
+    hechos.busyLater &&
+    !temaYaEstaEnOperador(originalOperador, "busyLater") &&
+    /\b(estoy ocupad|i am busy|i'm busy|no puedo ahora|cant talk right now|te escribire luego|luego te escribo|mas tarde te escribo|i will text you later)\b/.test(s)
   ) {
     return true;
   }
@@ -2019,7 +2041,7 @@ INTERESES_EN_COMUN: ${(perfilEstructurado.interesesEnComun || []).join(" | ") ||
 INTERESES_CLIENTA: ${(perfilEstructurado.interesesClienta || []).join(" | ") || "Ninguno"}
 DATOS_CLIENTA: ${(perfilEstructurado.datosClienta || []).join(" | ") || "Ninguno"}
 """
-  
+
 PERFIL VISIBLE ORIGINAL
 """
 ${perfilPlano || "Sin perfil claro"}
