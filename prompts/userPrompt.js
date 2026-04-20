@@ -1,4 +1,3 @@
-// prompts/userPrompt.js
 const { quitarTildes } = require("../lib/utils");
 
 function construirUserPrompt({
@@ -9,6 +8,7 @@ function construirUserPrompt({
   lecturaOperador,
   tonoCliente,
   contactoExterno,
+  contactoEnBorrador,
   elementosClave,
   intencionOperador,
   guiaIntencion,
@@ -96,14 +96,17 @@ Chat nuevo o casi vacio: ${esChatNuevoOperativo ? "si" : "no"}
 
 OTROS DATOS
 Tono detectado de la clienta: ${tonoCliente}
-Solicitud de contacto externo: ${contactoExterno ? "si" : "no"}
+Solicitud de contacto externo en clienta: ${contactoExterno ? "si" : "no"}
+Solicitud de contacto externo en borrador: ${contactoEnBorrador ? "si" : "no"}
 Menciones geograficas del operador: ${mencionesGeograficasOperador.length ? mencionesGeograficasOperador.join(" | ") : "ninguna"}
 
 TAREA
-Escribe una sola respuesta Atractiva Premium entre 170 y 300 caracteres.
-Debe sentirse humana, fuerte, elegante y con interes real.
+Escribe una sola respuesta Premium entre 170 y 300 caracteres.
+Debe sentirse humana, elegante, precisa y con interes real.
 Si no hay respuesta previa real de la clienta, conviertelo en un enganche directo y no en continuidad falsa.
 Si si hubo conversacion real y el operador no trae tema nuevo, apoyalate primero en lo ultimo que dijo ella.
+Si hay tema de contacto externo, manten la conversacion dentro de la app con suavidad y redireccion concreta. No repitas numeros ni canales externos.
+Si usas perfil, menciona un interes concreto.
 No inventes saludos.
 No inventes primer contacto.
 No inventes nombres.
