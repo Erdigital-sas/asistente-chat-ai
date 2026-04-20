@@ -8,21 +8,19 @@ const {
   compactarBloque,
   limpiarSalidaHumana,
   normalizarTexto,
-  dedupeStrings
+  dedupeStrings,
+  contarCaracteres
 } = require("../lib/utils");
 
 const {
   META_MISFIRE_RESPONSE_REGEX,
   limpiarTextoIA,
-  construirReporteLongitudes,
   esRespuestaBasura,
   contieneTemaEncuentro,
   violaReglasApertura,
   violaPropiedadHechosCliente,
   violaReglaContinuidad,
-  necesitaSegundoIntento,
-  elegirMejorSet,
-  construirFallbackSugerencias,
+  esSugerenciaDebil,
   detectarElementosClave,
   analizarCliente,
   analizarMensajeOperador,
@@ -44,6 +42,10 @@ const {
 const { construirSystemPrompt } = require("../prompts/systemPrompt");
 const { construirUserPrompt } = require("../prompts/userPrompt");
 const { llamarOpenAI } = require("./openai");
+
+const PREMIUM_MIN_CHARS = 170;
+const PREMIUM_MAX_CHARS = 300;
+const PREMIUM_IDEAL_CHARS = 230;
 
 function sumarUsage(...datas) {
   const usage = {
@@ -76,15 +78,15 @@ function prepararCasoSugerencias({
   const lecturaCliente = construirLecturaCliente(analisisCliente);
 
   const contextoFiltrado = filtrarContextoRelevante(contexto, texto, cliente);
-  const textoPlano = compactarBloque(texto, 820);
-  const clientePlano = compactarBloque(cliente, 520);
+  const textoPlano = compactarBloque(texto, 760);
+  const clientePlano = compactarBloque(cliente, 420);
   const contextoPlano = compactarBloque(
     limitarContexto(contextoFiltrado),
-    1200
+    620
   );
   const perfilPlano = compactarBloque(
     limitarContexto(perfil),
-    680
+    320
   );
 
   const estadoConversacion = construirEstadoConversacion(clientePlano, contextoPlano);
@@ -112,12 +114,12 @@ function prepararCasoSugerencias({
   const guiaPerfil = construirGuiaPerfil(perfilEstructurado, esChatNuevoOperativo);
 
   const lineasClienteRecientes = dedupeStrings(
-    estadoConversacion.lineasClienta.slice(-4)
-  ).slice(-4);
+    estadoConversacion.lineasClienta.slice(-2)
+  ).slice(-2);
 
   const lineasOperadorRecientes = dedupeStrings(
-    estadoConversacion.lineasOperador.slice(-4)
-  ).slice(-4);
+    estadoConversacion.lineasOperador.slice(-2)
+  ).slice(-2);
 
   const anclarEnUltimoMensajeCliente =
     estadoConversacion.hayConversacionReal &&
@@ -127,10 +129,10 @@ function prepararCasoSugerencias({
   const lecturaOperador = [
     construirLecturaOperador(analisisOperador),
     !estadoConversacion.hayConversacionReal
-      ? "No hay respuesta real de la clienta. No hables de retomar ni de seguir conversando. Convierte el texto en un enganche directo."
+      ? "No hay respuesta real de la clienta. Convierte el texto en un enganche directo."
       : "",
     anclarEnUltimoMensajeCliente
-      ? "Hay mensajes recientes de la clienta y el operador no trae un tema nuevo claro. Prioriza lo ultimo que ella dijo antes de abrir otro tema."
+      ? "Hay mensajes recientes de la clienta y el operador no trae un tema nuevo claro. Prioriza lo ultimo que ella dijo."
       : ""
   ].filter(Boolean).join(" ");
 
@@ -138,11 +140,11 @@ function prepararCasoSugerencias({
   const mencionesGeograficasOperador = extraerMencionesGeograficasOperador(texto);
 
   const fingerprint = [
-    normalizarTexto(operador).slice(0, 80),
-    normalizarTexto(textoPlano).slice(0, 500),
-    normalizarTexto(clientePlano).slice(0, 300),
-    normalizarTexto(contextoPlano).slice(-700),
-    normalizarTexto(perfilPlano).slice(0, 350)
+    "premium-v1",
+    normalizarTexto(textoPlano).slice(0, 420),
+    normalizarTexto(clientePlano).slice(0, 240),
+    normalizarTexto(contextoPlano).slice(-420),
+    normalizarTexto(perfilPlano).slice(0, 220)
   ].join("||");
 
   return {
@@ -181,14 +183,90 @@ function prepararCasoSugerencias({
   };
 }
 
+function normalizarSugerenciaPremium(texto = "") {
+  return limpiarSalidaHumana(String(texto || "").replace(/\n+/g, " ").trim());
+}
+
+function extraerPrimeraSugerenciaPremium(raw = "") {
+  const limpias = limpiarTextoIA(raw)
+    .map(normalizarSugerenciaPremium)
+    .filter((s) => !esRespuestaBasura(s));
+
+  if (limpias.length) {
+    return limpias[0];
+  }
+
+  return normalizarSugerenciaPremium(raw);
+}
+
+function cumpleLongitudPremium(texto = "") {
+  const total = contarCaracteres(texto);
+  return total >= PREMIUM_MIN_CHARS && total <= PREMIUM_MAX_CHARS;
+}
+
+function puntuarLongitudPremium(texto = "") {
+  const total = contarCaracteres(texto);
+  if (!total) return -20;
+  if (cumpleLongitudPremium(texto)) return 10;
+
+  const distancia = Math.abs(total - PREMIUM_IDEAL_CHARS);
+  return Math.max(-10, 6 - Math.ceil(distancia / 20));
+}
+
 function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
-  return (Array.isArray(sugerencias) ? sugerencias : []).filter(
-    (s) =>
-      !contieneTemaEncuentro(s) &&
-      !violaReglasApertura(s, caso.permisosApertura) &&
-      !violaPropiedadHechosCliente(s, caso.hechosClienteSensibles, caso.textoPlano) &&
-      !violaReglaContinuidad(s, caso.estadoConversacion, caso.operadorTraeTemaPropio)
-  );
+  return (Array.isArray(sugerencias) ? sugerencias : [])
+    .map(normalizarSugerenciaPremium)
+    .filter(Boolean)
+    .filter((s) => cumpleLongitudPremium(s))
+    .filter((s) => !contieneTemaEncuentro(s))
+    .filter((s) => !violaReglasApertura(s, caso.permisosApertura))
+    .filter((s) => !violaPropiedadHechosCliente(s, caso.hechosClienteSensibles, caso.textoPlano))
+    .filter((s) => !violaReglaContinuidad(s, caso.estadoConversacion, caso.operadorTraeTemaPropio))
+    .filter((s) => !META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)))
+    .filter((s) => !esSugerenciaDebil(
+      s,
+      caso.textoPlano,
+      caso.elementosClave,
+      caso.permisosApertura,
+      caso.estadoConversacion,
+      caso.operadorTraeTemaPropio
+    ));
+}
+
+function construirFallbackSugerencias({
+  texto = "",
+  cliente = "",
+  estadoConversacion = null,
+  perfilEstructurado = null
+}) {
+  const textoLimpio = limpiarSalidaHumana(texto || "");
+  const estado = estadoConversacion || { hayConversacionReal: false };
+  const interesPerfil =
+    perfilEstructurado?.interesesEnComun?.[0] ||
+    perfilEstructurado?.interesesClienta?.[0] ||
+    "";
+
+  if (!estado.hayConversacionReal) {
+    if (interesPerfil) {
+      const interes = limpiarSalidaHumana(interesPerfil).toLowerCase();
+
+      return [
+        `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque siempre dice bastante mas de alguien que cualquier descripcion rapida.`
+      ];
+    }
+
+    return [
+      `No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia.`
+    ];
+  }
+
+  const base = textoLimpio && textoLimpio.length >= 18
+    ? textoLimpio.replace(/[?¿]+$/g, "").replace(/[.!]+$/g, "").trim()
+    : "Queria responderte mejor";
+
+  return [
+    `${base}. Me quede pensando en lo ultimo que compartiste y preferi contestarte con mas intencion y menos piloto automatico, porque tu forma de decir las cosas deja curiosidad y eso siempre me parece mucho mas interesante que una charla vacia.`
+  ].map(normalizarSugerenciaPremium);
 }
 
 async function generarSugerencias(caso = {}) {
@@ -196,7 +274,6 @@ async function generarSugerencias(caso = {}) {
     textoPlano: caso.textoPlano,
     clientePlano: caso.clientePlano,
     contextoPlano: caso.contextoPlano,
-    perfilPlano: caso.perfilPlano,
     lecturaCliente: caso.lecturaCliente,
     lecturaOperador: caso.lecturaOperador,
     tonoCliente: caso.tonoCliente,
@@ -218,7 +295,7 @@ async function generarSugerencias(caso = {}) {
     anclarEnUltimoMensajeCliente: caso.anclarEnUltimoMensajeCliente
   });
 
-  const data1 = await llamarOpenAI({
+  const data = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
@@ -237,159 +314,46 @@ async function generarSugerencias(caso = {}) {
         content: userPrompt
       }
     ],
-    temperature: caso.ghostwriterMode ? 0.66 : 0.54,
-    maxTokens: caso.ghostwriterMode ? 460 : 360,
+    temperature: caso.ghostwriterMode ? 0.7 : 0.62,
+    maxTokens: 140,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const sugerencias1Raw = limpiarTextoIA(
-    data1?.choices?.[0]?.message?.content || ""
-  )
-    .map(limpiarSalidaHumana)
-    .filter((s) => !esRespuestaBasura(s));
+  const candidata = extraerPrimeraSugerenciaPremium(
+    data?.choices?.[0]?.message?.content || ""
+  );
 
-  const sugerencias1 = filtrarSugerenciasFinales(sugerencias1Raw, caso);
+  const sugerencias = filtrarSugerenciasFinales([candidata], caso);
 
-  const huboEncuentros1 = sugerencias1Raw.some((s) => contieneTemaEncuentro(s));
-  const huboAperturaInvalida1 = sugerencias1Raw.some((s) => violaReglasApertura(s, caso.permisosApertura));
-  const huboMetaMisfire1 = sugerencias1Raw.some((s) => META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)));
-  const huboPropiedadHechos1 = sugerencias1Raw.some((s) => violaPropiedadHechosCliente(s, caso.hechosClienteSensibles, caso.textoPlano));
-
-  if (!necesitaSegundoIntento(
-    sugerencias1,
-    caso.textoPlano,
-    caso.elementosClave,
-    caso.permisosApertura,
-    caso.estadoConversacion,
-    caso.operadorTraeTemaPropio
-  )) {
+  if (sugerencias.length) {
     return {
-      sugerencias: sugerencias1.slice(0, 3),
-      usageData: data1
+      sugerencias: [sugerencias[0]],
+      usageData: data
     };
   }
 
-  const reporteLongitudes1 = construirReporteLongitudes(sugerencias1);
+  const fallback = filtrarSugerenciasFinales(
+    construirFallbackSugerencias({
+      texto: caso.textoPlano,
+      cliente: caso.clientePlano,
+      estadoConversacion: caso.estadoConversacion,
+      perfilEstructurado: caso.perfilEstructurado
+    }),
+    caso
+  );
 
-  const correccionEncuentro = huboEncuentros1
-    ? "Se detectaron alusiones prohibidas a verse en persona, cena, cafe, salida o plan presencial. Corrigelo por completo."
-    : "No incluyas ninguna alusion a verse en persona ni a planes presenciales.";
-
-  const correccionApertura = huboAperturaInvalida1
-    ? "Se detectaron saludos o frases de primer contacto no autorizadas. No abras con hola ni metas frases para conocerla si el operador no lo escribio."
-    : "No inventes saludos ni frases de primer contacto si no vienen en el borrador del operador.";
-
-  const correccionMeta = huboMetaMisfire1 || caso.metaEdicion
-    ? "Se detecto una respuesta meta equivocada o el borrador parece una autoevaluacion del operador. No respondas a esa autoevaluacion. Convierte esa intencion en un mensaje final real para la clienta."
-    : "No respondas al operador como si el borrador fuera una consulta para la herramienta.";
-
-  const correccionPropiedad = huboPropiedadHechos1
-    ? "Se detecto apropiacion de hechos de la clienta. No conviertas hechos de CLIENTA en primera persona del operador."
-    : "Respeta la propiedad de los hechos por rol.";
-
-  const correccionGhostwriter = caso.ghostwriterMode
-    ? "El borrador venia flojo, corto, generico o con reclamo. Debes elevarlo mucho mas y usar mejor el perfil y el contexto para que parezca un mensaje atractivo real."
-    : "Manten el mensaje fuerte, natural y util.";
-
-  const correccionContinuidad =
-    !caso.estadoConversacion?.hayConversacionReal
-      ? "No hay respuesta real de la clienta. No puedes hablar de seguir conversando, retomar, continuar ni volver a hablar."
-      : caso.anclarEnUltimoMensajeCliente
-        ? "Hay mensajes recientes de la clienta y el operador no trae tema nuevo claro. Debes apoyarte primero en lo ultimo que ella dijo y evitar continuidad generica."
-        : "Evita continuidad generica si puedes responder algo concreto.";
-
-  const correccionPerfil = caso.perfilEstructurado.interesesEnComun.length
-    ? "Si usas intereses, primero usa INTERESES_EN_COMUN."
-    : "Si usas intereses, solo puedes usar INTERESES_CLIENTA como apoyo sin fingir que estan en comun.";
-
-  const correccionGeo = caso.mencionesGeograficasOperador.length
-    ? "Si aparece una ubicacion, solo puedes corregir la ortografia del mismo lugar mencionado por el operador. No cambies a otra ciudad."
-    : "No inventes ciudad, estado o pais.";
-
-  const userPrompt2 = `
-${userPrompt}
-
-CORRECCION OBLIGATORIA
-El intento anterior no cumplio bien calidad o longitud.
-
-Reporte del intento anterior:
-${reporteLongitudes1}
-
-${correccionEncuentro}
-${correccionApertura}
-${correccionMeta}
-${correccionPropiedad}
-${correccionGhostwriter}
-${correccionContinuidad}
-${correccionPerfil}
-${correccionGeo}
-
-Corrige esto ahora:
-- opcion 1 entre 200 y 260 caracteres
-- opcion 2 entre 200 y 260 caracteres
-- opcion 3 entre 320 y 420 caracteres
-- mas precision
-- mas naturalidad
-- mas utilidad real para el operador
-- cero relleno
-- respeta por completo nombres, afectivos e intencion
-- respeta quien dijo cada hecho
-- no respondas como si la clienta hubiera dicho otra cosa
-- no respondas al operador como si el borrador fuera una consulta a la herramienta
-- si el borrador venia flojo, subele mucho el nivel
-- usa mejor el perfil visible si aporta
-- prioriza intereses en comun
-- evita continuidad trillada
-- no inventes geografia
-- no cambies un lugar por otro
-- no propongas vernos, salir, cenar, tomar algo ni ningun plan presencial
-- no inventes saludos
-- no inventes primer contacto
-`.trim();
-
-  const data2 = await llamarOpenAI({
-    lane: "sugerencias",
-    model: OPENAI_MODEL_SUGGESTIONS,
-    messages: [
-      {
-        role: "system",
-        content: construirSystemPrompt(
-          caso.permisosApertura,
-          caso.elementosClave,
-          true,
-          caso.estadoConversacion,
-          caso.operadorTraeTemaPropio
-        )
-      },
-      {
-        role: "user",
-        content: userPrompt2
-      }
-    ],
-    temperature: caso.ghostwriterMode ? 0.72 : 0.60,
-    maxTokens: caso.ghostwriterMode ? 520 : 420,
-    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
-  });
-
-  const sugerencias2Raw = limpiarTextoIA(
-    data2?.choices?.[0]?.message?.content || ""
-  )
-    .map(limpiarSalidaHumana)
-    .filter((s) => !esRespuestaBasura(s));
-
-  const sugerencias2 = filtrarSugerenciasFinales(sugerencias2Raw, caso);
+  if (fallback.length) {
+    return {
+      sugerencias: [fallback[0]],
+      usageData: data
+    };
+  }
 
   return {
-    sugerencias: elegirMejorSet(
-      sugerencias1,
-      sugerencias2,
-      caso.textoPlano,
-      caso.elementosClave,
-      caso.permisosApertura,
-      caso.estadoConversacion,
-      caso.operadorTraeTemaPropio
-    ).slice(0, 3),
-    usageData: sumarUsage(data1, data2)
+    sugerencias: [
+      "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, gusto o forma de ver las cosas es la que mas te representa cuando de verdad estas en tu mejor energia."
+    ],
+    usageData: data
   };
 }
 
@@ -398,5 +362,8 @@ module.exports = {
   prepararCasoSugerencias,
   filtrarSugerenciasFinales,
   generarSugerencias,
-  construirFallbackSugerencias
+  construirFallbackSugerencias,
+  normalizarSugerenciaPremium,
+  cumpleLongitudPremium,
+  puntuarLongitudPremium
 };
