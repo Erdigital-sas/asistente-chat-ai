@@ -1,3 +1,4 @@
+// services/suggestions.js
 const {
   OPENAI_MODEL_SUGGESTIONS,
   OPENAI_TIMEOUT_SUGGESTIONS_MS
@@ -49,6 +50,18 @@ const PREMIUM_MAX_CHARS = 300;
 const CONTACTO_REGEX =
   /\b(whatsapp|telegram|phone|number|numero|telefono|instagram|facebook|snapchat|snap|discord|mail|correo|email|contact|wechat|line|kik|skype|intercambiar numeros|pasarte mi numero|darte mi numero|hablar por fuera|escribir por fuera)\b/i;
 
+const GHOSTING_REGEX =
+  /\b(visto|me dejaste en visto|me has dejado en visto|no respondes|no me respondes|no me contestas|desapareciste|te perdi|sigues ahi|por que no respondes)\b/i;
+
+const MEDIA_REGEX =
+  /\b(foto|selfie|imagen|video|audio|voz|pic|picture|photo|snapshot|video clip|voice note)\b/i;
+
+const CONFLICT_REGEX =
+  /\b(discutir|discutiendo|discusion|pelea|malentendido|no quiero seguir asi|si esto va a ser asi|frustrante|cortamos|relacion aqui|bothering|boring you|sorry for bothering)\b/i;
+
+const MULETILLA_REGEX =
+  /\b(me gustaria saber mas de ti|mas sobre ti|me encantaria hablar contigo|podemos encontrar un terreno comun|lo que te inspira|lo que te apasiona|seguir conversando|me gustaria conocer mas de ti)\b/i;
+
 function sumarUsage(...datas) {
   const usage = {
     prompt_tokens: 0,
@@ -64,6 +77,72 @@ function sumarUsage(...datas) {
   });
 
   return { usage };
+}
+
+function detectarMode(caso = {}) {
+  const bloque = [
+    caso.textoPlano || "",
+    caso.clientePlano || "",
+    ...(caso.lineasClienteRecientes || []),
+    ...(caso.lineasOperadorRecientes || [])
+  ].join(" \n ");
+
+  if (caso.temaContactoExterno) return "CONTACT_BLOCK";
+  if (MEDIA_REGEX.test(bloque)) return "MEDIA_REPLY";
+  if (GHOSTING_REGEX.test(caso.textoPlano || "")) return "GHOSTING";
+  if (CONFLICT_REGEX.test(bloque)) return "CONFLICT_REFRAME";
+  if (!caso.estadoConversacion?.hayConversacionReal) return "NEW_CHAT";
+  if (caso.anclarEnUltimoMensajeCliente) return "REPLY_LAST_MESSAGE";
+  if (!caso.operadorTraeTemaPropio && (
+    (caso.perfilEstructurado?.interesesEnComun || []).length ||
+    (caso.perfilEstructurado?.interesesClienta || []).length
+  )) {
+    return "PROFILE_SUPPORT";
+  }
+
+  return "DEFAULT";
+}
+
+function detectarAnchor(caso = {}) {
+  if (caso.mode === "CONTACT_BLOCK") {
+    return "mantener la conversacion dentro de la app y redirigir a un tema concreto";
+  }
+
+  if (caso.mode === "MEDIA_REPLY") {
+    const bloque = [
+      caso.textoPlano || "",
+      caso.clientePlano || "",
+      ...(caso.lineasClienteRecientes || [])
+    ].find((x) => MEDIA_REGEX.test(x || ""));
+    if (bloque) return limpiarSalidaHumana(bloque).slice(0, 180);
+  }
+
+  if (caso.mode === "GHOSTING") {
+    return "el borrador del operador habla del silencio o de dejar en visto";
+  }
+
+  if (caso.mode === "CONFLICT_REFRAME") {
+    return "hay tension o malentendido en el chat y la respuesta debe bajar la friccion";
+  }
+
+  if (caso.anclarEnUltimoMensajeCliente && caso.lineasClienteRecientes?.length) {
+    return limpiarSalidaHumana(caso.lineasClienteRecientes[caso.lineasClienteRecientes.length - 1]).slice(0, 180);
+  }
+
+  if (caso.operadorTraeTemaPropio && caso.textoPlano) {
+    return limpiarSalidaHumana(caso.textoPlano).slice(0, 180);
+  }
+
+  const interes =
+    caso.perfilEstructurado?.interesesEnComun?.[0] ||
+    caso.perfilEstructurado?.interesesClienta?.[0] ||
+    "";
+
+  if (interes) {
+    return `interes concreto del perfil: ${interes}`;
+  }
+
+  return "anclarse al borrador del operador sin volverse abstracto";
 }
 
 function prepararCasoSugerencias({
@@ -143,16 +222,7 @@ function prepararCasoSugerencias({
   const contactoEnBorrador = esSolicitudContacto(texto);
   const temaContactoExterno = Boolean(analisisCliente.contacto || contactoEnBorrador);
 
-  const fingerprint = [
-    "premium-v2",
-    normalizarTexto(textoPlano).slice(0, 420),
-    normalizarTexto(clientePlano).slice(0, 260),
-    normalizarTexto(contextoPlano).slice(-500),
-    normalizarTexto(perfilPlano).slice(0, 260),
-    temaContactoExterno ? "contacto-si" : "contacto-no"
-  ].join("||");
-
-  return {
+  const baseCaso = {
     operador,
     texto,
     contexto,
@@ -185,7 +255,25 @@ function prepararCasoSugerencias({
     lineasOperadorRecientes,
     anclarEnUltimoMensajeCliente,
     hechosClienteSensibles,
-    mencionesGeograficasOperador,
+    mencionesGeograficasOperador
+  };
+
+  const mode = detectarMode(baseCaso);
+  const anchor = detectarAnchor({ ...baseCaso, mode });
+
+  const fingerprint = [
+    "premium-v3",
+    mode,
+    normalizarTexto(textoPlano).slice(0, 420),
+    normalizarTexto(clientePlano).slice(0, 260),
+    normalizarTexto(contextoPlano).slice(-500),
+    normalizarTexto(perfilPlano).slice(0, 260)
+  ].join("||");
+
+  return {
+    ...baseCaso,
+    mode,
+    anchor,
     fingerprint
   };
 }
@@ -217,7 +305,25 @@ function violaReglaContactoExterno(sugerencia = "", caso = {}) {
   const t = normalizarTexto(sugerencia);
   if (CONTACTO_REGEX.test(t)) return true;
 
-  return !/\b(aqui|por aqui|seguir aqui|mejor aqui|prefiero aqui|prefiero por aqui|desde aqui)\b/.test(t);
+  return !/\b(aqui|por aqui|seguir aqui|mejor aqui|prefiero aqui|prefiero por aqui|aqui mismo)\b/.test(t);
+}
+
+function violaReglaModo(sugerencia = "", caso = {}) {
+  const t = normalizarTexto(sugerencia);
+
+  if (caso.mode === "MEDIA_REPLY" && !MEDIA_REGEX.test(`${caso.anchor} ${sugerencia}`)) {
+    return true;
+  }
+
+  if (caso.mode === "GHOSTING" && /\b(inspir|apasion|terreno comun|mas sobre ti)\b/.test(t)) {
+    return true;
+  }
+
+  if (caso.mode === "CONTACT_BLOCK" && !/\b(aqui|por aqui|mejor aqui|prefiero aqui)\b/.test(t)) {
+    return true;
+  }
+
+  return false;
 }
 
 function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
@@ -230,6 +336,8 @@ function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
     .filter((s) => !violaPropiedadHechosCliente(s, caso.hechosClienteSensibles, caso.textoPlano))
     .filter((s) => !violaReglaContinuidad(s, caso.estadoConversacion, caso.operadorTraeTemaPropio))
     .filter((s) => !violaReglaContactoExterno(s, caso))
+    .filter((s) => !violaReglaModo(s, caso))
+    .filter((s) => !MULETILLA_REGEX.test(normalizarTexto(s)))
     .filter((s) => !META_MISFIRE_RESPONSE_REGEX.test(normalizarTexto(s)))
     .filter((s) => !esSugerenciaDebil(
       s,
@@ -241,47 +349,48 @@ function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
     ));
 }
 
-function construirFallbackSugerencias({
-  texto = "",
-  cliente = "",
-  estadoConversacion = null,
-  perfilEstructurado = null,
-  temaContactoExterno = false
-}) {
-  const textoLimpio = limpiarSalidaHumana(texto || "");
-  const estado = estadoConversacion || { hayConversacionReal: false };
-  const interesPerfil =
-    perfilEstructurado?.interesesEnComun?.[0] ||
-    perfilEstructurado?.interesesClienta?.[0] ||
+function construirFallbackSugerencias(caso = {}) {
+  const interes =
+    caso.perfilEstructurado?.interesesEnComun?.[0] ||
+    caso.perfilEstructurado?.interesesClienta?.[0] ||
     "";
 
-  if (temaContactoExterno) {
-    return [
-      "Me caes bien, pero por ahora prefiero que sigamos aqui y dejemos que la charla tome mas forma. Me quede con curiosidad por algo mas simple: que es lo que mas disfrutas cuando de verdad tienes un rato solo para ti?"
-    ];
-  }
+  const fallbacks = {
+    CONTACT_BLOCK: [
+      "Me caes bien, pero por ahora prefiero que sigamos aqui y dejemos que la charla tome mas forma. Me quede con curiosidad por algo mas simple: que detalle de tu dia suele ponerte de mejor humor?"
+    ],
+    GHOSTING: [
+      "No queria quedarme en la parte incomoda del silencio, sino escribirte algo mejor. Si te nace seguir, me basta una respuesta sincera y ligera para retomar esto con mejor energia y sin presion."
+    ],
+    MEDIA_REPLY: [
+      "La imagen que compartiste deja una impresion muy clara y se nota que hay una energia real ahi. Mas que quedarme en lo obvio, me dio curiosidad saber que detalle de ese momento te gusto mas a ti cuando decidiste enviarlo."
+    ],
+    CONFLICT_REFRAME: [
+      "No quiero que esto se quede en una tension innecesaria. Prefiero que hablemos con mas calma y de una forma mas clara, porque cuando una conversacion vale la pena tambien merece un poco mas de cuidado."
+    ],
+    NEW_CHAT: interes
+      ? [
+          `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes.toLowerCase()} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque suele decir bastante mas de alguien que una descripcion rapida.`
+        ]
+      : [
+          "No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia."
+        ],
+    REPLY_LAST_MESSAGE: [
+      "Me quede pensando en lo ultimo que compartiste y preferi responderte con mas intencion y menos piloto automatico. Hay algo en tu forma de decir las cosas que deja curiosidad, y eso siempre vuelve mas interesante una charla."
+    ],
+    PROFILE_SUPPORT: interes
+      ? [
+          `Vi que ${interes.toLowerCase()} aparece en tu perfil y preferi ir por algo mas concreto. Siempre me llama la atencion cuando un gusto no esta ahi por adornar, sino porque realmente dice algo de como es alguien.`
+        ]
+      : [
+          "No queria dejarte algo comun, asi que preferi escribirte mejor. A veces un detalle concreto dice mucho mas que una presentacion armada, y me dio curiosidad saber que es lo que mas te representa de verdad."
+        ],
+    DEFAULT: [
+      "No queria dejarte algo frio ni comun, asi que preferi escribirte mejor. Me dio curiosidad saber que detalle, gusto o forma de ver las cosas es la que mas te representa cuando de verdad estas en tu mejor energia."
+    ]
+  };
 
-  if (!estado.hayConversacionReal) {
-    if (interesPerfil) {
-      const interes = limpiarSalidaHumana(interesPerfil).toLowerCase();
-
-      return [
-        `No queria dejarte otro mensaje comun, asi que preferi escribirte mejor. Vi que ${interes} aparece en tu perfil y me dio curiosidad saber que es lo que mas disfrutas de eso, porque suele decir bastante mas de alguien que una descripcion rapida.`
-      ];
-    }
-
-    return [
-      "No queria dejarte otro mensaje generico, asi que preferi escribirte mejor. Me dio curiosidad saber que tipo de detalle, plan o gusto es el que mas te representa cuando de verdad estas en tu mejor energia."
-    ];
-  }
-
-  const base = textoLimpio && textoLimpio.length >= 18
-    ? textoLimpio.replace(/[?¿]+$/g, "").replace(/[.!]+$/g, "").trim()
-    : "Queria responderte mejor";
-
-  return [
-    `${base}. Me quede pensando en lo ultimo que compartiste y preferi contestarte con mas intencion y menos piloto automatico, porque tu forma de decir las cosas deja curiosidad y eso siempre me parece mas interesante que una charla vacia.`
-  ].map(normalizarSugerenciaPremium);
+  return fallbacks[caso.mode] || fallbacks.DEFAULT;
 }
 
 function construirRescuePrompt(caso = {}, candidata = "") {
@@ -297,6 +406,8 @@ REPARA ESTO AHORA
 - una sola respuesta entre 170 y 300 caracteres
 - mucho mas concreta
 - humana y premium
+- RESPETA EL MODO: ${caso.mode}
+- RESPETA EL ANCLA: ${caso.anchor}
 - si hay tema de contacto externo, manten todo dentro de la app y no menciones numeros ni canales externos
 - si no hay respuesta real previa de la clienta, no uses continuidad falsa
 - si hay un interes del perfil disponible, usa uno concreto
@@ -308,8 +419,20 @@ REPARA ESTO AHORA
 `.trim();
 }
 
+function necesitaRescue(caso = {}, candidata = "") {
+  const t = normalizarTexto(candidata || "");
+
+  if (!candidata || !cumpleLongitudPremium(candidata)) return true;
+  if (MULETILLA_REGEX.test(t)) return true;
+  if (caso.mode === "CONTACT_BLOCK") return true;
+
+  return ["GHOSTING", "MEDIA_REPLY", "CONFLICT_REFRAME"].includes(caso.mode);
+}
+
 async function generarSugerencias(caso = {}) {
   const userPrompt = construirUserPrompt({
+    mode: caso.mode,
+    anchor: caso.anchor,
     textoPlano: caso.textoPlano,
     clientePlano: caso.clientePlano,
     contextoPlano: caso.contextoPlano,
@@ -321,7 +444,6 @@ async function generarSugerencias(caso = {}) {
     elementosClave: caso.elementosClave,
     intencionOperador: caso.intencionOperador,
     guiaIntencion: caso.guiaIntencion,
-    permisosApertura: caso.permisosApertura,
     metaEdicion: caso.metaEdicion,
     ghostwriterMode: caso.ghostwriterMode,
     perfilEstructurado: caso.perfilEstructurado,
@@ -345,9 +467,7 @@ async function generarSugerencias(caso = {}) {
         content: construirSystemPrompt(
           caso.permisosApertura,
           caso.elementosClave,
-          false,
-          caso.estadoConversacion,
-          caso.operadorTraeTemaPropio
+          caso.mode
         )
       },
       {
@@ -355,8 +475,8 @@ async function generarSugerencias(caso = {}) {
         content: userPrompt
       }
     ],
-    temperature: caso.ghostwriterMode ? 0.7 : 0.62,
-    maxTokens: 140,
+    temperature: caso.ghostwriterMode ? 0.66 : 0.58,
+    maxTokens: 150,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
@@ -366,9 +486,16 @@ async function generarSugerencias(caso = {}) {
 
   const sugerencias1 = filtrarSugerenciasFinales([candidata1], caso);
 
-  if (sugerencias1.length) {
+  if (sugerencias1.length && !necesitaRescue(caso, sugerencias1[0])) {
     return {
       sugerencias: [sugerencias1[0]],
+      usageData: data1
+    };
+  }
+
+  if (!necesitaRescue(caso, candidata1)) {
+    return {
+      sugerencias: [candidata1],
       usageData: data1
     };
   }
@@ -382,9 +509,7 @@ async function generarSugerencias(caso = {}) {
         content: construirSystemPrompt(
           caso.permisosApertura,
           caso.elementosClave,
-          false,
-          caso.estadoConversacion,
-          caso.operadorTraeTemaPropio
+          caso.mode
         )
       },
       {
@@ -392,8 +517,8 @@ async function generarSugerencias(caso = {}) {
         content: `${userPrompt}\n\n${construirRescuePrompt(caso, candidata1)}`
       }
     ],
-    temperature: 0.42,
-    maxTokens: 140,
+    temperature: 0.38,
+    maxTokens: 150,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
@@ -411,13 +536,7 @@ async function generarSugerencias(caso = {}) {
   }
 
   const fallback = filtrarSugerenciasFinales(
-    construirFallbackSugerencias({
-      texto: caso.textoPlano,
-      cliente: caso.clientePlano,
-      estadoConversacion: caso.estadoConversacion,
-      perfilEstructurado: caso.perfilEstructurado,
-      temaContactoExterno: caso.temaContactoExterno
-    }),
+    construirFallbackSugerencias(caso),
     caso
   );
 
