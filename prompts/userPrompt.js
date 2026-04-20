@@ -4,6 +4,7 @@ const { quitarTildes } = require("../lib/utils");
 function construirUserPrompt({
   mode,
   anchor,
+  planSummary,
   textoPlano,
   clientePlano,
   contextoPlano,
@@ -36,6 +37,9 @@ ${mode}
 
 ANCLA OBLIGATORIA
 ${anchor || "sin ancla clara"}
+
+RESUMEN DE PLAN
+${planSummary || "mantenerse concreta y fiel al borrador"}
 
 BORRADOR DEL OPERADOR
 """
