@@ -54,56 +54,56 @@ function construirGuiaModo(mode = "DEFAULT") {
   const mapa = {
     NEW_CHAT: `
 MODO NEW_CHAT
-No hay respuesta real previa de la clienta.
+No hay respuesta real previa.
 Debes convertir el borrador en un enganche directo, concreto y elegante.
 No uses continuidad falsa.
-Si usas perfil, menciona un interes concreto y no algo abstracto.
+Si usas perfil, usa un interes concreto y no una curiosidad abstracta.
 `.trim(),
 
     REPLY_LAST_MESSAGE: `
 MODO REPLY_LAST_MESSAGE
 Debes responder primero lo ultimo que ella dijo.
 No cambies de tema demasiado pronto.
-El cierre puede abrir una nueva idea, pero solo despues de conectar con lo ultimo del chat.
+El cierre puede abrir una nueva idea solo despues de conectar con ese mensaje.
 `.trim(),
 
     GHOSTING: `
 MODO GHOSTING
-El borrador trata sobre dejar en visto, desaparicion o silencio.
+El borrador trata sobre dejar en visto, silencio o desconexion.
 No suenes herido, resentido ni necesitado.
-Transformalo en una reapertura segura, con clase, concreta y facil de responder.
+Transformalo en una reapertura concreta, segura y facil de responder.
 `.trim(),
 
     CONTACT_BLOCK: `
 MODO CONTACT_BLOCK
-Se menciono WhatsApp, numero, telefono, Instagram, mail, Telegram o contacto externo.
+Se menciono numero, telefono, WhatsApp, Telegram, mail, Instagram o salir de la app.
 No lo valides.
 No repitas numeros.
-No uses la palabra WhatsApp ni numero salvo que sea estrictamente inevitable.
-Mantiene la conversacion dentro de la app con calidez y redireccion concreta.
+No pidas datos.
+No negocies el cambio.
+Mantiene la conversacion dentro de la app con firmeza suave y redireccion concreta.
 `.trim(),
 
     MEDIA_REPLY: `
 MODO MEDIA_REPLY
-El caso gira alrededor de una foto, video, audio, selfie, voz o imagen.
+El caso gira alrededor de foto, video, audio, selfie, voz o imagen.
 Debes anclarte primero a ese contenido.
-No te vayas a una curiosidad generica.
-Habla de forma precisa sobre lo que ella envio o sobre la reaccion del operador a ese contenido.
+No te vayas a perfil ni a curiosidad generica.
 `.trim(),
 
     CONFLICT_REFRAME: `
 MODO CONFLICT_REFRAME
-Hay discusion, malentendido o tension.
+Hay discusion, tension o malentendido.
 Baja la friccion.
 Aclara con tacto.
-Haz que la respuesta suene centrada, humana y precisa, no filosofica.
+No respondas como coach ni con frases motivacionales vacias.
 `.trim(),
 
     PROFILE_SUPPORT: `
 MODO PROFILE_SUPPORT
-Si usas perfil, usa un interes concreto.
-No uses frases huecas como me gustaria saber mas de ti.
-El perfil es apoyo, no tema principal si el borrador ya trae tema real.
+Usa el perfil solo como apoyo.
+Si lo usas, menciona un interes concreto.
+No hables en abstracto de inspiracion, pasion o terreno comun.
 `.trim(),
 
     DEFAULT: `
@@ -142,7 +142,6 @@ Entregar una sola version Premium:
 - atractiva
 - precisa
 - segura
-- nada robotica
 - lista para enviar
 
 LONGITUD
@@ -187,7 +186,7 @@ INTERESES
 Si existen INTERESES_EN_COMUN, tienen prioridad total.
 Si no existen, puedes usar INTERESES_CLIENTA solo como apoyo.
 Nunca digas que algo esta en comun si solo aparece en INTERESES_CLIENTA.
-Si usas perfil, nombra un interes concreto en vez de hablar en abstracto.
+Si usas perfil, menciona un interes concreto en vez de hablar en abstracto.
 
 GEOGRAFIA
 Solo puedes usar ciudad, pais o estado si el operador lo escribio en el borrador actual.
