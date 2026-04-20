@@ -1,6 +1,9 @@
+// prompts/userPrompt.js
 const { quitarTildes } = require("../lib/utils");
 
 function construirUserPrompt({
+  mode,
+  anchor,
   textoPlano,
   clientePlano,
   contextoPlano,
@@ -27,6 +30,12 @@ function construirUserPrompt({
 }) {
   return `
 CASO
+
+MODO DETECTADO
+${mode}
+
+ANCLA OBLIGATORIA
+${anchor || "sin ancla clara"}
 
 BORRADOR DEL OPERADOR
 """
@@ -103,9 +112,10 @@ Menciones geograficas del operador: ${mencionesGeograficasOperador.length ? menc
 TAREA
 Escribe una sola respuesta Premium entre 170 y 300 caracteres.
 Debe sentirse humana, elegante, precisa y con interes real.
+Debes respetar el MODO DETECTADO.
+Debes usar la ANCLA OBLIGATORIA.
 Si no hay respuesta previa real de la clienta, conviertelo en un enganche directo y no en continuidad falsa.
-Si si hubo conversacion real y el operador no trae tema nuevo, apoyalate primero en lo ultimo que dijo ella.
-Si hay tema de contacto externo, manten la conversacion dentro de la app con suavidad y redireccion concreta. No repitas numeros ni canales externos.
+Si hay contacto externo, manten la charla dentro de la app con suavidad y redireccion concreta. No repitas numeros ni canales externos.
 Si usas perfil, menciona un interes concreto.
 No inventes saludos.
 No inventes primer contacto.
