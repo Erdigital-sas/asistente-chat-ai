@@ -26,13 +26,9 @@ function construirUserPrompt({
   estadoConversacion,
   operadorTraeTemaPropio,
   anclarEnUltimoMensajeCliente,
-  permisosApertura,
-  chosenInterest,
-  recentAvoid,
-  fastMode
+  permisosApertura
 }) {
   const interesPrioritario =
-    chosenInterest ||
     perfilEstructurado?.interesesEnComun?.[0] ||
     perfilEstructurado?.interesesClienta?.[0] ||
     "";
@@ -122,30 +118,32 @@ Solicitud de contacto externo en clienta: ${contactoExterno ? "si" : "no"}
 Solicitud de contacto externo en borrador: ${contactoEnBorrador ? "si" : "no"}
 Menciones geograficas del operador: ${mencionesGeograficasOperador.length ? mencionesGeograficasOperador.join(" | ") : "ninguna"}
 
-FRASES RECIENTES A EVITAR
-${(recentAvoid || []).join(" | ") || "sin referencias"}
-
 TAREA
-Devuelve ${fastMode ? "1" : "3"} opciones numeradas.
-Cada opcion debe:
-- sentirse escrita por una persona real
-- sonar directa y natural
-- usar la ancla obligatoria o lo ultimo que dijo la clienta
-- evitar explicaciones sobre el mensaje
-- tener como maximo una pregunta
-- quedar entre 170 y 300 caracteres
-- poder pegarse tal cual en el chat
+Escribe una sola respuesta final entre 170 y 300 caracteres.
+
+La respuesta debe:
+- sentirse humana
+- sonar como alguien real interesado en la charla
+- usar la ancla obligatoria
+- responder primero lo ultimo de la clienta si aplica
+- mantener la intencion del operador
+- tener una sola idea fuerte
+- usar perfil solo si suma algo concreto
+- evitar sonar bonita pero vacia
 
 NO HAGAS
-- no hables del mensaje, del borrador ni de responder mejor
-- no uses frases como no queria dejarte algo frio ni comun, preferi escribirte mejor, me quede pensando en lo ultimo que compartiste, responderte con mas intencion, lo reformulo mejor
-- no suenes coach, poeta ni asistente
-- no propongas encuentros ni salir de la app
-- no inventes nombres
+- no hables del mensaje ni del borrador
+- no digas que querias escribir mejor
+- no digas que respondes con mas intencion
+- no uses frases tipo me quede pensando en lo ultimo que compartiste
+- no inventes saludos
 - no inventes primer contacto
+- no inventes nombres
 - no conviertas hechos de la clienta en hechos del operador
+- no propongas encuentros ni salir de la app
+- no uses frases abstractas como lo que te inspira, lo que te apasiona, lo que mas te representa o tu mejor energia
 
-Devuelve solo las opciones numeradas.
+Devuelve solo el mensaje final.
 `.trim();
 }
 
