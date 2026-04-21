@@ -9,7 +9,6 @@ const {
 
 const { autorizarOperador } = require("../services/operators");
 const { registrarConsumoAsync } = require("../services/core");
-
 const {
   getSharedInFlight,
   runSuggestionQueueByOperator
@@ -28,6 +27,49 @@ const {
   generarSugerencias,
   construirFallbackSugerencias
 } = require("../services/suggestions");
+
+function limpiarListaSugerencias(items = []) {
+  const seen = new Set();
+  const salida = [];
+
+  for (const item of Array.isArray(items) ? items : []) {
+    const limpio = String(item || "")
+      .replace(/[“”"]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const key = limpio.toLowerCase();
+    if (!limpio || seen.has(key)) continue;
+
+    seen.add(key);
+    salida.push(limpio);
+  }
+
+  return salida;
+}
+
+function construirUltimoRecurso(caso = {}) {
+  const interes =
+    caso?.perfilEstructurado?.interesesEnComun?.[0] ||
+    caso?.perfilEstructurado?.interesesClienta?.[0] ||
+    "";
+
+  if (caso?.estadoConversacion?.hayConversacionReal) {
+    return [
+      "Lo que dijiste cambia bastante el tono de la charla, y por eso preferi seguir justo por ahi en vez de responder con algo vacio. A veces un detalle bien dicho vale mas que una frase armada, y contigo me dejo curiosidad real."
+    ];
+  }
+
+  if (interes) {
+    return [
+      `Vi que ${String(interes).toLowerCase()} aparece en tu perfil y me parecio mejor entrar por ahi que por una frase comun. Cuando alguien tiene un gusto asi de claro, casi siempre dice bastante mas de lo que parece al principio.`
+    ];
+  }
+
+  return [
+    "Vi un detalle aqui que da mas para una charla con sustancia que para una entrada comun. Cuando alguien deja algo asi, casi siempre hay mas fondo del que parece, y eso fue justo lo que me dio curiosidad seguir."
+  ];
+}
 
 const router = express.Router();
 
@@ -76,33 +118,44 @@ router.post("/sugerencias", autorizarOperador, async (req, res) => {
     }
 
     const resultado = await sharedJob.promise;
-    let sugerencias = filtrarSugerenciasFinales(
-      Array.isArray(resultado?.sugerencias) ? resultado.sugerencias : [],
-      caso
+
+    const sugerenciasServicio = limpiarListaSugerencias(
+      Array.isArray(resultado?.sugerencias) ? resultado.sugerencias : []
     );
 
-    if (!sugerencias.length) {
-      sugerencias = filtrarSugerenciasFinales(
-        construirFallbackSugerencias({
-          texto: caso.textoPlano,
-          cliente: caso.clientePlano,
-          estadoConversacion: caso.estadoConversacion,
-          perfilEstructurado: caso.perfilEstructurado
-        }),
-        caso
-      );
+    // 1) Primero intenta usar lo que ya devolvio el servicio
+    let sugerencias = filtrarSugerenciasFinales(sugerenciasServicio, caso);
+
+    // 2) Si el re-filtrado mata todo, confia en la salida del servicio
+    if (!sugerencias.length && sugerenciasServicio.length) {
+      sugerencias = sugerenciasServicio;
     }
 
+    // 3) Si de verdad no vino nada util, prueba fallback del servicio
     if (!sugerencias.length) {
-      sugerencias = caso.estadoConversacion.hayConversacionReal
-        ? ["Queria responderte mejor y con un poco mas de intencion."]
-        : ["Queria escribirte algo mejor y menos generico."];
+      const fallbackServicio = limpiarListaSugerencias(
+        construirFallbackSugerencias(caso)
+      );
+
+      const fallbackFiltrado = filtrarSugerenciasFinales(
+        fallbackServicio,
+        caso
+      );
+
+      sugerencias = fallbackFiltrado.length
+        ? fallbackFiltrado
+        : fallbackServicio;
+    }
+
+    // 4) Ultimo recurso humano, pero nunca el mensaje robotico anterior
+    if (!sugerencias.length) {
+      sugerencias = construirUltimoRecurso(caso);
     }
 
     registrarConsumoAsync({
       operador,
       extension_id,
-      data: sharedJob.shared ? null : resultado.usageData,
+      data: sharedJob.shared ? null : resultado?.usageData || null,
       tipo: sharedJob.shared ? "IA_SHARED" : "IA",
       mensaje_operador: texto,
       request_ok: true
@@ -113,7 +166,7 @@ router.post("/sugerencias", autorizarOperador, async (req, res) => {
 
     return res.json({
       ok: true,
-      sugerencias: sugerencias.slice(0, 3)
+      sugerencias: limpiarListaSugerencias(sugerencias).slice(0, 3)
     });
   } catch (err) {
     console.error("Error en /sugerencias:", err.message);
