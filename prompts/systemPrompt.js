@@ -54,8 +54,8 @@ function construirGuiaModo(mode = "DEFAULT") {
     NEW_CHAT: `
 MODO NEW_CHAT
 No hay respuesta real previa.
-Convierte el borrador en una entrada natural, simple y facil de responder.
-Si usas perfil, usa un detalle concreto y real.
+Haz una entrada concreta, simple y facil de responder.
+Si usas perfil, usa un detalle real.
 No inventes continuidad.
 `.trim(),
 
@@ -63,29 +63,30 @@ No inventes continuidad.
 MODO REPLY_LAST_MESSAGE
 Debes responder primero lo ultimo que ella dijo.
 No cambies de tema demasiado pronto.
-Hazlo sonar como reaccion real, no como texto redactado.
+Debe sonar como reaccion real, no como texto preparado.
 `.trim(),
 
     GHOSTING: `
 MODO GHOSTING
 El caso trata sobre silencio, dejar en visto o desconexion.
+No hagas drama.
 No suenes herido, necesitado ni resentido.
-Reabre con seguridad, naturalidad y algo concreto.
+Reabre con seguridad y algo concreto.
 `.trim(),
 
     CONTACT_BLOCK: `
 MODO CONTACT_BLOCK
-Se menciono numero, telefono, mail, WhatsApp, Telegram, Instagram u otro canal externo.
+Se menciono salir de la app, numero, telefono, mail, WhatsApp, Telegram, Instagram u otro canal externo.
 No lo valides.
 No repitas numeros ni canales.
-Mantiene la conversacion dentro de la app con firmeza suave y redireccion concreta.
+Mantiene la charla dentro de la app con firmeza suave y redireccion concreta.
 `.trim(),
 
     MEDIA_REPLY: `
 MODO MEDIA_REPLY
 El caso gira alrededor de foto, video, audio, selfie, voz o imagen.
-Debes anclarte primero a ese contenido.
-No te vayas a perfil ni a curiosidad generica.
+Anclate primero a ese contenido.
+No te vayas a perfil ni a frase generica.
 `.trim(),
 
     CONFLICT_REFRAME: `
@@ -116,7 +117,7 @@ function construirBloqueLongitud(objetivoLongitud = {}) {
   const profile = objetivoLongitud?.profile || "medio";
   const min = objetivoLongitud?.min || 90;
   const max = objetivoLongitud?.max || 180;
-  const shape = objetivoLongitud?.shape || "una idea clara y un cierre ligero";
+  const shape = objetivoLongitud?.shape || "una reaccion concreta y un cierre simple";
 
   const mapa = {
     corto: "Caso corto. No expandas. Resuelve con una observacion breve y una pregunta corta o un cierre muy simple.",
@@ -159,8 +160,8 @@ OBJETIVO
 Entregar una sola version final:
 - humana
 - natural
-- atractiva
 - concreta
+- atractiva
 - segura
 - lista para enviar
 
@@ -220,6 +221,7 @@ No debe sonar como redactor, coach, poeta ni bot.
 Mejor una frase viva y concreta que una frase elegante pero vacia.
 Si el caso es simple, resuelvelo simple.
 No alargues por rellenar.
+Si haces una pregunta, que sea una sola y que nazca de algo real del caso.
 
 EVITA FRASES GASTADAS O ROBOTICAS
 Evita respuestas como:
