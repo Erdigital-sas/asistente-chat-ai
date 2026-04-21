@@ -1,3 +1,4 @@
+// services/suggestions.js
 const {
   OPENAI_MODEL_SUGGESTIONS,
   OPENAI_TIMEOUT_SUGGESTIONS_MS
@@ -116,25 +117,8 @@ function tieneAnclaReal(sugerencia = "", anchor = "") {
 }
 
 function extraerUbicacionVisiblePerfil(perfilEstructurado = {}) {
-  const intereses = new Set([
-    ...(perfilEstructurado?.interesesEnComun || []),
-    ...(perfilEstructurado?.interesesClienta || [])
-  ].map((x) => normalizarTexto(x)));
-
-  const datos = perfilEstructurado?.datosClienta || [];
-
-  for (const raw of datos) {
-    const limpio = limpiarSalidaHumana(raw || "");
-    const norm = normalizarTexto(limpio);
-
-    if (!norm) continue;
-    if (intereses.has(norm)) continue;
-    if (/\d/.test(norm)) continue;
-    if (STATUS_OR_DATE_REGEX.test(norm)) continue;
-    if (limpio.length > 36) continue;
-
-    return limpio;
-  }
+  const explicita = limpiarSalidaHumana(perfilEstructurado?.ubicacionClienta || "");
+  if (explicita) return explicita;
 
   return "";
 }
@@ -415,7 +399,7 @@ function textoPreguntaPorBusqueda(texto = "") {
 }
 
 function textoPreguntaPorInteres(texto = "") {
-  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|musica|music|arte|arts|jardineria|gardening)\b/i.test(normalizarTexto(texto));
+  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|musica|music|arte|arts|gardening|jardineria|cooking|cocinar|nature|naturaleza)\b/i.test(normalizarTexto(texto));
 }
 
 function textoPreguntaPorActividad(texto = "") {
@@ -526,6 +510,20 @@ function construirResumenTrabajo(tipoTrabajo = "rewrite_operator_draft") {
   };
 
   return mapa[tipoTrabajo] || mapa.rewrite_operator_draft;
+}
+
+function planHeuristico(caso = {}) {
+  const mode = detectarModeHeuristico(caso);
+  const tipoTrabajo = inferirTipoTrabajo({ ...caso, mode });
+  const anchor = detectarAnchorHeuristico({ ...caso, mode, tipoTrabajo }, mode);
+  const chosenInterest = obtenerInteresPrioritario(caso.perfilEstructurado);
+
+  return {
+    mode,
+    anchor,
+    chosen_interest: chosenInterest,
+    summary: `${construirResumenTipoContacto(caso.tipoContacto)} ${construirResumenTrabajo(tipoTrabajo)}`.trim()
+  };
 }
 
 function prepararCasoSugerencias({
@@ -645,11 +643,11 @@ function prepararCasoSugerencias({
     mode,
     tipoTrabajo
   });
-  const anchor = detectarAnchorHeuristico({
+  const plan = planHeuristico({
     ...baseCaso,
     mode,
     tipoTrabajo
-  }, mode);
+  });
 
   const lecturaOperador = [
     construirLecturaOperador(analisisOperador),
@@ -682,7 +680,8 @@ function prepararCasoSugerencias({
     mode,
     tipoTrabajo,
     objetivoLongitud,
-    anchor,
+    anchor: plan.anchor,
+    plan,
     fingerprint
   };
 }
@@ -776,6 +775,45 @@ function recortarNatural(texto = "", max = 150) {
   return limpiarSalidaHumana(base.replace(/[,:;]+$/g, "").trim());
 }
 
+function construirFallbackRewriteDesdeBorrador(caso = {}) {
+  const texto = normalizarTexto(caso.textoPlano || "");
+  const original = limpiarSalidaHumana(caso.textoPlano || "");
+
+  if (!original) return "";
+
+  if (/\b(discutir|pelea|problema|molesta|molesto|discutiendo)\b/.test(texto)) {
+    return "No quiero que esto se convierta en una discusion por una mala vuelta. De verdad sientes que estamos yendo por ahi?";
+  }
+
+  if (/\b(que haces|que haces ahora|what are you doing)\b/.test(texto)) {
+    return "Te hago una simple: que andas haciendo a esta hora?";
+  }
+
+  if (/\b(de donde eres|where are you from|donde vives)\b/.test(texto)) {
+    const ubicacion = caso.ubicacionVisiblePerfil || "";
+    if (ubicacion) {
+      return `Vi que eres de ${ubicacion}. Que es lo que mas te gusta de vivir ahi?`;
+    }
+  }
+
+  if (/\b(te gusta|futbol|football|music|musica|arte|arts|travel|viajar|cooking|cocinar|nature|naturaleza)\b/.test(texto)) {
+    const interes =
+      caso.plan?.chosen_interest ||
+      caso.perfilEstructurado?.interesesEnComun?.[0] ||
+      caso.perfilEstructurado?.interesesClienta?.[0] ||
+      "";
+
+    if (interes) {
+      return `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`;
+    }
+  }
+
+  const recortado = recortarNatural(original, caso.objetivoLongitud?.max || 150);
+  if (recortado) return recortado;
+
+  return "";
+}
+
 function construirFallbackSugerencias(caso = {}) {
   const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
   const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
@@ -786,33 +824,15 @@ function construirFallbackSugerencias(caso = {}) {
   }
 
   if (caso.tipoTrabajo === "reply_last_client_message") {
-    if (caso.anchor && tieneAnclaReal(caso.anchor, caso.anchor)) {
-      return [
-        "Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue muy de ese momento?"
-      ];
-    }
-
     return [
-      "Me quede con curiosidad por ese punto en concreto. Siempre lo ves asi o fue algo muy de ese momento?"
+      "Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue muy de ese momento?"
     ];
   }
 
   if (caso.tipoTrabajo === "rewrite_operator_draft") {
-    if (ubicacion && textoPreguntaPorUbicacion(caso.textoPlano || "")) {
-      return [
-        `Vi que eres de ${ubicacion}. Que es lo que mas te gusta de vivir ahi?`
-      ];
-    }
-
-    if (interes && textoPreguntaPorInteres(caso.textoPlano || "")) {
-      return [
-        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
-      ];
-    }
-
-    const textoRecortado = recortarNatural(caso.textoPlano, caso.objetivoLongitud.max);
-    if (textoRecortado && cumpleLongitudPremium(textoRecortado, caso.objetivoLongitud)) {
-      return [textoRecortado];
+    const desdeBorrador = construirFallbackRewriteDesdeBorrador(caso);
+    if (desdeBorrador) {
+      return [desdeBorrador];
     }
 
     if (ubicacion) {
@@ -1069,7 +1089,7 @@ async function generarSugerencias(caso = {}) {
     ? ["Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"]
     : caso.tipoTrabajo === "reply_last_client_message"
       ? ["Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue muy de ese momento?"]
-      : ["Hay un detalle aqui que da mas juego del que parece. Me dio curiosidad saber que parte de ti es la que mas suele llamar la atencion cuando alguien te conoce un poco mejor."];
+      : ["Hay un detalle aqui que me dejo curiosidad. Que dirias que es lo primero que suele llamar la atencion de ti?"];
 
   return {
     sugerencias: [limpiarSalidaHumana(ultimoRecurso[0])],
