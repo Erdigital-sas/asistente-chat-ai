@@ -1,8 +1,9 @@
-// prompts/userPrompt.js
 const { quitarTildes } = require("../lib/utils");
 
 function construirUserPrompt({
   mode,
+  tipoTrabajo,
+  tipoContacto,
   anchor,
   planSummary,
   textoPlano,
@@ -29,18 +30,45 @@ function construirUserPrompt({
   anclarEnUltimoMensajeCliente,
   permisosApertura,
   objetivoLongitud,
-  ubicacionVisiblePerfil
+  ubicacionVisiblePerfil,
+  feedbackCorreccion = ""
 }) {
   const interesPrioritario =
     perfilEstructurado?.interesesEnComun?.[0] ||
     perfilEstructurado?.interesesClienta?.[0] ||
     "";
 
+  const guiaTrabajo = {
+    simple_profile_fastpath:
+      "Debes resolver una pregunta simple usando un detalle claro del perfil o una observacion directa. Nada de discurso.",
+    rewrite_operator_draft:
+      "Tu tarea es mejorar el borrador del operador manteniendo su intencion. No respondas como si la clienta hubiera dicho el borrador.",
+    reply_last_client_message:
+      "Debes responder primero lo ultimo que dijo la clienta y luego, si cabe, enlazar con la intencion del operador.",
+    complex_reframe:
+      "Debes resolver un caso complejo con tacto y utilidad real, sin sonar robot."
+  }[tipoTrabajo] || "Mejora el borrador sin cambiar el rol.";
+
+  const guiaContacto = {
+    nuevo_total:
+      "Cliente nueva. Engancha como primer acercamiento.",
+    viejo_sin_respuesta:
+      "Hay historial del operador, pero no respuesta real de la clienta. No finjas continuidad ni respondas como si ella ya hubiera abierto tema.",
+    viejo_con_respuesta:
+      "Ya hubo respuesta real de la clienta. Responde eso primero."
+  }[tipoContacto] || "Cliente nueva.";
+
   return `
 CASO
 
 MODO DETECTADO
 ${mode}
+
+TIPO DE TRABAJO
+${tipoTrabajo}
+
+TIPO DE CONTACTO
+${tipoContacto}
 
 ANCLA OBLIGATORIA
 ${anchor || "sin ancla clara"}
@@ -50,7 +78,7 @@ ${planSummary || "seguir el tema real del borrador"}
 
 OBJETIVO DE LONGITUD
 Perfil: ${objetivoLongitud?.profile || "medio"}
-Rango: ${objetivoLongitud?.min || 90}-${objetivoLongitud?.max || 180} caracteres
+Rango: ${objetivoLongitud?.min || 80}-${objetivoLongitud?.max || 150} caracteres
 Estructura ideal: ${objetivoLongitud?.shape || "una reaccion concreta y un cierre simple"}
 Guia: ${objetivoLongitud?.instruction || "si el caso es simple, responde simple"}
 
@@ -103,6 +131,12 @@ ${quitarTildes(guiaIntencion)}
 GUIA DE PERFIL
 ${quitarTildes(guiaPerfil || "Sin guia")}
 
+GUIA DE TRABAJO
+${quitarTildes(guiaTrabajo)}
+
+GUIA DE CONTACTO
+${quitarTildes(guiaContacto)}
+
 ESTADO DE CONVERSACION
 Hay respuesta real de la clienta: ${estadoConversacion?.hayConversacionReal ? "si" : "no"}
 Solo hay mensajes del operador sin respuesta: ${estadoConversacion?.soloOperadorSinRespuesta ? "si" : "no"}
@@ -153,7 +187,7 @@ NO HAGAS
 - no hables del mensaje ni del borrador
 - no digas que querias escribir mejor
 - no digas que respondes con mas intencion
-- no uses frases tipo me quede pensando en lo ultimo que compartiste
+- no uses frases tipo eso que dijiste, por como lo dijiste, siempre hablas asi o me quede pensando en lo ultimo que compartiste
 - no inventes saludos
 - no inventes primer contacto
 - no inventes nombres
@@ -163,6 +197,8 @@ NO HAGAS
 - no uses frases abstractas como lo que te inspira, lo que te apasiona, lo que mas te representa o tu mejor energia
 - no rellenes solo para llegar a una longitud si el caso da para algo corto
 - no uses tono de coach, poeta o asistente
+
+${feedbackCorreccion ? `CORRECCION OBLIGATORIA\n${feedbackCorreccion}\n` : ""}
 
 Devuelve solo el mensaje final.
 `.trim();
