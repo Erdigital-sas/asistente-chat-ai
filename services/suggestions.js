@@ -1,4 +1,3 @@
-// services/suggestions.js
 const {
   OPENAI_MODEL_SUGGESTIONS,
   OPENAI_TIMEOUT_SUGGESTIONS_MS
@@ -46,8 +45,8 @@ const { construirUserPrompt } = require("../prompts/userPrompt");
 const { llamarOpenAI } = require("./openai");
 
 const LENGTH_PROFILES = {
-  corto: { min: 45, max: 95, ideal: 70 },
-  medio: { min: 80, max: 150, ideal: 115 },
+  corto: { min: 45, max: 115, ideal: 75 },
+  medio: { min: 80, max: 155, ideal: 115 },
   largo: { min: 130, max: 240, ideal: 180 }
 };
 
@@ -67,7 +66,7 @@ const MULETILLA_REGEX =
   /\b(me gustaria saber mas de ti|mas sobre ti|me encantaria hablar contigo|podemos encontrar un terreno comun|lo que te inspira|lo que te apasiona|seguir conversando|me gustaria conocer mas de ti)\b/i;
 
 const FRASES_ROBOTICAS_REGEX =
-  /\b(eso que dijiste cambia bastante el tono|eso que dijiste me dejo curiosidad|preferi responder|responderte mejor|me quede pensando en lo ultimo|con mas intencion|con mas calma|con mas naturalidad|lo reformulo mejor|piloto automatico|tu mejor energia|tu mejor vibra|forma de ver las cosas)\b/i;
+  /\b(eso que dijiste cambia bastante el tono|eso que dijiste me dejo curiosidad|por como lo dijiste|siempre hablas asi|preferi escribirte mejor|responderte mejor|con mas intencion|con mas calma|con mas naturalidad|piloto automatico|tu mejor energia|tu mejor vibra|forma de ver las cosas)\b/i;
 
 const STOPWORDS_ANCLA = new Set([
   "hola", "como", "estas", "esta", "pero", "porque", "por", "para", "quiero",
@@ -75,7 +74,7 @@ const STOPWORDS_ANCLA = new Set([
   "respuestas", "quieres", "quiero", "tengo", "tiene", "tener", "buen", "buena",
   "sobre", "algo", "este", "esta", "esto", "esas", "esos", "aqui", "alla",
   "muy", "poco", "mucho", "tambien", "solo", "igual", "donde", "cuando",
-  "eres", "hacer", "gusta", "gusta", "buscas", "aqui", "alli"
+  "eres", "hacer", "gusta", "buscas"
 ]);
 
 const STATUS_OR_DATE_REGEX =
@@ -96,21 +95,6 @@ function sumarUsage(...datas) {
   });
 
   return { usage };
-}
-
-function extraerPrimerJson(texto = "") {
-  const raw = String(texto || "").trim();
-  if (!raw) return null;
-
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start < 0 || end < 0 || end <= start) return null;
-
-  try {
-    return JSON.parse(raw.slice(start, end + 1));
-  } catch (_err) {
-    return null;
-  }
 }
 
 function palabrasCount(texto = "") {
@@ -175,35 +159,152 @@ function inferirTipoContacto(estadoConversacion = {}) {
   return "nuevo_total";
 }
 
+function detectarModeHeuristico(caso = {}) {
+  const bloque = [
+    caso.textoPlano || "",
+    caso.clientePlano || "",
+    ...(caso.lineasClienteRecientes || []),
+    ...(caso.lineasOperadorRecientes || [])
+  ].join(" \n ");
+
+  if (caso.temaContactoExterno) return "CONTACT_BLOCK";
+  if (MEDIA_REGEX.test(bloque)) return "MEDIA_REPLY";
+  if (GHOSTING_REGEX.test(caso.textoPlano || "")) return "GHOSTING";
+  if (CONFLICT_REGEX.test(bloque)) return "CONFLICT_REFRAME";
+  if (!caso.estadoConversacion?.hayConversacionReal) return "NEW_CHAT";
+  if (caso.anclarEnUltimoMensajeCliente) return "REPLY_LAST_MESSAGE";
+  if (!caso.operadorTraeTemaPropio && (
+    (caso.perfilEstructurado?.interesesEnComun || []).length ||
+    (caso.perfilEstructurado?.interesesClienta || []).length
+  )) {
+    return "PROFILE_SUPPORT";
+  }
+
+  return "DEFAULT";
+}
+
+function detectarAnchorHeuristico(caso = {}, mode = "DEFAULT") {
+  if (mode === "CONTACT_BLOCK") {
+    const cand = [
+      caso.clientePlano,
+      ...(caso.lineasClienteRecientes || []),
+      caso.textoPlano
+    ].find((x) => CONTACTO_REGEX.test(x || ""));
+    return cand
+      ? limpiarSalidaHumana(cand).slice(0, 180)
+      : "mantener la conversacion dentro de la app y redirigir a un tema concreto";
+  }
+
+  if (mode === "MEDIA_REPLY") {
+    const cand = [
+      caso.textoPlano,
+      caso.clientePlano,
+      ...(caso.lineasClienteRecientes || [])
+    ].find((x) => MEDIA_REGEX.test(x || ""));
+    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
+  }
+
+  if (mode === "GHOSTING") {
+    return limpiarSalidaHumana(caso.textoPlano || "").slice(0, 180);
+  }
+
+  if (mode === "CONFLICT_REFRAME") {
+    const cand = [
+      caso.textoPlano,
+      caso.clientePlano,
+      ...(caso.lineasClienteRecientes || [])
+    ].find((x) => CONFLICT_REGEX.test(x || ""));
+    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
+    return "hay tension o malentendido y la respuesta debe bajar la friccion";
+  }
+
+  if (caso.tipoTrabajo === "reply_last_client_message" && caso.lineasClienteRecientes?.length) {
+    return limpiarSalidaHumana(
+      caso.lineasClienteRecientes[caso.lineasClienteRecientes.length - 1]
+    ).slice(0, 180);
+  }
+
+  const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  if (ubicacion && textoPreguntaPorUbicacion(caso.textoPlano || "")) {
+    return `dato visible del perfil: ${ubicacion}`;
+  }
+
+  const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
+  if (interes && textoPreguntaPorInteres(caso.textoPlano || "")) {
+    return `interes del perfil: ${interes}`;
+  }
+
+  if (caso.operadorTraeTemaPropio && caso.textoPlano) {
+    return limpiarSalidaHumana(caso.textoPlano).slice(0, 180);
+  }
+
+  if (ubicacion) {
+    return `dato visible del perfil: ${ubicacion}`;
+  }
+
+  if (interes) {
+    return `interes del perfil: ${interes}`;
+  }
+
+  return "seguir el tema real del borrador sin sonar abstracto";
+}
+
+function inferirTipoTrabajo(caso = {}) {
+  if (["CONTACT_BLOCK", "GHOSTING", "CONFLICT_REFRAME", "MEDIA_REPLY"].includes(caso.mode)) {
+    return "complex_reframe";
+  }
+
+  if (
+    caso.analisisOperador?.preguntaSimpleDirecta &&
+    caso.tipoContacto !== "viejo_con_respuesta"
+  ) {
+    return "simple_profile_fastpath";
+  }
+
+  if (
+    caso.anclarEnUltimoMensajeCliente &&
+    !caso.operadorTraeTemaPropio &&
+    caso.estadoConversacion?.hayConversacionReal
+  ) {
+    return "reply_last_client_message";
+  }
+
+  return "rewrite_operator_draft";
+}
+
 function construirObjetivoLongitud(caso = {}) {
   const palabras = palabrasCount(caso.textoPlano || "");
   const textoLen = contarCaracteres(caso.textoPlano || "");
   const clienteLen = contarCaracteres(caso.clientePlano || "");
-
   const hasInterest = Boolean(obtenerInteresPrioritario(caso.perfilEstructurado));
-  const hasLocation = Boolean(extraerUbicacionVisiblePerfil(caso.perfilEstructurado));
-  const simpleDirect = Boolean(caso.analisisOperador?.preguntaSimpleDirecta);
-  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
-
-  const complexMode = ["GHOSTING", "CONFLICT_REFRAME", "CONTACT_BLOCK", "MEDIA_REPLY"].includes(caso.mode);
-  const complexDraft =
-    Boolean(caso.analisisOperador?.metaEdicion) ||
-    Boolean(caso.analisisOperador?.reclamo) ||
-    Boolean(caso.analisisOperador?.mezclaDeIdeas) ||
-    textoLen > 135;
+  const hasLocation = Boolean(caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado));
 
   let profile = "medio";
 
-  if (complexMode || complexDraft) {
+  if (caso.tipoTrabajo === "simple_profile_fastpath") {
+    profile = "corto";
+  } else if (caso.tipoTrabajo === "reply_last_client_message") {
+    if (clienteLen <= 120 && palabras <= 8) {
+      profile = "corto";
+    } else {
+      profile = "medio";
+    }
+  } else if (caso.tipoTrabajo === "complex_reframe") {
     profile = "largo";
-  } else if (simpleDirect && (hasInterest || hasLocation)) {
-    profile = "corto";
-  } else if (simpleDirect && palabras <= 10) {
-    profile = "corto";
-  } else if (tipoContacto !== "viejo_con_respuesta" && textoLen <= 60 && (hasInterest || hasLocation)) {
-    profile = "corto";
-  } else if (caso.anclarEnUltimoMensajeCliente && clienteLen <= 120 && palabras <= 8) {
-    profile = "corto";
+  } else {
+    if (
+      (caso.tipoContacto !== "viejo_con_respuesta" && caso.analisisOperador?.preguntaSimpleDirecta && (hasInterest || hasLocation)) ||
+      (textoLen <= 60 && (hasInterest || hasLocation))
+    ) {
+      profile = "corto";
+    } else if (
+      textoLen > 170 ||
+      caso.analisisOperador?.metaEdicion ||
+      caso.analisisOperador?.reclamo ||
+      caso.analisisOperador?.mezclaDeIdeas
+    ) {
+      profile = "largo";
+    }
   }
 
   const shapeMap = {
@@ -305,247 +406,126 @@ function filtrarSugerenciasFinales(sugerencias = [], caso = {}) {
     ));
 }
 
-function detectarModeHeuristico(caso = {}) {
-  const bloque = [
-    caso.textoPlano || "",
-    caso.clientePlano || "",
-    ...(caso.lineasClienteRecientes || []),
-    ...(caso.lineasOperadorRecientes || [])
-  ].join(" \n ");
-
-  if (caso.temaContactoExterno) return "CONTACT_BLOCK";
-  if (MEDIA_REGEX.test(bloque)) return "MEDIA_REPLY";
-  if (GHOSTING_REGEX.test(caso.textoPlano || "")) return "GHOSTING";
-  if (CONFLICT_REGEX.test(bloque)) return "CONFLICT_REFRAME";
-  if (!caso.estadoConversacion?.hayConversacionReal) return "NEW_CHAT";
-  if (caso.anclarEnUltimoMensajeCliente) return "REPLY_LAST_MESSAGE";
-  if (!caso.operadorTraeTemaPropio && (
-    (caso.perfilEstructurado?.interesesEnComun || []).length ||
-    (caso.perfilEstructurado?.interesesClienta || []).length
-  )) {
-    return "PROFILE_SUPPORT";
-  }
-
-  return "DEFAULT";
+function textoPreguntaPorUbicacion(texto = "") {
+  return /\b(de donde eres|donde eres|where are you from|de donde vienes|donde vives|where do you live)\b/i.test(normalizarTexto(texto));
 }
 
-function detectarAnchorHeuristico(caso = {}, mode = "DEFAULT") {
-  if (mode === "CONTACT_BLOCK") {
-    const cand = [
-      caso.clientePlano,
-      ...(caso.lineasClienteRecientes || []),
-      caso.textoPlano
-    ].find((x) => CONTACTO_REGEX.test(x || ""));
-    return cand
-      ? limpiarSalidaHumana(cand).slice(0, 180)
-      : "mantener la conversacion dentro de la app y redirigir a un tema concreto";
-  }
+function textoPreguntaPorBusqueda(texto = "") {
+  return /\b(que buscas|what are you looking for|que tipo de relacion buscas|que clase de relacion buscas)\b/i.test(normalizarTexto(texto));
+}
 
-  if (mode === "MEDIA_REPLY") {
-    const cand = [
-      caso.textoPlano,
-      caso.clientePlano,
-      ...(caso.lineasClienteRecientes || [])
-    ].find((x) => MEDIA_REGEX.test(x || ""));
-    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
-  }
+function textoPreguntaPorInteres(texto = "") {
+  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|musica|music|arte|arts|jardineria|gardening)\b/i.test(normalizarTexto(texto));
+}
 
-  if (mode === "GHOSTING") {
-    return limpiarSalidaHumana(caso.textoPlano || "").slice(0, 180);
-  }
+function textoPreguntaPorActividad(texto = "") {
+  return /\b(que haces|que haces ahora|what are you doing|que tal tu dia|como va tu dia)\b/i.test(normalizarTexto(texto));
+}
 
-  if (mode === "CONFLICT_REFRAME") {
-    const cand = [
-      caso.textoPlano,
-      caso.clientePlano,
-      ...(caso.lineasClienteRecientes || [])
-    ].find((x) => CONFLICT_REGEX.test(x || ""));
-    if (cand) return limpiarSalidaHumana(cand).slice(0, 180);
-    return "hay tension o malentendido y la respuesta debe bajar la friccion";
-  }
-
-  if (caso.anclarEnUltimoMensajeCliente && caso.lineasClienteRecientes?.length) {
-    return limpiarSalidaHumana(
-      caso.lineasClienteRecientes[caso.lineasClienteRecientes.length - 1]
-    ).slice(0, 180);
-  }
-
-  if (caso.operadorTraeTemaPropio && caso.textoPlano) {
-    return limpiarSalidaHumana(caso.textoPlano).slice(0, 180);
-  }
-
-  const ubicacion = extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
-  if (ubicacion) {
-    return `dato visible del perfil: ${ubicacion}`;
-  }
-
+function construirFastPathSimple(caso = {}) {
+  const texto = caso.textoPlano || "";
+  const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
   const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
-  if (interes) {
-    return `interes del perfil: ${interes}`;
+  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
+
+  if (caso.temaContactoExterno) {
+    return limpiarSalidaHumana(
+      "Podemos seguir por aqui sin problema. Dime algo concreto de ti que si valga la pena conocer."
+    );
   }
 
-  return "anclarse al borrador del operador sin volverse abstracto";
+  if (textoPreguntaPorUbicacion(texto)) {
+    if (ubicacion) {
+      if (tipoContacto === "viejo_sin_respuesta") {
+        return limpiarSalidaHumana(
+          `Vi que eres de ${ubicacion}. Ese detalle me dio curiosidad. Que es lo mejor de vivir ahi?`
+        );
+      }
+
+      return limpiarSalidaHumana(
+        `Vi que eres de ${ubicacion}. Que es lo que mas te gusta de vivir ahi?`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "Te hago una simple: de donde eres y que es lo que mas te gusta de ese lugar?"
+    );
+  }
+
+  if (textoPreguntaPorInteres(texto)) {
+    if (interes) {
+      return limpiarSalidaHumana(
+        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "Eso me dio curiosidad. Lo sigues por gusto general o hay algo puntual que te engancha mas?"
+    );
+  }
+
+  if (textoPreguntaPorBusqueda(texto)) {
+    return limpiarSalidaHumana(
+      "Te pregunto algo simple: aqui buscas algo tranquilo para hablar o algo mas serio?"
+    );
+  }
+
+  if (textoPreguntaPorActividad(texto)) {
+    if (interes) {
+      return limpiarSalidaHumana(
+        `Te hago una simple: hoy andas con algo de ${String(interes).toLowerCase()} o te toco otro plan?`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "Te hago una simple: que andas haciendo a esta hora?"
+    );
+  }
+
+  if (tipoContacto !== "viejo_con_respuesta") {
+    if (ubicacion) {
+      return limpiarSalidaHumana(
+        `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
+      );
+    }
+
+    if (interes) {
+      return limpiarSalidaHumana(
+        `Vi que te gusta ${String(interes).toLowerCase()}. Me parecio mejor ir por ahi que con una frase comun. Que es lo que mas te engancha de eso?`
+      );
+    }
+  }
+
+  return "";
 }
 
-function planHeuristico(caso = {}) {
-  const mode = detectarModeHeuristico(caso);
-  const anchor = detectarAnchorHeuristico(caso, mode);
-
-  const useProfileInterest =
-    mode === "NEW_CHAT" ||
-    mode === "PROFILE_SUPPORT";
-
-  const chosenInterest =
-    useProfileInterest
-      ? obtenerInteresPrioritario(caso.perfilEstructurado)
-      : "";
-
-  const forbidden = [
-    "muletillas abstractas",
-    "continuidad falsa",
-    "desviarse del ancla"
-  ];
-
-  if (caso.temaContactoExterno) forbidden.push("repetir numero o validar contacto externo");
-
-  const summaryMap = {
-    NEW_CHAT: "entrada concreta y facil de responder",
-    REPLY_LAST_MESSAGE: "responder primero a lo ultimo que ella dijo",
-    GHOSTING: "reapertura segura, concreta y sin resentimiento",
-    CONTACT_BLOCK: "mantener la charla dentro de la app con redireccion concreta",
-    MEDIA_REPLY: "anclarse al contenido multimedia antes que al perfil",
-    CONFLICT_REFRAME: "bajar tension y responder con tacto",
-    PROFILE_SUPPORT: "usar un interes concreto como apoyo, no como muletilla",
-    DEFAULT: "seguir el borrador real y evitar deriva generica"
-  };
-
-  return {
-    mode,
-    anchor,
-    use_profile_interest: Boolean(chosenInterest),
-    chosen_interest: chosenInterest,
-    summary: summaryMap[mode] || summaryMap.DEFAULT,
-    forbidden
-  };
+function esCasoSimpleFastPath(caso = {}) {
+  if (caso.tipoTrabajo === "complex_reframe") return false;
+  if (caso.tipoContacto === "viejo_con_respuesta") return false;
+  if (!caso.analisisOperador?.preguntaSimpleDirecta) return false;
+  if (caso.metaEdicion) return false;
+  return true;
 }
 
 function construirResumenTipoContacto(tipoContacto = "nuevo_total") {
   const mapa = {
     nuevo_total: "Cliente nueva. Debes enganchar como primer acercamiento.",
-    viejo_sin_respuesta: "Hay historial del operador, pero no respuesta real de la clienta. No finjas continuidad ni contestes como si ella ya hubiera abierto tema.",
+    viejo_sin_respuesta: "Hay historial del operador, pero no respuesta real de la clienta. No finjas continuidad ni respondas como si ella ya hubiera abierto tema.",
     viejo_con_respuesta: "Ya hubo respuesta real de la clienta. Responde primero a lo ultimo que ella dijo."
   };
 
   return mapa[tipoContacto] || mapa.nuevo_total;
 }
 
-async function planificarCaso(caso = {}) {
-  const plannerSystem = `
-Eres un analista conversacional para un operador que escribe a una clienta dentro de una app.
-No redactas el mensaje final.
-Solo devuelves un JSON corto y util.
-
-MODOS VALIDOS
-NEW_CHAT
-REPLY_LAST_MESSAGE
-GHOSTING
-CONTACT_BLOCK
-MEDIA_REPLY
-CONFLICT_REFRAME
-PROFILE_SUPPORT
-DEFAULT
-
-OBJETIVO
-Clasificar el caso correctamente y fijar una ancla obligatoria.
-La ancla debe ser concreta, no abstracta.
-
-REGLAS
-- Si hay contacto externo, prioriza CONTACT_BLOCK
-- Si hay foto, video, audio o imagen como tema real, prioriza MEDIA_REPLY
-- Si el borrador habla de dejar en visto o silencio, prioriza GHOSTING
-- Si hay tension o malentendido, usa CONFLICT_REFRAME
-- Si no hay respuesta real previa, usa NEW_CHAT
-- Si hay ultimo mensaje real de la clienta y el operador no trae tema propio, usa REPLY_LAST_MESSAGE
-- PROFILE_SUPPORT solo si el perfil realmente ayuda
-- No inventes datos
-- Devuelve solo JSON valido
-`.trim();
-
-  const plannerUser = `
-BORRADOR
-${caso.textoPlano}
-
-ULTIMO MENSAJE REAL DE LA CLIENTA
-${caso.clientePlano || "Sin mensaje claro"}
-
-ULTIMAS LINEAS DE CLIENTA
-${(caso.lineasClienteRecientes || []).join(" | ") || "Sin lineas"}
-
-CONTEXTO
-${caso.contextoPlano || "Sin contexto"}
-
-INTERESES_EN_COMUN
-${(caso.perfilEstructurado?.interesesEnComun || []).join(" | ") || "Ninguno"}
-
-INTERESES_CLIENTA
-${(caso.perfilEstructurado?.interesesClienta || []).join(" | ") || "Ninguno"}
-
-DATOS_CLIENTA
-${(caso.perfilEstructurado?.datosClienta || []).join(" | ") || "Ninguno"}
-
-TIPO_CONTACTO
-${caso.tipoContacto}
-
-DATOS
-hay_conversacion_real=${caso.estadoConversacion?.hayConversacionReal ? "si" : "no"}
-operador_trae_tema_propio=${caso.operadorTraeTemaPropio ? "si" : "no"}
-tema_contacto_externo=${caso.temaContactoExterno ? "si" : "no"}
-
-Devuelve este JSON:
-{
-  "mode": "",
-  "anchor": "",
-  "use_profile_interest": false,
-  "chosen_interest": "",
-  "summary": "",
-  "forbidden": []
-}
-`.trim();
-
-  const data = await llamarOpenAI({
-    lane: "sugerencias",
-    model: OPENAI_MODEL_SUGGESTIONS,
-    messages: [
-      { role: "system", content: plannerSystem },
-      { role: "user", content: plannerUser }
-    ],
-    temperature: 0.1,
-    maxTokens: 120,
-    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
-  });
-
-  const parsed = extraerPrimerJson(data?.choices?.[0]?.message?.content || "");
-
-  if (!parsed || !parsed.mode || !parsed.anchor) {
-    return {
-      plan: planHeuristico(caso),
-      usageData: data
-    };
-  }
-
-  return {
-    plan: {
-      mode: String(parsed.mode || "DEFAULT").trim(),
-      anchor: limpiarSalidaHumana(String(parsed.anchor || "")),
-      use_profile_interest: Boolean(parsed.use_profile_interest),
-      chosen_interest: limpiarSalidaHumana(String(parsed.chosen_interest || "")),
-      summary: limpiarSalidaHumana(String(parsed.summary || "")),
-      forbidden: Array.isArray(parsed.forbidden)
-        ? parsed.forbidden.map((x) => limpiarSalidaHumana(String(x || ""))).filter(Boolean).slice(0, 8)
-        : []
-    },
-    usageData: data
+function construirResumenTrabajo(tipoTrabajo = "rewrite_operator_draft") {
+  const mapa = {
+    simple_profile_fastpath: "Caso simple con dato claro del perfil o pregunta directa.",
+    rewrite_operator_draft: "Debes mejorar el borrador del operador sin tratarlo como si ella lo hubiera dicho.",
+    reply_last_client_message: "Debes responder primero a lo ultimo de la clienta.",
+    complex_reframe: "Caso complejo que requiere tacto y control."
   };
+
+  return mapa[tipoTrabajo] || mapa.rewrite_operator_draft;
 }
 
 function prepararCasoSugerencias({
@@ -598,35 +578,25 @@ function prepararCasoSugerencias({
   const guiaPerfil = construirGuiaPerfil(perfilEstructurado, esChatNuevoOperativo);
 
   const lineasClienteRecientes = dedupeStrings(
-    estadoConversacion.lineasClienta.slice(-3)
-  ).slice(-3);
+    estadoConversacion.lineasClienta.slice(-4)
+  ).slice(-4);
 
   const lineasOperadorRecientes = dedupeStrings(
-    estadoConversacion.lineasOperador.slice(-3)
-  ).slice(-3);
+    estadoConversacion.lineasOperador.slice(-4)
+  ).slice(-4);
 
   const anclarEnUltimoMensajeCliente =
     estadoConversacion.hayConversacionReal &&
     !operadorTraeTemaPropio &&
     lineasClienteRecientes.length > 0;
 
-  const tipoContacto = inferirTipoContacto(estadoConversacion);
-
-  const lecturaOperador = [
-    construirLecturaOperador(analisisOperador),
-    !estadoConversacion.hayConversacionReal
-      ? "No hay respuesta real de la clienta."
-      : "",
-    anclarEnUltimoMensajeCliente
-      ? "Hay mensajes recientes de la clienta y el operador no trae un tema nuevo claro. Prioriza lo ultimo que ella dijo."
-      : "",
-    construirResumenTipoContacto(tipoContacto)
-  ].filter(Boolean).join(" ");
-
   const hechosClienteSensibles = detectarHechosClienteSensibles(lineasClienteRecientes);
   const mencionesGeograficasOperador = extraerMencionesGeograficasOperador(texto);
   const contactoEnBorrador = esSolicitudContacto(texto);
   const temaContactoExterno = Boolean(analisisCliente.contacto || contactoEnBorrador);
+
+  const tipoContacto = inferirTipoContacto(estadoConversacion);
+  const ubicacionVisiblePerfil = extraerUbicacionVisiblePerfil(perfilEstructurado);
 
   const baseCaso = {
     operador,
@@ -642,7 +612,6 @@ function prepararCasoSugerencias({
     analisisCliente,
     analisisOperador,
     lecturaCliente,
-    lecturaOperador,
     tonoCliente: analisisCliente.tono,
     contactoExterno: analisisCliente.contacto,
     contactoEnBorrador,
@@ -662,20 +631,43 @@ function prepararCasoSugerencias({
     anclarEnUltimoMensajeCliente,
     hechosClienteSensibles,
     mencionesGeograficasOperador,
-    tipoContacto
+    tipoContacto,
+    ubicacionVisiblePerfil
   };
 
-  const heuristico = planHeuristico(baseCaso);
-  const ubicacionVisiblePerfil = extraerUbicacionVisiblePerfil(perfilEstructurado);
+  const mode = detectarModeHeuristico(baseCaso);
+  const tipoTrabajo = inferirTipoTrabajo({
+    ...baseCaso,
+    mode
+  });
   const objetivoLongitud = construirObjetivoLongitud({
     ...baseCaso,
-    mode: heuristico.mode,
-    ubicacionVisiblePerfil
+    mode,
+    tipoTrabajo
   });
+  const anchor = detectarAnchorHeuristico({
+    ...baseCaso,
+    mode,
+    tipoTrabajo
+  }, mode);
+
+  const lecturaOperador = [
+    construirLecturaOperador(analisisOperador),
+    construirResumenTipoContacto(tipoContacto),
+    construirResumenTrabajo(tipoTrabajo),
+    !estadoConversacion.hayConversacionReal
+      ? "No hay respuesta real de la clienta."
+      : "",
+    anclarEnUltimoMensajeCliente
+      ? "Hay mensajes recientes de la clienta y el operador no trae tema nuevo claro. Prioriza lo ultimo que ella dijo."
+      : ""
+  ].filter(Boolean).join(" ");
 
   const fingerprint = [
-    "premium-planner-writer-v3-fastpath",
-    heuristico.mode,
+    "premium-v4",
+    normalizarTexto(operador).slice(0, 80),
+    mode,
+    tipoTrabajo,
     tipoContacto,
     objetivoLongitud.profile,
     normalizarTexto(textoPlano).slice(0, 420),
@@ -686,231 +678,202 @@ function prepararCasoSugerencias({
 
   return {
     ...baseCaso,
-    mode: heuristico.mode,
-    anchor: heuristico.anchor,
-    ubicacionVisiblePerfil,
+    lecturaOperador,
+    mode,
+    tipoTrabajo,
     objetivoLongitud,
+    anchor,
     fingerprint
   };
 }
 
-function textoPreguntaPorUbicacion(texto = "") {
-  return /\b(de donde eres|donde eres|de donde vienes|where are you from|donde vives|where do you live)\b/i.test(normalizarTexto(texto));
+function necesitaSegundoIntentoCandidato(candidata = "", caso = {}, sugerenciasFiltradas = []) {
+  const t = normalizarTexto(candidata || "");
+
+  if (!candidata || !sugerenciasFiltradas.length) return true;
+  if (esMetaRobotica(candidata)) return true;
+  if (!cumpleLongitudPremium(candidata, caso.objetivoLongitud)) return true;
+
+  if (
+    caso.tipoTrabajo === "reply_last_client_message" &&
+    caso.anclarEnUltimoMensajeCliente &&
+    !tieneAnclaReal(candidata, caso.anchor)
+  ) {
+    return true;
+  }
+
+  if (
+    caso.tipoContacto !== "viejo_con_respuesta" &&
+    /\b(eso que dijiste|por como lo dijiste|siempre hablas asi|fue por el momento)\b/.test(t)
+  ) {
+    return true;
+  }
+
+  if (
+    caso.tipoTrabajo === "rewrite_operator_draft" &&
+    /\b(eso que dijiste|por como lo dijiste|siempre hablas asi)\b/.test(t)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
-function textoPreguntaPorBusqueda(texto = "") {
-  return /\b(que buscas|what are you looking for|que tipo de relacion buscas|que clase de relacion buscas)\b/i.test(normalizarTexto(texto));
-}
+function construirFeedbackSegundoIntento(caso = {}, candidata = "") {
+  const bloques = [];
 
-function textoPreguntaPorInteres(texto = "") {
-  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras)\b/i.test(normalizarTexto(texto));
-}
+  bloques.push("El intento anterior no quedo bien. Corrigelo.");
+  bloques.push(`Tipo de trabajo: ${caso.tipoTrabajo}`);
+  bloques.push(`Tipo de contacto: ${caso.tipoContacto}`);
+  bloques.push(`Ancla obligatoria: ${caso.anchor || "seguir el tema real del borrador"}`);
+  bloques.push(`Longitud obligatoria: ${caso.objetivoLongitud.min}-${caso.objetivoLongitud.max} caracteres.`);
+  bloques.push("No respondas al operador como si el borrador fuera algo que la clienta dijo.");
+  bloques.push("Si no hay respuesta real de la clienta, no escribas como si ya vinieran conversando.");
+  bloques.push("Si el caso es simple, no des discurso.");
+  bloques.push("Evita frases tipo eso que dijiste, por como lo dijiste, siempre hablas asi, me dejo curiosidad real.");
 
-function textoPreguntaPorActividad(texto = "") {
-  return /\b(que haces|que haces ahora|what are you doing|que tal tu dia|como va tu dia)\b/i.test(normalizarTexto(texto));
-}
+  if (caso.tipoTrabajo === "rewrite_operator_draft") {
+    bloques.push("Tu tarea es mejorar el borrador del operador manteniendo su intencion. No le contestes como si fuera un mensaje de ella.");
+  }
 
-function construirFastPathSimple(caso = {}) {
-  const texto = normalizarTexto(caso.textoPlano || "");
-  const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  if (caso.tipoTrabajo === "reply_last_client_message") {
+    bloques.push("Tu tarea es responder primero lo ultimo que dijo la clienta. No ignores ese punto.");
+  }
+
+  if (caso.ubicacionVisiblePerfil && textoPreguntaPorUbicacion(caso.textoPlano || "")) {
+    bloques.push(`La ubicacion visible del perfil es ${caso.ubicacionVisiblePerfil}. Si la pregunta va por ahi, usala de forma simple.`);
+  }
+
   const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
-  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
-
-  if (caso.temaContactoExterno) {
-    return limpiarSalidaHumana(
-      "Podemos seguir por aqui sin problema. Ya que estamos, dime algo concreto de ti que si valga la pena conocer."
-    );
+  if (interes && textoPreguntaPorInteres(caso.textoPlano || "")) {
+    bloques.push(`El interes visible del perfil es ${interes}. Si la pregunta va por ahi, usalo de forma simple.`);
   }
 
-  if (textoPreguntaPorUbicacion(texto)) {
-    if (ubicacion) {
-      if (tipoContacto === "viejo_sin_respuesta") {
-        return limpiarSalidaHumana(
-          `Vi que eres de ${ubicacion}. Ese detalle me dio curiosidad. Que es lo que mas te gusta de vivir ahi?`
-        );
-      }
-
-      return limpiarSalidaHumana(
-        `Vi que eres de ${ubicacion}. Siempre me ha dado curiosidad ese lugar. Que es lo que mas te gusta de vivir ahi?`
-      );
-    }
-
-    return limpiarSalidaHumana(
-      "Te hago una simple: de donde eres y que es lo que mas te gusta de ese lugar?"
-    );
+  if (candidata) {
+    bloques.push(`Texto flojo anterior: ${candidata}`);
   }
 
-  if (textoPreguntaPorInteres(texto)) {
-    if (interes) {
-      return limpiarSalidaHumana(
-        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
-      );
-    }
-
-    return limpiarSalidaHumana(
-      "Eso me dio curiosidad. Lo sigues por gusto general o hay algo puntual que te engancha mas?"
-    );
-  }
-
-  if (textoPreguntaPorBusqueda(texto)) {
-    return limpiarSalidaHumana(
-      "Te pregunto algo simple: aqui buscas algo tranquilo para hablar o te interesa algo mas serio?"
-    );
-  }
-
-  if (textoPreguntaPorActividad(texto)) {
-    if (interes) {
-      return limpiarSalidaHumana(
-        `A esta hora me dio curiosidad saber si hoy andas en algo relacionado con ${String(interes).toLowerCase()} o te toco un plan distinto.`
-      );
-    }
-
-    return limpiarSalidaHumana(
-      "A esta hora me dio curiosidad saber que andas haciendo y si hoy te toco un plan tranquilo o algo mas movido."
-    );
-  }
-
-  if (caso.tipoContacto === "nuevo_total" || caso.tipoContacto === "viejo_sin_respuesta") {
-    if (ubicacion) {
-      return limpiarSalidaHumana(
-        `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de vivir ahi?`
-      );
-    }
-
-    if (interes) {
-      return limpiarSalidaHumana(
-        `Vi que te gusta ${String(interes).toLowerCase()}. Me parecio mejor entrar por ahi que con una frase comun. Que es lo que mas te engancha de eso?`
-      );
-    }
-  }
-
-  return "";
+  return bloques.join("\n");
 }
 
-function esCasoSimpleFastPath(caso = {}) {
-  if (caso.estadoConversacion?.hayConversacionReal) return false;
-  if (!caso.analisisOperador?.preguntaSimpleDirecta) return false;
-  if (caso.metaEdicion) return false;
-  if (caso.temaContactoExterno) return true;
-  if (["GHOSTING", "CONFLICT_REFRAME", "MEDIA_REPLY"].includes(caso.mode)) return false;
-  return true;
+function recortarNatural(texto = "", max = 150) {
+  const limpio = normalizarEspacios(String(texto || ""));
+  if (!limpio) return "";
+  if (limpio.length <= max) return limpiarSalidaHumana(limpio);
+
+  const corte = limpio.slice(0, max);
+  const idx = Math.max(
+    corte.lastIndexOf(". "),
+    corte.lastIndexOf("? "),
+    corte.lastIndexOf("! "),
+    corte.lastIndexOf(", ")
+  );
+
+  const base = idx > Math.floor(max * 0.55)
+    ? corte.slice(0, idx).trim()
+    : corte.trim();
+
+  return limpiarSalidaHumana(base.replace(/[,:;]+$/g, "").trim());
 }
 
 function construirFallbackSugerencias(caso = {}) {
-  const perfil = caso.objetivoLongitud?.profile || "medio";
   const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
   const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
-  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
 
-  const maps = {
-    corto: {
-      CONTACT_BLOCK: [
-        "Mejor sigamos por aqui. Ya que estamos, que tipo de charla te engancha de verdad cuando alguien te escribe?"
-      ],
-      GHOSTING: [
-        "No pasa nada si te alejaste un poco. Solo me dio curiosidad saber si fue el momento o si esto no te movio demasiado."
-      ],
-      MEDIA_REPLY: [
-        "Lo que mandaste me dejo curiosidad. Que fue lo que mas te gusto a ti de ese momento?"
-      ],
-      CONFLICT_REFRAME: [
-        "No quiero que esto se vaya al choque. Que fue exactamente lo que te molesto?"
-      ],
-      NEW_CHAT: ubicacion
-        ? [`Vi que eres de ${ubicacion}. Siempre me ha dado curiosidad ese lugar. Que es lo que mas te gusta de vivir ahi?`]
-        : interes
-          ? [`Vi que te gusta ${String(interes).toLowerCase()}. Que es lo que mas te engancha de eso?`]
-          : ["Te pregunto algo simple: que es lo primero que te suele llamar la atencion de alguien?"],
-      REPLY_LAST_MESSAGE: [
-        "Por como lo dijiste, me da la impresion de que sabes bien lo que quieres. Te pasa siempre o depende del momento?"
-      ],
-      PROFILE_SUPPORT: ubicacion
-        ? [`Vi que eres de ${ubicacion}. No se escucha tanto sobre ese lugar y me dio curiosidad. Que es lo mejor de estar ahi?`]
-        : interes
-          ? [`Vi lo de ${String(interes).toLowerCase()} en tu perfil. Lo sigues por gusto general o hay algo puntual que te engancha?`]
-          : ["Vi un detalle en tu perfil que me dio curiosidad. Que parte de ti dirias que casi siempre llama la atencion?"],
-      DEFAULT: interes
-        ? [`Vi que te gusta ${String(interes).toLowerCase()}. Hay algo en especial de eso que sigas mas de cerca?`]
-        : ["Te hago una simple: que clase de charla suele engancharte mas cuando alguien te escribe?"]
-    },
-    medio: {
-      CONTACT_BLOCK: [
-        "Podemos dejar el cambio de app para mas adelante; por aqui estoy bien. Mejor dime algo mas util para seguir la charla: que detalle tuyo suele salir rapido cuando de verdad estas comoda hablando con alguien?"
-      ],
-      GHOSTING: [
-        "No voy a hacer drama por el silencio, pero si retomamos prefiero que sea con algo que si valga la pena. Me dio curiosidad saber si contigo el problema fue el momento o simplemente que esto no termino de enganchar."
-      ],
-      MEDIA_REPLY: [
-        "Lo que compartiste tiene un detalle que cambia bastante la impresion, y por eso me dio mas curiosidad el contexto que lo obvio. Que parte de ese momento fue la que mas te gusto a ti cuando decidiste mostrarlo?"
-      ],
-      CONFLICT_REFRAME: [
-        "No quiero que esto se quede en una lectura torpe o en un tono mas pesado de la cuenta. Si hay algo rescatable aqui, prefiero entender que fue exactamente lo que te hizo reaccionar asi."
-      ],
-      NEW_CHAT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me dio curiosidad porque es uno de esos lugares que llaman la atencion enseguida. Que es lo que mas te gusta de vivir ahi o lo que mas sientes que la gente no imagina de ese lugar?`]
-        : interes
-          ? [`Vi que te gusta ${String(interes).toLowerCase()} y me parecio mejor entrar por ahi que tirar una frase comun. Cuando alguien tiene un gusto asi de claro, casi siempre hay algo concreto detras. Que es lo que mas te engancha de eso?`]
-          : ["Prefiero ir por algo mas concreto que una entrada comun. Cual dirias que es ese detalle tuyo que suele hacer una charla mucho mas interesante cuando alguien lo sabe ver?"],
-      REPLY_LAST_MESSAGE: [
-        "Lo ultimo que dijiste deja claro que no vas con vueltas, y eso mejora bastante la charla. Me dio curiosidad saber si siempre eres asi de directa o depende mucho de quien tengas delante."
-      ],
-      PROFILE_SUPPORT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me fui por eso porque me parecio mejor punto de partida que una frase comun. Hay lugares que dicen bastante de alguien. Que es lo que mas sientes que te representa de estar ahi?`]
-        : interes
-          ? [`Vi lo de ${String(interes).toLowerCase()} en tu perfil y me parecio mejor ir por algo concreto. A veces un gusto bien marcado dice bastante mas que una presentacion armada. Que es lo que mas te atrapa de eso?`]
-          : ["Vi un detalle en tu perfil que me parecio mejor punto de partida que cualquier frase comun. Cuando alguien deja algo asi, casi siempre hay mas fondo del que parece. Que dirias que dice de ti?"],
-      DEFAULT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me parecio mas interesante tirar por ahi que por una entrada cualquiera. Hay lugares que enseguida despiertan curiosidad. Que es lo que mas te gusta de ese lado tuyo?`]
-        : interes
-          ? [`Vi que te gusta ${String(interes).toLowerCase()} y eso me parecio mejor punto de partida que una frase comun. Lo sigues de manera casual o es de esas cosas que de verdad te atrapan cuando te metes?`]
-          : ["Prefiero ir por algo concreto antes que por una entrada comun. A veces una charla cambia por un detalle simple, y me dio curiosidad saber cual dirias que es ese detalle contigo."]
-    },
-    largo: {
-      CONTACT_BLOCK: [
-        "Entiendo que prefieras mover la charla, pero por ahora me siento mejor siguiendo por aqui. No hace falta complicarlo mas: si te apetece, cuentame algo concreto de ti que si valga la pena y que nos saque de hablar solo del cambio de app."
-      ],
-      GHOSTING: [
-        "No voy a hacer drama por el silencio ni convertir esto en un reclamo. Si te escribo otra vez, prefiero que sea con algo que tenga sentido: me quede con curiosidad de saber si esto se enfrio por el momento o si simplemente no aparecio todavia ese detalle que si te enganche de verdad."
-      ],
-      MEDIA_REPLY: [
-        "Lo que compartiste deja una impresion bastante mas clara que cualquier frase armada, y por eso me dio mas curiosidad el contexto que lo obvio. A veces un detalle asi dice bastante de una persona, asi que me interesa saber que era exactamente lo que mas te gustaba de ese momento."
-      ],
-      CONFLICT_REFRAME: [
-        "No quiero que esto se quede en un tono torpe o en una lectura que termine pesando mas de la cuenta. Si aqui hubo un malentendido, prefiero bajarle un poco al choque y entender mejor que fue lo que te hizo reaccionar asi, porque ahi suele estar lo importante."
-      ],
-      NEW_CHAT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me llamo mas la atencion eso que cualquier entrada comun. Hay lugares que de inmediato despiertan curiosidad porque no se escuchan todos los dias, y me interesa saber que es lo que mas te gusta de vivir ahi o lo que mas sientes que la gente no imagina.`]
-        : interes
-          ? [`Vi que te gusta ${String(interes).toLowerCase()} y me parecio mejor entrar por ahi que tirar una frase cualquiera. Cuando alguien tiene un gusto tan claro, casi siempre hay una parte de su forma de ser metida en eso. Me dio curiosidad saber que es lo que mas te engancha de verdad.`]
-          : ["No queria ir por una entrada comun ni por una frase copiada. Hay perfiles que no dicen gran cosa y otros donde un detalle basta para abrir una charla mejor; aqui senti mas lo segundo, y me dio curiosidad saber que parte de ti dirias que casi siempre vale la pena descubrir primero."],
-      REPLY_LAST_MESSAGE: [
-        "Por como lo dijiste, se nota que no hablas por hablar, y eso cambia bastante la charla. Me dejo con curiosidad entender mejor desde donde te sale esa forma tan directa de ver las cosas."
-      ],
-      PROFILE_SUPPORT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me parecio mucho mejor punto de partida que una frase comun. Hay lugares que ya de por si despiertan curiosidad, pero lo interesante de verdad es lo que terminan diciendo de alguien. Me interesa saber que es lo que mas sientes que te representa de estar ahi.`]
-        : interes
-          ? [`Vi lo de ${String(interes).toLowerCase()} en tu perfil y me fui por algo mas concreto que una entrada tipica. A veces un gusto asi esta puesto por adorno y otras veces dice bastante de alguien; me dio la impresion de que aqui va mas por lo segundo. Que es lo que mas te atrapa de eso?`]
-          : ["Vi un detalle en tu perfil que me parecio mejor punto de partida que cualquier frase comun. Cuando alguien deja algo asi, casi siempre hay mas fondo del que parece, y me dio curiosidad saber que parte de ti es la que mas suele sorprender cuando te conocen un poco mejor."],
-      DEFAULT: ubicacion
-        ? [`Vi que eres de ${ubicacion} y me parecio mas interesante tirar por ahi que por una entrada cualquiera. Hay lugares que ya de por si llaman la atencion, pero lo que de verdad da juego en una charla es lo que una persona deja ver desde ese detalle. Que es lo que mas te gusta de ese lado tuyo?`]
-        : interes
-          ? [`Vi que te gusta ${String(interes).toLowerCase()} y eso me parecio mejor punto de partida que una frase comun. Cuando alguien tiene un gusto asi de claro, casi siempre hay algo real detras de eso, y me dio curiosidad saber que es lo que mas te engancha cuando de verdad te metes en ese tema.`]
-          : ["Prefiero ir por algo mas concreto que por una entrada comun. A veces una charla cambia por un detalle simple, y me dio curiosidad saber cual dirias que es ese detalle contigo."]
-    }
-  };
-
-  if (tipoContacto === "viejo_sin_respuesta" && maps[perfil]?.NEW_CHAT?.length) {
-    return maps[perfil].NEW_CHAT;
+  if (caso.tipoTrabajo === "simple_profile_fastpath") {
+    const fast = construirFastPathSimple(caso);
+    return fast ? [fast] : [];
   }
 
-  return maps[perfil]?.[caso.mode] || maps[perfil]?.DEFAULT || maps.medio.DEFAULT;
+  if (caso.tipoTrabajo === "reply_last_client_message") {
+    if (caso.anchor && tieneAnclaReal(caso.anchor, caso.anchor)) {
+      return [
+        "Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue muy de ese momento?"
+      ];
+    }
+
+    return [
+      "Me quede con curiosidad por ese punto en concreto. Siempre lo ves asi o fue algo muy de ese momento?"
+    ];
+  }
+
+  if (caso.tipoTrabajo === "rewrite_operator_draft") {
+    if (ubicacion && textoPreguntaPorUbicacion(caso.textoPlano || "")) {
+      return [
+        `Vi que eres de ${ubicacion}. Que es lo que mas te gusta de vivir ahi?`
+      ];
+    }
+
+    if (interes && textoPreguntaPorInteres(caso.textoPlano || "")) {
+      return [
+        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
+      ];
+    }
+
+    const textoRecortado = recortarNatural(caso.textoPlano, caso.objetivoLongitud.max);
+    if (textoRecortado && cumpleLongitudPremium(textoRecortado, caso.objetivoLongitud)) {
+      return [textoRecortado];
+    }
+
+    if (ubicacion) {
+      return [
+        `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
+      ];
+    }
+
+    if (interes) {
+      return [
+        `Vi que te gusta ${String(interes).toLowerCase()}. Me dio curiosidad saber que es lo que mas te engancha de eso.`
+      ];
+    }
+
+    return [
+      "Hay algo en lo que dices que da para una charla interesante. Te ha pasado algo reciente que te haya hecho verlo asi?"
+    ];
+  }
+
+  if (caso.mode === "CONTACT_BLOCK") {
+    return [
+      "Podemos seguir por aqui sin problema. Ya que estamos, dime algo concreto de ti que si valga la pena conocer."
+    ];
+  }
+
+  if (caso.mode === "GHOSTING") {
+    return [
+      "No te escribo para hacer drama. Solo me dio curiosidad saber si fue el momento o si esto no termino de engancharte."
+    ];
+  }
+
+  if (caso.mode === "MEDIA_REPLY") {
+    return [
+      "Lo que mandaste me dejo curiosidad. Que fue lo que mas te gusto a ti de ese momento?"
+    ];
+  }
+
+  if (caso.mode === "CONFLICT_REFRAME") {
+    return [
+      "No quiero que esto se vaya a un choque innecesario. Que fue exactamente lo que te molesto?"
+    ];
+  }
+
+  if (ubicacion) {
+    return [
+      `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
+    ];
+  }
+
+  if (interes) {
+    return [
+      `Vi que te gusta ${String(interes).toLowerCase()}. Que es lo que mas te engancha de eso?`
+    ];
+  }
+
+  return [
+    "Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"
+  ];
 }
 
 async function generarSugerencias(caso = {}) {
-  caso.tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
-  caso.ubicacionVisiblePerfil = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
-  caso.objetivoLongitud = caso.objetivoLongitud || construirObjetivoLongitud(caso);
-
   if (esCasoSimpleFastPath(caso)) {
     const directa = construirFastPathSimple(caso);
 
@@ -922,30 +885,17 @@ async function generarSugerencias(caso = {}) {
     }
   }
 
-  const planned = await planificarCaso(caso);
-  const heuristico = planHeuristico(caso);
-  const plan = planned.plan || heuristico;
+  const planSummary = [
+    construirResumenTipoContacto(caso.tipoContacto),
+    construirResumenTrabajo(caso.tipoTrabajo)
+  ].join(" ");
 
-  if (!caso.estadoConversacion?.hayConversacionReal && plan.mode === "REPLY_LAST_MESSAGE") {
-    plan.mode = heuristico.mode;
-    plan.anchor = heuristico.anchor;
-    plan.summary = heuristico.summary;
-  }
-
-  caso.mode = plan.mode || caso.mode || "DEFAULT";
-  caso.anchor = plan.anchor || caso.anchor || detectarAnchorHeuristico(caso, caso.mode);
-  caso.plan = plan;
-  caso.objetivoLongitud = construirObjetivoLongitud(caso);
-
-  const planSummaryFinal = [
-    plan.summary || "",
-    construirResumenTipoContacto(caso.tipoContacto)
-  ].filter(Boolean).join(" ");
-
-  const userPrompt = construirUserPrompt({
+  const userPrompt1 = construirUserPrompt({
     mode: caso.mode,
+    tipoTrabajo: caso.tipoTrabajo,
+    tipoContacto: caso.tipoContacto,
     anchor: caso.anchor,
-    planSummary: planSummaryFinal,
+    planSummary,
     textoPlano: caso.textoPlano,
     clientePlano: caso.clientePlano,
     contextoPlano: caso.contextoPlano,
@@ -970,22 +920,11 @@ async function generarSugerencias(caso = {}) {
     anclarEnUltimoMensajeCliente: caso.anclarEnUltimoMensajeCliente,
     permisosApertura: caso.permisosApertura,
     objetivoLongitud: caso.objetivoLongitud,
-    ubicacionVisiblePerfil: caso.ubicacionVisiblePerfil
+    ubicacionVisiblePerfil: caso.ubicacionVisiblePerfil,
+    feedbackCorreccion: ""
   });
 
-  const maxTokensByProfile = {
-    corto: 80,
-    medio: 120,
-    largo: 170
-  };
-
-  const temperatureByProfile = {
-    corto: 0.36,
-    medio: caso.ghostwriterMode ? 0.54 : 0.48,
-    largo: caso.ghostwriterMode ? 0.60 : 0.52
-  };
-
-  const dataWriter = await llamarOpenAI({
+  const data1 = await llamarOpenAI({
     lane: "sugerencias",
     model: OPENAI_MODEL_SUGGESTIONS,
     messages: [
@@ -995,29 +934,122 @@ async function generarSugerencias(caso = {}) {
           caso.permisosApertura,
           caso.elementosClave,
           caso.mode,
-          caso.objetivoLongitud
+          caso.objetivoLongitud,
+          caso.tipoTrabajo,
+          caso.tipoContacto
         )
       },
       {
         role: "user",
-        content: userPrompt
+        content: userPrompt1
       }
     ],
-    temperature: temperatureByProfile[caso.objetivoLongitud.profile] || 0.48,
-    maxTokens: maxTokensByProfile[caso.objetivoLongitud.profile] || 120,
+    temperature: caso.tipoTrabajo === "complex_reframe"
+      ? (caso.ghostwriterMode ? 0.64 : 0.56)
+      : (caso.ghostwriterMode ? 0.56 : 0.46),
+    maxTokens: caso.objetivoLongitud.profile === "corto"
+      ? 90
+      : caso.objetivoLongitud.profile === "medio"
+        ? 140
+        : 220,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
-  const candidata = extraerPrimeraSugerenciaPremium(
-    dataWriter?.choices?.[0]?.message?.content || ""
+  const candidata1 = extraerPrimeraSugerenciaPremium(
+    data1?.choices?.[0]?.message?.content || ""
   );
 
-  const sugerencias = filtrarSugerenciasFinales([candidata], caso);
+  const sugerencias1 = filtrarSugerenciasFinales([candidata1], caso);
 
-  if (sugerencias.length) {
+  if (!necesitaSegundoIntentoCandidato(candidata1, caso, sugerencias1)) {
     return {
-      sugerencias: [sugerencias[0]],
-      usageData: sumarUsage(planned.usageData, dataWriter)
+      sugerencias: [sugerencias1[0]],
+      usageData: data1
+    };
+  }
+
+  const userPrompt2 = construirUserPrompt({
+    mode: caso.mode,
+    tipoTrabajo: caso.tipoTrabajo,
+    tipoContacto: caso.tipoContacto,
+    anchor: caso.anchor,
+    planSummary,
+    textoPlano: caso.textoPlano,
+    clientePlano: caso.clientePlano,
+    contextoPlano: caso.contextoPlano,
+    lecturaCliente: caso.lecturaCliente,
+    lecturaOperador: caso.lecturaOperador,
+    tonoCliente: caso.tonoCliente,
+    contactoExterno: caso.contactoExterno,
+    contactoEnBorrador: caso.contactoEnBorrador,
+    elementosClave: caso.elementosClave,
+    intencionOperador: caso.intencionOperador,
+    guiaIntencion: caso.guiaIntencion,
+    metaEdicion: caso.metaEdicion,
+    ghostwriterMode: caso.ghostwriterMode,
+    perfilEstructurado: caso.perfilEstructurado,
+    guiaPerfil: caso.guiaPerfil,
+    esChatNuevoOperativo: caso.esChatNuevoOperativo,
+    lineasClienteRecientes: caso.lineasClienteRecientes,
+    lineasOperadorRecientes: caso.lineasOperadorRecientes,
+    mencionesGeograficasOperador: caso.mencionesGeograficasOperador,
+    estadoConversacion: caso.estadoConversacion,
+    operadorTraeTemaPropio: caso.operadorTraeTemaPropio,
+    anclarEnUltimoMensajeCliente: caso.anclarEnUltimoMensajeCliente,
+    permisosApertura: caso.permisosApertura,
+    objetivoLongitud: caso.objetivoLongitud,
+    ubicacionVisiblePerfil: caso.ubicacionVisiblePerfil,
+    feedbackCorreccion: construirFeedbackSegundoIntento(caso, candidata1)
+  });
+
+  const data2 = await llamarOpenAI({
+    lane: "sugerencias",
+    model: OPENAI_MODEL_SUGGESTIONS,
+    messages: [
+      {
+        role: "system",
+        content: construirSystemPrompt(
+          caso.permisosApertura,
+          caso.elementosClave,
+          caso.mode,
+          caso.objetivoLongitud,
+          caso.tipoTrabajo,
+          caso.tipoContacto
+        )
+      },
+      {
+        role: "user",
+        content: userPrompt2
+      }
+    ],
+    temperature: caso.tipoTrabajo === "complex_reframe"
+      ? (caso.ghostwriterMode ? 0.70 : 0.60)
+      : (caso.ghostwriterMode ? 0.60 : 0.50),
+    maxTokens: caso.objetivoLongitud.profile === "corto"
+      ? 100
+      : caso.objetivoLongitud.profile === "medio"
+        ? 150
+        : 240,
+    timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
+  });
+
+  const candidata2 = extraerPrimeraSugerenciaPremium(
+    data2?.choices?.[0]?.message?.content || ""
+  );
+
+  const sugerencias2 = filtrarSugerenciasFinales([candidata2], caso);
+
+  if (sugerencias2.length) {
+    return {
+      sugerencias: [sugerencias2[0]],
+      usageData: sumarUsage(data1, data2)
+    };
+  }
+
+  if (sugerencias1.length) {
+    return {
+      sugerencias: [sugerencias1[0]],
+      usageData: sumarUsage(data1, data2)
     };
   }
 
@@ -1029,19 +1061,19 @@ async function generarSugerencias(caso = {}) {
   if (fallback.length) {
     return {
       sugerencias: [fallback[0]],
-      usageData: sumarUsage(planned.usageData, dataWriter)
+      usageData: sumarUsage(data1, data2)
     };
   }
 
-  const ultimoRecurso = caso.objetivoLongitud.profile === "corto"
+  const ultimoRecurso = caso.tipoTrabajo === "simple_profile_fastpath"
     ? ["Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"]
-    : caso.estadoConversacion.hayConversacionReal
-      ? ["Por como lo dijiste, me da la impresion de que sabes bien lo que quieres. Me dejo curiosidad saber si siempre eres asi de directa o si depende mucho del momento."]
-      : ["Vi un detalle en tu perfil que me parecio mejor punto de partida que una frase comun. Me dio curiosidad saber que parte de ti es la que mas suele llamar la atencion cuando alguien te conoce un poco mejor."];
+    : caso.tipoTrabajo === "reply_last_client_message"
+      ? ["Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue muy de ese momento?"]
+      : ["Hay un detalle aqui que da mas juego del que parece. Me dio curiosidad saber que parte de ti es la que mas suele llamar la atencion cuando alguien te conoce un poco mejor."];
 
   return {
     sugerencias: [limpiarSalidaHumana(ultimoRecurso[0])],
-    usageData: sumarUsage(planned.usageData, dataWriter)
+    usageData: sumarUsage(data1, data2)
   };
 }
 
@@ -1051,7 +1083,5 @@ module.exports = {
   filtrarSugerenciasFinales,
   generarSugerencias,
   construirFallbackSugerencias,
-  normalizarSugerenciaPremium,
-  cumpleLongitudPremium,
   construirObjetivoLongitud
 };
