@@ -1,4 +1,3 @@
-// prompts/userPrompt.js
 const { quitarTildes } = require("../lib/utils");
 
 function construirUserPrompt({
@@ -27,8 +26,17 @@ function construirUserPrompt({
   estadoConversacion,
   operadorTraeTemaPropio,
   anclarEnUltimoMensajeCliente,
-  permisosApertura
+  permisosApertura,
+  chosenInterest,
+  recentAvoid,
+  fastMode
 }) {
+  const interesPrioritario =
+    chosenInterest ||
+    perfilEstructurado?.interesesEnComun?.[0] ||
+    perfilEstructurado?.interesesClienta?.[0] ||
+    "";
+
   return `
 CASO
 
@@ -39,7 +47,7 @@ ANCLA OBLIGATORIA
 ${anchor || "sin ancla clara"}
 
 RESUMEN DE PLAN
-${planSummary || "mantenerse concreta y fiel al borrador"}
+${planSummary || "seguir el tema real del borrador"}
 
 BORRADOR DEL OPERADOR
 """
@@ -71,6 +79,7 @@ PERFIL ESTRUCTURADO
 INTERESES_EN_COMUN: ${(perfilEstructurado.interesesEnComun || []).join(" | ") || "Ninguno"}
 INTERESES_CLIENTA: ${(perfilEstructurado.interesesClienta || []).join(" | ") || "Ninguno"}
 DATOS_CLIENTA: ${(perfilEstructurado.datosClienta || []).join(" | ") || "Ninguno"}
+INTERES_PRIORITARIO: ${interesPrioritario || "Ninguno"}
 """
 
 LECTURA DE LA CLIENTA
@@ -113,20 +122,30 @@ Solicitud de contacto externo en clienta: ${contactoExterno ? "si" : "no"}
 Solicitud de contacto externo en borrador: ${contactoEnBorrador ? "si" : "no"}
 Menciones geograficas del operador: ${mencionesGeograficasOperador.length ? mencionesGeograficasOperador.join(" | ") : "ninguna"}
 
+FRASES RECIENTES A EVITAR
+${(recentAvoid || []).join(" | ") || "sin referencias"}
+
 TAREA
-Escribe una sola respuesta Premium entre 170 y 300 caracteres.
-Debe sentirse humana, elegante, precisa y con interes real.
-Debes respetar el MODO DETECTADO.
-Debes usar la ANCLA OBLIGATORIA.
-Si no hay respuesta previa real de la clienta, conviertelo en un enganche directo y no en continuidad falsa.
-Si hay contacto externo, manten la charla dentro de la app con suavidad y redireccion concreta. No repitas numeros ni canales externos.
-Si usas perfil, menciona un interes concreto.
-No inventes saludos.
-No inventes primer contacto.
-No inventes nombres.
-No conviertas hechos de la clienta en hechos del operador.
-No propongas encuentros ni salir de la app.
-Devuelve solo el mensaje final.
+Devuelve ${fastMode ? "1" : "3"} opciones numeradas.
+Cada opcion debe:
+- sentirse escrita por una persona real
+- sonar directa y natural
+- usar la ancla obligatoria o lo ultimo que dijo la clienta
+- evitar explicaciones sobre el mensaje
+- tener como maximo una pregunta
+- quedar entre 170 y 300 caracteres
+- poder pegarse tal cual en el chat
+
+NO HAGAS
+- no hables del mensaje, del borrador ni de responder mejor
+- no uses frases como no queria dejarte algo frio ni comun, preferi escribirte mejor, me quede pensando en lo ultimo que compartiste, responderte con mas intencion, lo reformulo mejor
+- no suenes coach, poeta ni asistente
+- no propongas encuentros ni salir de la app
+- no inventes nombres
+- no inventes primer contacto
+- no conviertas hechos de la clienta en hechos del operador
+
+Devuelve solo las opciones numeradas.
 `.trim();
 }
 
