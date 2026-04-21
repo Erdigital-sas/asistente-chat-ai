@@ -132,7 +132,7 @@ Convierte su idea en un mensaje mejor, mas natural y mas util.
 
     reply_last_client_message: `
 TIPO DE TRABAJO
-Tu tarea es responder primero lo ultimo que la clienta dijo.
+Tu tarea es responder primero lo ultimo que dijo la clienta.
 Solo despues, si cabe, enlaza con la intencion del operador.
 No ignores su ultimo mensaje.
 `.trim(),
