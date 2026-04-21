@@ -29,13 +29,13 @@ function construirBloqueAperturaControlada(permisosApertura = {}) {
   if (permisosApertura.saludoExplicito) {
     partes.push("El operador si escribio un saludo explicito. Puedes conservarlo sin duplicarlo.");
   } else {
-    partes.push("El operador NO escribio saludo explicito. No puedes abrir con hola, hey, hi, buenas ni equivalente.");
+    partes.push("El operador NO escribio saludo explicito. No abras con hola, hey, hi, buenas ni equivalente.");
   }
 
   if (permisosApertura.primerContactoExplicito) {
     partes.push("El operador si escribio una intencion explicita de primer contacto. Puedes conservarla sin exagerar.");
   } else {
-    partes.push("El operador NO pidio primer contacto. No metas frases como conocerte, saber mas de ti, romper el hielo o similares.");
+    partes.push("El operador NO pidio primer contacto. No metas frases para conocerte, saber mas de ti, romper el hielo o similares.");
   }
 
   if (permisosApertura.pareceChatViejo) {
@@ -113,10 +113,71 @@ Hazlo sonar humano, concreto y listo para enviar.
   return mapa[mode] || mapa.DEFAULT;
 }
 
+function construirGuiaTrabajo(tipoTrabajo = "rewrite_operator_draft") {
+  const mapa = {
+    simple_profile_fastpath: `
+TIPO DE TRABAJO
+Caso simple con dato claro en perfil o una pregunta directa.
+Resuelvelo con observacion breve + pregunta corta.
+Nada de discurso.
+`.trim(),
+
+    rewrite_operator_draft: `
+TIPO DE TRABAJO
+Tu tarea es reescribir y mejorar el borrador del operador.
+No respondas al operador.
+No respondas como si la clienta hubiera dicho el borrador.
+Convierte su idea en un mensaje mejor, mas natural y mas util.
+`.trim(),
+
+    reply_last_client_message: `
+TIPO DE TRABAJO
+Tu tarea es responder primero lo ultimo que la clienta dijo.
+Solo despues, si cabe, enlaza con la intencion del operador.
+No ignores su ultimo mensaje.
+`.trim(),
+
+    complex_reframe: `
+TIPO DE TRABAJO
+Caso complejo.
+Resuelve friccion, silencio, malentendido, media o contacto externo sin sonar robot.
+`.trim()
+  };
+
+  return mapa[tipoTrabajo] || mapa.rewrite_operator_draft;
+}
+
+function construirGuiaContacto(tipoContacto = "nuevo_total") {
+  const mapa = {
+    nuevo_total: `
+TIPO DE CONTACTO
+Cliente nueva total.
+Debes enganchar como primer acercamiento.
+No hables como si ya vinieran conversando.
+`.trim(),
+
+    viejo_sin_respuesta: `
+TIPO DE CONTACTO
+Hay historial del operador, pero no respuesta real de la clienta.
+No finjas continuidad.
+No uses frases como eso que dijiste, por como lo dijiste, o siempre hablas asi.
+Reabre como si fuera una oportunidad nueva, pero sin sonar repetido.
+`.trim(),
+
+    viejo_con_respuesta: `
+TIPO DE CONTACTO
+Ya hubo respuesta real de la clienta.
+Responde primero a lo ultimo que ella dijo.
+`.trim()
+  };
+
+  return mapa[tipoContacto] || mapa.nuevo_total;
+}
+
 function construirBloqueLongitud(objetivoLongitud = {}) {
   const profile = objetivoLongitud?.profile || "medio";
-  const min = objetivoLongitud?.min || 90;
-  const max = objetivoLongitud?.max || 180;
+  const min = objetivoLongitud?.min || 80;
+  const max = objetivoLongitud?.max || 150;
   const shape = objetivoLongitud?.shape || "una reaccion concreta y un cierre simple";
 
   const mapa = {
@@ -143,7 +204,9 @@ function construirSystemPrompt(
   },
   elementosClave = { nombreApertura: "", afectivos: [], mensajeCorto: false },
   mode = "DEFAULT",
-  objetivoLongitud = { profile: "medio", min: 90, max: 180, shape: "una reaccion concreta y un cierre simple" }
+  objetivoLongitud = { profile: "medio", min: 80, max: 150, shape: "una reaccion concreta y un cierre simple" },
+  tipoTrabajo = "rewrite_operator_draft",
+  tipoContacto = "nuevo_total"
 ) {
   return `
 Eres un editor conversacional premium para operadores que escriben a una clienta dentro de una app de citas.
@@ -179,9 +242,9 @@ Es el mensaje que la clienta va a leer.
 No conviertas una apertura del operador en una respuesta como si la clienta hubiera preguntado otra cosa.
 
 ROLES
-CLIENTA = mensajes reales de ella.
-OPERADOR = mensajes previos del operador.
-No confundas esos roles.
+CLIENTA = mensajes reales de ella
+OPERADOR = mensajes previos del operador
+No confundas esos roles
 
 PROPIEDAD DE HECHOS
 Cada hecho pertenece a quien lo dijo.
@@ -225,13 +288,15 @@ Si haces una pregunta, que sea una sola y que nazca de algo real del caso.
 
 EVITA FRASES GASTADAS O ROBOTICAS
 Evita respuestas como:
-- no queria dejarte algo frio ni comun
+- eso que dijiste cambia bastante el tono
+- eso que dijiste me dejo curiosidad
+- por como lo dijiste
+- siempre hablas asi
 - preferi escribirte mejor
-- me quede pensando en lo ultimo que compartiste
-- responderte con mas intencion
+- responderte mejor
+- con mas intencion
 - con mas calma
 - con mas naturalidad
-- lo reformulo mejor
 - piloto automatico
 - tu mejor energia
 - tu mejor vibra
@@ -243,9 +308,13 @@ Evita respuestas como:
 - lo que te inspira o te apasiona
 - me gustaria conocer mas de ti
 
-${construirBloqueLongitud(objetivoLongitud)}
-
 ${construirGuiaModo(mode)}
+
+${construirGuiaTrabajo(tipoTrabajo)}
+
+${construirGuiaContacto(tipoContacto)}
+
+${construirBloqueLongitud(objetivoLongitud)}
 
 NO HAGAS
 No inventes nombres
