@@ -1,3 +1,4 @@
+// services/suggestions.js
 const {
   OPENAI_MODEL_SUGGESTIONS,
   OPENAI_TIMEOUT_SUGGESTIONS_MS
@@ -45,9 +46,9 @@ const { construirUserPrompt } = require("../prompts/userPrompt");
 const { llamarOpenAI } = require("./openai");
 
 const LENGTH_PROFILES = {
-  corto: { min: 55, max: 120, ideal: 85 },
-  medio: { min: 90, max: 180, ideal: 130 },
-  largo: { min: 150, max: 280, ideal: 210 }
+  corto: { min: 45, max: 95, ideal: 70 },
+  medio: { min: 80, max: 150, ideal: 115 },
+  largo: { min: 130, max: 240, ideal: 180 }
 };
 
 const CONTACTO_REGEX =
@@ -66,14 +67,15 @@ const MULETILLA_REGEX =
   /\b(me gustaria saber mas de ti|mas sobre ti|me encantaria hablar contigo|podemos encontrar un terreno comun|lo que te inspira|lo que te apasiona|seguir conversando|me gustaria conocer mas de ti)\b/i;
 
 const FRASES_ROBOTICAS_REGEX =
-  /\b(no queria dejarte algo frio ni comun|preferi escribirte mejor|me quede pensando en lo ultimo que compartiste|responderte con mas intencion|con mas calma|con mas naturalidad|lo reformulo mejor|piloto automatico|tu mejor energia|tu mejor vibra|forma de ver las cosas)\b/i;
+  /\b(eso que dijiste cambia bastante el tono|eso que dijiste me dejo curiosidad|preferi responder|responderte mejor|me quede pensando en lo ultimo|con mas intencion|con mas calma|con mas naturalidad|lo reformulo mejor|piloto automatico|tu mejor energia|tu mejor vibra|forma de ver las cosas)\b/i;
 
 const STOPWORDS_ANCLA = new Set([
   "hola", "como", "estas", "esta", "pero", "porque", "por", "para", "quiero",
   "saber", "gustaria", "hablar", "conversar", "mensaje", "mensajes", "respuesta",
   "respuestas", "quieres", "quiero", "tengo", "tiene", "tener", "buen", "buena",
   "sobre", "algo", "este", "esta", "esto", "esas", "esos", "aqui", "alla",
-  "muy", "poco", "mucho", "tambien", "solo", "igual", "donde", "cuando"
+  "muy", "poco", "mucho", "tambien", "solo", "igual", "donde", "cuando",
+  "eres", "hacer", "gusta", "gusta", "buscas", "aqui", "alli"
 ]);
 
 const STATUS_OR_DATE_REGEX =
@@ -153,38 +155,54 @@ function extraerUbicacionVisiblePerfil(perfilEstructurado = {}) {
   return "";
 }
 
+function obtenerInteresPrioritario(perfilEstructurado = {}) {
+  return (
+    perfilEstructurado?.interesesEnComun?.[0] ||
+    perfilEstructurado?.interesesClienta?.[0] ||
+    ""
+  );
+}
+
+function inferirTipoContacto(estadoConversacion = {}) {
+  if (estadoConversacion?.hayConversacionReal) {
+    return "viejo_con_respuesta";
+  }
+
+  if ((estadoConversacion?.lineasOperador || []).length > 0) {
+    return "viejo_sin_respuesta";
+  }
+
+  return "nuevo_total";
+}
+
 function construirObjetivoLongitud(caso = {}) {
   const palabras = palabrasCount(caso.textoPlano || "");
   const textoLen = contarCaracteres(caso.textoPlano || "");
   const clienteLen = contarCaracteres(caso.clientePlano || "");
 
-  const hasInterest =
-    Boolean(caso.perfilEstructurado?.interesesEnComun?.length) ||
-    Boolean(caso.perfilEstructurado?.interesesClienta?.length);
-
+  const hasInterest = Boolean(obtenerInteresPrioritario(caso.perfilEstructurado));
   const hasLocation = Boolean(extraerUbicacionVisiblePerfil(caso.perfilEstructurado));
   const simpleDirect = Boolean(caso.analisisOperador?.preguntaSimpleDirecta);
+  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
 
-  const complexMode = ["GHOSTING", "CONFLICT_REFRAME", "CONTACT_BLOCK"].includes(caso.mode);
+  const complexMode = ["GHOSTING", "CONFLICT_REFRAME", "CONTACT_BLOCK", "MEDIA_REPLY"].includes(caso.mode);
   const complexDraft =
     Boolean(caso.analisisOperador?.metaEdicion) ||
     Boolean(caso.analisisOperador?.reclamo) ||
     Boolean(caso.analisisOperador?.mezclaDeIdeas) ||
     textoLen > 135;
 
-  const shortByProfile = simpleDirect && (hasInterest || hasLocation);
-  const shortByReply =
-    caso.anclarEnUltimoMensajeCliente &&
-    palabras <= 8 &&
-    clienteLen <= 120;
-
   let profile = "medio";
 
   if (complexMode || complexDraft) {
     profile = "largo";
-  } else if (shortByProfile || shortByReply || (simpleDirect && palabras <= 10)) {
+  } else if (simpleDirect && (hasInterest || hasLocation)) {
     profile = "corto";
-  } else if (textoLen <= 60 && (hasInterest || hasLocation)) {
+  } else if (simpleDirect && palabras <= 10) {
+    profile = "corto";
+  } else if (tipoContacto !== "viejo_con_respuesta" && textoLen <= 60 && (hasInterest || hasLocation)) {
+    profile = "corto";
+  } else if (caso.anclarEnUltimoMensajeCliente && clienteLen <= 120 && palabras <= 8) {
     profile = "corto";
   }
 
@@ -347,7 +365,9 @@ function detectarAnchorHeuristico(caso = {}, mode = "DEFAULT") {
   }
 
   if (caso.anclarEnUltimoMensajeCliente && caso.lineasClienteRecientes?.length) {
-    return limpiarSalidaHumana(caso.lineasClienteRecientes[caso.lineasClienteRecientes.length - 1]).slice(0, 180);
+    return limpiarSalidaHumana(
+      caso.lineasClienteRecientes[caso.lineasClienteRecientes.length - 1]
+    ).slice(0, 180);
   }
 
   if (caso.operadorTraeTemaPropio && caso.textoPlano) {
@@ -359,11 +379,7 @@ function detectarAnchorHeuristico(caso = {}, mode = "DEFAULT") {
     return `dato visible del perfil: ${ubicacion}`;
   }
 
-  const interes =
-    caso.perfilEstructurado?.interesesEnComun?.[0] ||
-    caso.perfilEstructurado?.interesesClienta?.[0] ||
-    "";
-
+  const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
   if (interes) {
     return `interes del perfil: ${interes}`;
   }
@@ -381,11 +397,7 @@ function planHeuristico(caso = {}) {
 
   const chosenInterest =
     useProfileInterest
-      ? (
-          caso.perfilEstructurado?.interesesEnComun?.[0] ||
-          caso.perfilEstructurado?.interesesClienta?.[0] ||
-          ""
-        )
+      ? obtenerInteresPrioritario(caso.perfilEstructurado)
       : "";
 
   const forbidden = [
@@ -415,6 +427,16 @@ function planHeuristico(caso = {}) {
     summary: summaryMap[mode] || summaryMap.DEFAULT,
     forbidden
   };
+}
+
+function construirResumenTipoContacto(tipoContacto = "nuevo_total") {
+  const mapa = {
+    nuevo_total: "Cliente nueva. Debes enganchar como primer acercamiento.",
+    viejo_sin_respuesta: "Hay historial del operador, pero no respuesta real de la clienta. No finjas continuidad ni contestes como si ella ya hubiera abierto tema.",
+    viejo_con_respuesta: "Ya hubo respuesta real de la clienta. Responde primero a lo ultimo que ella dijo."
+  };
+
+  return mapa[tipoContacto] || mapa.nuevo_total;
 }
 
 async function planificarCaso(caso = {}) {
@@ -470,6 +492,9 @@ ${(caso.perfilEstructurado?.interesesClienta || []).join(" | ") || "Ninguno"}
 
 DATOS_CLIENTA
 ${(caso.perfilEstructurado?.datosClienta || []).join(" | ") || "Ninguno"}
+
+TIPO_CONTACTO
+${caso.tipoContacto}
 
 DATOS
 hay_conversacion_real=${caso.estadoConversacion?.hayConversacionReal ? "si" : "no"}
@@ -585,14 +610,17 @@ function prepararCasoSugerencias({
     !operadorTraeTemaPropio &&
     lineasClienteRecientes.length > 0;
 
+  const tipoContacto = inferirTipoContacto(estadoConversacion);
+
   const lecturaOperador = [
     construirLecturaOperador(analisisOperador),
     !estadoConversacion.hayConversacionReal
-      ? "No hay respuesta real de la clienta. Convierte el texto en un enganche directo."
+      ? "No hay respuesta real de la clienta."
       : "",
     anclarEnUltimoMensajeCliente
       ? "Hay mensajes recientes de la clienta y el operador no trae un tema nuevo claro. Prioriza lo ultimo que ella dijo."
-      : ""
+      : "",
+    construirResumenTipoContacto(tipoContacto)
   ].filter(Boolean).join(" ");
 
   const hechosClienteSensibles = detectarHechosClienteSensibles(lineasClienteRecientes);
@@ -633,19 +661,22 @@ function prepararCasoSugerencias({
     lineasOperadorRecientes,
     anclarEnUltimoMensajeCliente,
     hechosClienteSensibles,
-    mencionesGeograficasOperador
+    mencionesGeograficasOperador,
+    tipoContacto
   };
 
   const heuristico = planHeuristico(baseCaso);
   const ubicacionVisiblePerfil = extraerUbicacionVisiblePerfil(perfilEstructurado);
   const objetivoLongitud = construirObjetivoLongitud({
     ...baseCaso,
-    mode: heuristico.mode
+    mode: heuristico.mode,
+    ubicacionVisiblePerfil
   });
 
   const fingerprint = [
-    "premium-planner-writer-v2-dynamic",
+    "premium-planner-writer-v3-fastpath",
     heuristico.mode,
+    tipoContacto,
     objetivoLongitud.profile,
     normalizarTexto(textoPlano).slice(0, 420),
     normalizarTexto(clientePlano).slice(0, 260),
@@ -663,17 +694,113 @@ function prepararCasoSugerencias({
   };
 }
 
+function textoPreguntaPorUbicacion(texto = "") {
+  return /\b(de donde eres|donde eres|de donde vienes|where are you from|donde vives|where do you live)\b/i.test(normalizarTexto(texto));
+}
+
+function textoPreguntaPorBusqueda(texto = "") {
+  return /\b(que buscas|what are you looking for|que tipo de relacion buscas|que clase de relacion buscas)\b/i.test(normalizarTexto(texto));
+}
+
+function textoPreguntaPorInteres(texto = "") {
+  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras)\b/i.test(normalizarTexto(texto));
+}
+
+function textoPreguntaPorActividad(texto = "") {
+  return /\b(que haces|que haces ahora|what are you doing|que tal tu dia|como va tu dia)\b/i.test(normalizarTexto(texto));
+}
+
+function construirFastPathSimple(caso = {}) {
+  const texto = normalizarTexto(caso.textoPlano || "");
+  const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
+  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
+
+  if (caso.temaContactoExterno) {
+    return limpiarSalidaHumana(
+      "Podemos seguir por aqui sin problema. Ya que estamos, dime algo concreto de ti que si valga la pena conocer."
+    );
+  }
+
+  if (textoPreguntaPorUbicacion(texto)) {
+    if (ubicacion) {
+      if (tipoContacto === "viejo_sin_respuesta") {
+        return limpiarSalidaHumana(
+          `Vi que eres de ${ubicacion}. Ese detalle me dio curiosidad. Que es lo que mas te gusta de vivir ahi?`
+        );
+      }
+
+      return limpiarSalidaHumana(
+        `Vi que eres de ${ubicacion}. Siempre me ha dado curiosidad ese lugar. Que es lo que mas te gusta de vivir ahi?`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "Te hago una simple: de donde eres y que es lo que mas te gusta de ese lugar?"
+    );
+  }
+
+  if (textoPreguntaPorInteres(texto)) {
+    if (interes) {
+      return limpiarSalidaHumana(
+        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "Eso me dio curiosidad. Lo sigues por gusto general o hay algo puntual que te engancha mas?"
+    );
+  }
+
+  if (textoPreguntaPorBusqueda(texto)) {
+    return limpiarSalidaHumana(
+      "Te pregunto algo simple: aqui buscas algo tranquilo para hablar o te interesa algo mas serio?"
+    );
+  }
+
+  if (textoPreguntaPorActividad(texto)) {
+    if (interes) {
+      return limpiarSalidaHumana(
+        `A esta hora me dio curiosidad saber si hoy andas en algo relacionado con ${String(interes).toLowerCase()} o te toco un plan distinto.`
+      );
+    }
+
+    return limpiarSalidaHumana(
+      "A esta hora me dio curiosidad saber que andas haciendo y si hoy te toco un plan tranquilo o algo mas movido."
+    );
+  }
+
+  if (caso.tipoContacto === "nuevo_total" || caso.tipoContacto === "viejo_sin_respuesta") {
+    if (ubicacion) {
+      return limpiarSalidaHumana(
+        `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de vivir ahi?`
+      );
+    }
+
+    if (interes) {
+      return limpiarSalidaHumana(
+        `Vi que te gusta ${String(interes).toLowerCase()}. Me parecio mejor entrar por ahi que con una frase comun. Que es lo que mas te engancha de eso?`
+      );
+    }
+  }
+
+  return "";
+}
+
+function esCasoSimpleFastPath(caso = {}) {
+  if (caso.estadoConversacion?.hayConversacionReal) return false;
+  if (!caso.analisisOperador?.preguntaSimpleDirecta) return false;
+  if (caso.metaEdicion) return false;
+  if (caso.temaContactoExterno) return true;
+  if (["GHOSTING", "CONFLICT_REFRAME", "MEDIA_REPLY"].includes(caso.mode)) return false;
+  return true;
+}
+
 function construirFallbackSugerencias(caso = {}) {
   const perfil = caso.objetivoLongitud?.profile || "medio";
-  const interes =
-    caso.plan?.chosen_interest ||
-    caso.perfilEstructurado?.interesesEnComun?.[0] ||
-    caso.perfilEstructurado?.interesesClienta?.[0] ||
-    "";
-
-  const ubicacion =
-    caso.ubicacionVisiblePerfil ||
-    extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  const interes = obtenerInteresPrioritario(caso.perfilEstructurado);
+  const ubicacion = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  const tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
 
   const maps = {
     corto: {
@@ -695,7 +822,7 @@ function construirFallbackSugerencias(caso = {}) {
           ? [`Vi que te gusta ${String(interes).toLowerCase()}. Que es lo que mas te engancha de eso?`]
           : ["Te pregunto algo simple: que es lo primero que te suele llamar la atencion de alguien?"],
       REPLY_LAST_MESSAGE: [
-        "Eso que dijiste me dejo curiosidad. Siempre hablas asi de directo o fue por el momento?"
+        "Por como lo dijiste, me da la impresion de que sabes bien lo que quieres. Te pasa siempre o depende del momento?"
       ],
       PROFILE_SUPPORT: ubicacion
         ? [`Vi que eres de ${ubicacion}. No se escucha tanto sobre ese lugar y me dio curiosidad. Que es lo mejor de estar ahi?`]
@@ -725,7 +852,7 @@ function construirFallbackSugerencias(caso = {}) {
           ? [`Vi que te gusta ${String(interes).toLowerCase()} y me parecio mejor entrar por ahi que tirar una frase comun. Cuando alguien tiene un gusto asi de claro, casi siempre hay algo concreto detras. Que es lo que mas te engancha de eso?`]
           : ["Prefiero ir por algo mas concreto que una entrada comun. Cual dirias que es ese detalle tuyo que suele hacer una charla mucho mas interesante cuando alguien lo sabe ver?"],
       REPLY_LAST_MESSAGE: [
-        "Eso que dijiste cambia bastante el tono de la charla y por eso no da para responder con cualquier cosa. Me dejo curiosidad saber si siempre hablas asi de directo o si te sale solo cuando algo de verdad te interesa."
+        "Lo ultimo que dijiste deja claro que no vas con vueltas, y eso mejora bastante la charla. Me dio curiosidad saber si siempre eres asi de directa o depende mucho de quien tengas delante."
       ],
       PROFILE_SUPPORT: ubicacion
         ? [`Vi que eres de ${ubicacion} y me fui por eso porque me parecio mejor punto de partida que una frase comun. Hay lugares que dicen bastante de alguien. Que es lo que mas sientes que te representa de estar ahi?`]
@@ -757,7 +884,7 @@ function construirFallbackSugerencias(caso = {}) {
           ? [`Vi que te gusta ${String(interes).toLowerCase()} y me parecio mejor entrar por ahi que tirar una frase cualquiera. Cuando alguien tiene un gusto tan claro, casi siempre hay una parte de su forma de ser metida en eso. Me dio curiosidad saber que es lo que mas te engancha de verdad.`]
           : ["No queria ir por una entrada comun ni por una frase copiada. Hay perfiles que no dicen gran cosa y otros donde un detalle basta para abrir una charla mejor; aqui senti mas lo segundo, y me dio curiosidad saber que parte de ti dirias que casi siempre vale la pena descubrir primero."],
       REPLY_LAST_MESSAGE: [
-        "Eso que dijiste cambia bastante el tono de la charla y por eso no da para responderlo con cualquier cosa. Me dejo con curiosidad de entender mejor desde donde te sale esa forma de decirlo, porque a veces ahi es donde aparece lo mas interesante de una conversacion."
+        "Por como lo dijiste, se nota que no hablas por hablar, y eso cambia bastante la charla. Me dejo con curiosidad entender mejor desde donde te sale esa forma tan directa de ver las cosas."
       ],
       PROFILE_SUPPORT: ubicacion
         ? [`Vi que eres de ${ubicacion} y me parecio mucho mejor punto de partida que una frase comun. Hay lugares que ya de por si despiertan curiosidad, pero lo interesante de verdad es lo que terminan diciendo de alguien. Me interesa saber que es lo que mas sientes que te representa de estar ahi.`]
@@ -768,27 +895,57 @@ function construirFallbackSugerencias(caso = {}) {
         ? [`Vi que eres de ${ubicacion} y me parecio mas interesante tirar por ahi que por una entrada cualquiera. Hay lugares que ya de por si llaman la atencion, pero lo que de verdad da juego en una charla es lo que una persona deja ver desde ese detalle. Que es lo que mas te gusta de ese lado tuyo?`]
         : interes
           ? [`Vi que te gusta ${String(interes).toLowerCase()} y eso me parecio mejor punto de partida que una frase comun. Cuando alguien tiene un gusto asi de claro, casi siempre hay algo real detras de eso, y me dio curiosidad saber que es lo que mas te engancha cuando de verdad te metes en ese tema.`]
-          : ["No queria tirar una entrada comun ni quedarme en algo vacio. A veces una charla cambia no por decir mucho, sino por tocar justo el detalle que si despierta interes, y aqui me dio curiosidad saber cual dirias que es ese detalle contigo."]
+          : ["Prefiero ir por algo mas concreto que por una entrada comun. A veces una charla cambia por un detalle simple, y me dio curiosidad saber cual dirias que es ese detalle contigo."]
     }
   };
+
+  if (tipoContacto === "viejo_sin_respuesta" && maps[perfil]?.NEW_CHAT?.length) {
+    return maps[perfil].NEW_CHAT;
+  }
 
   return maps[perfil]?.[caso.mode] || maps[perfil]?.DEFAULT || maps.medio.DEFAULT;
 }
 
 async function generarSugerencias(caso = {}) {
+  caso.tipoContacto = caso.tipoContacto || inferirTipoContacto(caso.estadoConversacion);
+  caso.ubicacionVisiblePerfil = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
+  caso.objetivoLongitud = caso.objetivoLongitud || construirObjetivoLongitud(caso);
+
+  if (esCasoSimpleFastPath(caso)) {
+    const directa = construirFastPathSimple(caso);
+
+    if (directa) {
+      return {
+        sugerencias: [directa],
+        usageData: null
+      };
+    }
+  }
+
   const planned = await planificarCaso(caso);
-  const plan = planned.plan || planHeuristico(caso);
+  const heuristico = planHeuristico(caso);
+  const plan = planned.plan || heuristico;
+
+  if (!caso.estadoConversacion?.hayConversacionReal && plan.mode === "REPLY_LAST_MESSAGE") {
+    plan.mode = heuristico.mode;
+    plan.anchor = heuristico.anchor;
+    plan.summary = heuristico.summary;
+  }
 
   caso.mode = plan.mode || caso.mode || "DEFAULT";
   caso.anchor = plan.anchor || caso.anchor || detectarAnchorHeuristico(caso, caso.mode);
   caso.plan = plan;
-  caso.ubicacionVisiblePerfil = caso.ubicacionVisiblePerfil || extraerUbicacionVisiblePerfil(caso.perfilEstructurado);
   caso.objetivoLongitud = construirObjetivoLongitud(caso);
+
+  const planSummaryFinal = [
+    plan.summary || "",
+    construirResumenTipoContacto(caso.tipoContacto)
+  ].filter(Boolean).join(" ");
 
   const userPrompt = construirUserPrompt({
     mode: caso.mode,
     anchor: caso.anchor,
-    planSummary: plan.summary || "",
+    planSummary: planSummaryFinal,
     textoPlano: caso.textoPlano,
     clientePlano: caso.clientePlano,
     contextoPlano: caso.contextoPlano,
@@ -817,15 +974,15 @@ async function generarSugerencias(caso = {}) {
   });
 
   const maxTokensByProfile = {
-    corto: 90,
-    medio: 130,
-    largo: 180
+    corto: 80,
+    medio: 120,
+    largo: 170
   };
 
   const temperatureByProfile = {
-    corto: 0.42,
-    medio: caso.ghostwriterMode ? 0.58 : 0.52,
-    largo: caso.ghostwriterMode ? 0.62 : 0.56
+    corto: 0.36,
+    medio: caso.ghostwriterMode ? 0.54 : 0.48,
+    largo: caso.ghostwriterMode ? 0.60 : 0.52
   };
 
   const dataWriter = await llamarOpenAI({
@@ -846,8 +1003,8 @@ async function generarSugerencias(caso = {}) {
         content: userPrompt
       }
     ],
-    temperature: temperatureByProfile[caso.objetivoLongitud.profile] || 0.52,
-    maxTokens: maxTokensByProfile[caso.objetivoLongitud.profile] || 130,
+    temperature: temperatureByProfile[caso.objetivoLongitud.profile] || 0.48,
+    maxTokens: maxTokensByProfile[caso.objetivoLongitud.profile] || 120,
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS
   });
 
@@ -877,13 +1034,13 @@ async function generarSugerencias(caso = {}) {
   }
 
   const ultimoRecurso = caso.objetivoLongitud.profile === "corto"
-    ? ["Te hago una simple: que es lo que mas te llama la atencion de una charla cuando alguien si te interesa?"]
+    ? ["Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"]
     : caso.estadoConversacion.hayConversacionReal
-      ? ["Eso que dijiste cambia bastante el tono de la charla, y por eso prefiero seguir justo por ahi en vez de responder con algo vacio. Me dejo curiosidad real saber desde donde te sale esa forma de verlo."]
-      : ["Vi un detalle aqui que da mas para una charla con sustancia que para una entrada comun. Por eso me dio curiosidad saber que parte de ti dirias que casi siempre vale la pena descubrir primero."];
+      ? ["Por como lo dijiste, me da la impresion de que sabes bien lo que quieres. Me dejo curiosidad saber si siempre eres asi de directa o si depende mucho del momento."]
+      : ["Vi un detalle en tu perfil que me parecio mejor punto de partida que una frase comun. Me dio curiosidad saber que parte de ti es la que mas suele llamar la atencion cuando alguien te conoce un poco mejor."];
 
   return {
-    sugerencias: [ultimoRecurso[0]],
+    sugerencias: [limpiarSalidaHumana(ultimoRecurso[0])],
     usageData: sumarUsage(planned.usageData, dataWriter)
   };
 }
