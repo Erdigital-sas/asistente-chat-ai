@@ -74,44 +74,64 @@ function construirUltimoRecurso(caso = {}) {
 const router = express.Router();
 
 router.post("/sugerencias", autorizarOperador, async (req, res) => {
+  console.log("====== DEBUG REQUEST ======");
+console.log({
+  texto: req.body?.texto,
+  cliente: req.body?.cliente,
+  contexto: req.body?.contexto,
+  perfil: req.body?.perfil
+});
   const startedAt = Date.now();
   const operador = req.operadorAutorizado;
   runtimeStats.suggestions.total += 1;
 
-  try {
-    const {
-      texto = "",
-      contexto = "",
-      cliente = "",
-      perfil = "",
-      extension_id = ""
-    } = req.body || {};
+try {
+  const {
+    texto = "",
+    contexto = "",
+    cliente = "",
+    perfil = "",
+    extension_id = ""
+  } = req.body || {};
 
-    if (!texto || texto.trim().length < 2) {
-      return res.json({
-        ok: false,
-        sugerencias: [],
-        error: "Texto muy corto"
+  if (!texto || texto.trim().length < 2) {
+    return res.json({
+      ok: false,
+      sugerencias: [],
+      error: "Texto muy corto"
+    });
+  }
+
+  const caso = prepararCasoSugerencias({
+    operador,
+    texto,
+    contexto,
+    cliente,
+    perfil
+  });
+
+  console.log("====== DEBUG CASO ======");
+  console.log({
+    textoPlano: caso.textoPlano,
+    clientePlano: caso.clientePlano,
+    estadoConversacion: caso.estadoConversacion,
+    lineasClienteRecientes: caso.lineasClienteRecientes,
+    anclar: caso.anclarEnUltimoMensajeCliente,
+    mode: caso.mode,
+    anchor: caso.anchor,
+    objetivoLongitud: caso.objetivoLongitud,
+    ubicacionPerfil: caso.ubicacionVisiblePerfil
+  });
+
+  const sharedJob = getSharedInFlight(
+    inflightSuggestionJobs,
+    caso.fingerprint,
+    async () => {
+      return runSuggestionQueueByOperator(operador, async () => {
+        return generarSugerencias(caso);
       });
     }
-
-    const caso = prepararCasoSugerencias({
-      operador,
-      texto,
-      contexto,
-      cliente,
-      perfil
-    });
-
-    const sharedJob = getSharedInFlight(
-      inflightSuggestionJobs,
-      caso.fingerprint,
-      async () => {
-        return runSuggestionQueueByOperator(operador, async () => {
-          return generarSugerencias(caso);
-        });
-      }
-    );
+  );
 
     if (sharedJob.shared) {
       runtimeStats.suggestions.inflightHits += 1;
