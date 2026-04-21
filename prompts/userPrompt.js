@@ -1,3 +1,4 @@
+// prompts/userPrompt.js
 const { quitarTildes } = require("../lib/utils");
 
 function construirUserPrompt({
@@ -140,6 +141,8 @@ La respuesta debe:
 - si el caso es simple, no alargarlo
 - si usas perfil, usar solo un detalle concreto
 - si la ubicacion del perfil es util, puedes mencionarla de forma simple
+- si la clienta viene fria o breve, no des discurso
+- si el operador hizo una pregunta simple y clara, no la conviertas en ensayo
 
 ESTILO IDEAL SEGUN LONGITUD
 - caso corto: observacion breve + pregunta corta
@@ -158,6 +161,8 @@ NO HAGAS
 - no inventes experiencias personales del operador sobre un pais o ciudad
 - no propongas encuentros ni salir de la app
 - no uses frases abstractas como lo que te inspira, lo que te apasiona, lo que mas te representa o tu mejor energia
+- no rellenes solo para llegar a una longitud si el caso da para algo corto
+- no uses tono de coach, poeta o asistente
 
 Devuelve solo el mensaje final.
 `.trim();
