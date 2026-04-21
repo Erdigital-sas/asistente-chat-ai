@@ -49,6 +49,23 @@ function limpiarListaSugerencias(items = []) {
   return salida;
 }
 
+function extraerUbicacionCaso(caso = {}) {
+  return String(
+    caso?.ubicacionVisiblePerfil ||
+    caso?.perfilEstructurado?.ubicacionClienta ||
+    ""
+  ).trim();
+}
+
+function extraerInteresCaso(caso = {}) {
+  return String(
+    caso?.plan?.chosen_interest ||
+    caso?.perfilEstructurado?.interesesEnComun?.[0] ||
+    caso?.perfilEstructurado?.interesesClienta?.[0] ||
+    ""
+  ).trim();
+}
+
 function textoPreguntaPorUbicacion(texto = "") {
   return /\b(de donde eres|donde eres|where are you from|de donde vienes|donde vives|where do you live)\b/i.test(
     String(texto || "").toLowerCase()
@@ -56,26 +73,30 @@ function textoPreguntaPorUbicacion(texto = "") {
 }
 
 function textoPreguntaPorInteres(texto = "") {
-  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|music|musica|arte|arts|gardening|jardineria)\b/i.test(
+  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|music|musica|arte|arts|gardening|jardineria|cooking|cocinar|nature|naturaleza)\b/i.test(
+    String(texto || "").toLowerCase()
+  );
+}
+
+function textoPreguntaPorBusqueda(texto = "") {
+  return /\b(que buscas|what are you looking for|que tipo de relacion buscas|que clase de relacion buscas)\b/i.test(
+    String(texto || "").toLowerCase()
+  );
+}
+
+function textoPreguntaPorActividad(texto = "") {
+  return /\b(que haces|que haces ahora|what are you doing|que tal tu dia|como va tu dia)\b/i.test(
     String(texto || "").toLowerCase()
   );
 }
 
 function construirUltimoRecurso(caso = {}) {
   const texto = String(caso?.textoPlano || "");
-  const ubicacion =
-    caso?.ubicacionVisiblePerfil ||
-    caso?.perfilEstructurado?.ubicacionClienta ||
-    "";
-
-  const interes =
-    caso?.plan?.chosen_interest ||
-    caso?.perfilEstructurado?.interesesEnComun?.[0] ||
-    caso?.perfilEstructurado?.interesesClienta?.[0] ||
-    "";
-
-  const tipoTrabajo = caso?.tipoTrabajo || "rewrite_operator_draft";
-  const mode = caso?.mode || "DEFAULT";
+  const ubicacion = extraerUbicacionCaso(caso);
+  const interes = extraerInteresCaso(caso);
+  const tipoTrabajo = String(caso?.tipoTrabajo || "rewrite_operator_draft");
+  const tipoContacto = String(caso?.tipoContacto || "nuevo_total");
+  const hayRespuestaReal = Boolean(caso?.estadoConversacion?.hayConversacionReal);
 
   if (tipoTrabajo === "simple_profile_fastpath") {
     if (textoPreguntaPorUbicacion(texto) && ubicacion) {
@@ -90,39 +111,33 @@ function construirUltimoRecurso(caso = {}) {
       ];
     }
 
+    if (textoPreguntaPorBusqueda(texto)) {
+      return [
+        "Te hago una simple: aqui buscas algo tranquilo para hablar o algo mas serio?"
+      ];
+    }
+
+    if (textoPreguntaPorActividad(texto)) {
+      return [
+        "Te hago una simple: que andas haciendo a esta hora?"
+      ];
+    }
+
     return [
       "Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"
     ];
   }
 
-  if (tipoTrabajo === "reply_last_client_message") {
+  if (tipoTrabajo === "reply_last_client_message" || hayRespuestaReal) {
     return [
       "Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue algo muy de ese momento?"
     ];
   }
 
-  if (mode === "CONTACT_BLOCK") {
-    return [
-      "Podemos seguir por aqui sin problema. Ya que estamos, dime algo concreto de ti que si valga la pena conocer."
-    ];
-  }
-
-  if (mode === "GHOSTING") {
-    return [
-      "No te escribo para hacer drama. Solo me dio curiosidad saber si fue el momento o si esto no termino de engancharte."
-    ];
-  }
-
-  if (mode === "CONFLICT_REFRAME") {
-    return [
-      "No quiero que esto se vaya a un choque innecesario. Que fue exactamente lo que te molesto?"
-    ];
-  }
-
-  if (!caso?.estadoConversacion?.hayConversacionReal) {
+  if (tipoContacto === "viejo_sin_respuesta") {
     if (ubicacion) {
       return [
-        `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
+        `Vi que eres de ${ubicacion}. Ese detalle me dio curiosidad. Que es lo mejor de estar ahi?`
       ];
     }
 
@@ -133,12 +148,24 @@ function construirUltimoRecurso(caso = {}) {
     }
 
     return [
-      "Hay un detalle en tu perfil que me dio curiosidad. Que dirias que es lo primero que suele llamar la atencion de ti?"
+      "Te escribo algo simple: que es lo primero que suele llamarte la atencion cuando alguien te escribe de verdad?"
+    ];
+  }
+
+  if (ubicacion) {
+    return [
+      `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
+    ];
+  }
+
+  if (interes) {
+    return [
+      `Vi que te gusta ${String(interes).toLowerCase()}. Que es lo que mas te engancha de eso?`
     ];
   }
 
   return [
-    "Lo que comentas tiene mas fondo de lo que parece. Me dejo curiosidad saber a que te referias exactamente con eso."
+    "Hay un detalle aqui que me dejo curiosidad. Que dirias que es lo primero que suele llamar la atencion de ti?"
   ];
 }
 
