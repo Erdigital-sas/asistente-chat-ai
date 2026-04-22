@@ -49,123 +49,21 @@ function limpiarListaSugerencias(items = []) {
   return salida;
 }
 
-function extraerUbicacionCaso(caso = {}) {
-  return String(
-    caso?.ubicacionVisiblePerfil ||
-    caso?.perfilEstructurado?.ubicacionClienta ||
-    ""
-  ).trim();
-}
-
-function extraerInteresCaso(caso = {}) {
-  return String(
-    caso?.plan?.chosen_interest ||
-    caso?.perfilEstructurado?.interesesEnComun?.[0] ||
-    caso?.perfilEstructurado?.interesesClienta?.[0] ||
-    ""
-  ).trim();
-}
-
-function textoPreguntaPorUbicacion(texto = "") {
-  return /\b(de donde eres|donde eres|where are you from|de donde vienes|donde vives|where do you live)\b/i.test(
-    String(texto || "").toLowerCase()
-  );
-}
-
-function textoPreguntaPorInteres(texto = "") {
-  return /\b(te gusta|you like|cual equipo|which team|what team|futbol|football|deporte|sport|viajar|travel|dancing|bailar|shopping|compras|music|musica|arte|arts|gardening|jardineria|cooking|cocinar|nature|naturaleza)\b/i.test(
-    String(texto || "").toLowerCase()
-  );
-}
-
-function textoPreguntaPorBusqueda(texto = "") {
-  return /\b(que buscas|what are you looking for|que tipo de relacion buscas|que clase de relacion buscas)\b/i.test(
-    String(texto || "").toLowerCase()
-  );
-}
-
-function textoPreguntaPorActividad(texto = "") {
-  return /\b(que haces|que haces ahora|what are you doing|que tal tu dia|como va tu dia)\b/i.test(
-    String(texto || "").toLowerCase()
-  );
-}
-
 function construirUltimoRecurso(caso = {}) {
-  const texto = String(caso?.textoPlano || "");
-  const ubicacion = extraerUbicacionCaso(caso);
-  const interes = extraerInteresCaso(caso);
-  const tipoTrabajo = String(caso?.tipoTrabajo || "rewrite_operator_draft");
-  const tipoContacto = String(caso?.tipoContacto || "nuevo_total");
-  const hayRespuestaReal = Boolean(caso?.estadoConversacion?.hayConversacionReal);
-
-  if (tipoTrabajo === "simple_profile_fastpath") {
-    if (textoPreguntaPorUbicacion(texto) && ubicacion) {
-      return [
-        `Vi que eres de ${ubicacion}. Que es lo que mas te gusta de vivir ahi?`
-      ];
-    }
-
-    if (textoPreguntaPorInteres(texto) && interes) {
-      return [
-        `Vi que te gusta ${String(interes).toLowerCase()}. Lo sigues por gusto general o hay algo puntual que te engancha mas?`
-      ];
-    }
-
-    if (textoPreguntaPorBusqueda(texto)) {
-      return [
-        "Te hago una simple: aqui buscas algo tranquilo para hablar o algo mas serio?"
-      ];
-    }
-
-    if (textoPreguntaPorActividad(texto)) {
-      return [
-        "Te hago una simple: que andas haciendo a esta hora?"
-      ];
-    }
-
+  if (caso.tipoContacto === "nuevo_total") {
     return [
-      "Te hago una simple: que tipo de charla suele engancharte mas cuando alguien te escribe?"
+      "Hola. Prefiero empezar con algo simple y real: ¿qué tipo de conversación sí te dan ganas de seguir cuando alguien te escribe por aquí?"
     ];
   }
 
-  if (tipoTrabajo === "reply_last_client_message" || hayRespuestaReal) {
+  if (caso.tipoContacto === "viejo_sin_respuesta") {
     return [
-      "Lo que comentas tiene mas fondo de lo que parece. Siempre lo ves asi o fue algo muy de ese momento?"
-    ];
-  }
-
-  if (tipoContacto === "viejo_sin_respuesta") {
-    if (ubicacion) {
-      return [
-        `Vi que eres de ${ubicacion}. Ese detalle me dio curiosidad. Que es lo mejor de estar ahi?`
-      ];
-    }
-
-    if (interes) {
-      return [
-        `Vi que te gusta ${String(interes).toLowerCase()}. Me dio curiosidad saber que es lo que mas te engancha de eso.`
-      ];
-    }
-
-    return [
-      "Te escribo algo simple: que es lo primero que suele llamarte la atencion cuando alguien te escribe de verdad?"
-    ];
-  }
-
-  if (ubicacion) {
-    return [
-      `Vi que eres de ${ubicacion}. Ese detalle me llamo la atencion enseguida. Que es lo mejor de estar ahi?`
-    ];
-  }
-
-  if (interes) {
-    return [
-      `Vi que te gusta ${String(interes).toLowerCase()}. Que es lo que mas te engancha de eso?`
+      "Hola. Paso por aquí con una pregunta concreta y sin vueltas: ¿qué suele hacer que una conversación te resulte interesante desde el principio?"
     ];
   }
 
   return [
-    "Hay un detalle aqui que me dejo curiosidad. Que dirias que es lo primero que suele llamar la atencion de ti?"
+    "Quiero seguir esto por una línea más natural. ¿Qué parte de lo que dijiste es la que más pesa para ti?"
   ];
 }
 
@@ -174,33 +72,22 @@ function resolverSugerenciasFinales(resultado = {}, caso = {}) {
     Array.isArray(resultado?.sugerencias) ? resultado.sugerencias : []
   );
 
-  let sugerencias = filtrarSugerenciasFinales(sugerenciasServicio, caso);
-
-  if (!sugerencias.length && sugerenciasServicio.length) {
-    sugerencias = sugerenciasServicio;
+  const filtradas = filtrarSugerenciasFinales(sugerenciasServicio, caso);
+  if (filtradas.length) {
+    return filtradas.slice(0, 3);
   }
 
-  if (!sugerencias.length) {
-    const fallbackBruto = construirFallbackSugerencias(caso);
-    const fallbackServicio = limpiarListaSugerencias(
-      Array.isArray(fallbackBruto) ? fallbackBruto : [fallbackBruto]
-    );
+  const fallbackCrudo = construirFallbackSugerencias(caso);
+  const fallbackServicio = limpiarListaSugerencias(
+    Array.isArray(fallbackCrudo) ? fallbackCrudo : [fallbackCrudo]
+  );
 
-    const fallbackFiltrado = filtrarSugerenciasFinales(
-      fallbackServicio,
-      caso
-    );
-
-    sugerencias = fallbackFiltrado.length
-      ? fallbackFiltrado
-      : fallbackServicio;
+  const fallbackFiltrado = filtrarSugerenciasFinales(fallbackServicio, caso);
+  if (fallbackFiltrado.length) {
+    return fallbackFiltrado.slice(0, 3);
   }
 
-  if (!sugerencias.length) {
-    sugerencias = construirUltimoRecurso(caso);
-  }
-
-  return limpiarListaSugerencias(sugerencias).slice(0, 3);
+  return limpiarListaSugerencias(construirUltimoRecurso(caso)).slice(0, 3);
 }
 
 const router = express.Router();
