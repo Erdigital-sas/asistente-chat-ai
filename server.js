@@ -1,9 +1,40 @@
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
-const { randomUUID, timingSafeEqual } = require("crypto");
+const { randomUUID, timingSafeEqual, createHmac } = require("crypto");
 
-const PORT = Number(process.env.PORT || 3000);
+/* =========================================================
+ * ENV / CONFIG
+ * ======================================================= */
+
+function readIntEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const n = Number.parseInt(process.env[name], 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function readFloatEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const n = Number.parseFloat(process.env[name]);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function removeAccents(text = "") {
+  return String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeText(text = "") {
+  return removeAccents(String(text ?? ""))
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const PORT = readIntEnv("PORT", 3000, 1, 65535);
 
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "");
 const OPENAI_URL = String(
@@ -22,130 +53,179 @@ const OPENAI_MODEL_TRANSLATE = String(
   "gpt-4o-mini"
 );
 
-const OPENAI_TIMEOUT_SUGGESTIONS_MS = clampNumber(
-  process.env.OPENAI_TIMEOUT_SUGGESTIONS_MS,
+const OPENAI_TIMEOUT_SUGGESTIONS_MS = readIntEnv(
+  "OPENAI_TIMEOUT_SUGGESTIONS_MS",
   17000,
   8000,
   45000
 );
 
-const OPENAI_TIMEOUT_TRANSLATE_MS = clampNumber(
-  process.env.OPENAI_TIMEOUT_TRANSLATE_MS,
+const OPENAI_TIMEOUT_TRANSLATE_MS = readIntEnv(
+  "OPENAI_TIMEOUT_TRANSLATE_MS",
   10000,
   4000,
   25000
 );
 
-const SUGGESTION_MAX_TOKENS = clampNumber(
-  process.env.SUGGESTION_MAX_TOKENS,
+const SUGGESTION_MAX_TOKENS = readIntEnv(
+  "SUGGESTION_MAX_TOKENS",
   580,
   180,
   1200
 );
 
+const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 8, 4, 15);
+const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 55, 20, 180);
+
 const OPERATOR_SHARED_KEY = String(process.env.OPERATOR_SHARED_KEY || "2026");
+
 const SUPABASE_URL = String(process.env.SUPABASE_URL || "");
 const SUPABASE_KEY = String(process.env.SUPABASE_KEY || "");
 
-const OPERATOR_CACHE_TTL_MS = clampNumber(
-  process.env.OPERATOR_CACHE_TTL_MS,
+const ADMIN_USER = String(process.env.ADMIN_USER || "admin");
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "");
+const ADMIN_TOKEN_SECRET = String(
+  process.env.ADMIN_TOKEN_SECRET || SUPABASE_KEY || OPERATOR_SHARED_KEY
+);
+
+const ADMIN_TOKEN_TTL_HOURS = readIntEnv("ADMIN_TOKEN_TTL_HOURS", 12, 1, 168);
+const ADMIN_LOGIN_WINDOW_MS = readIntEnv(
+  "ADMIN_LOGIN_WINDOW_MS",
+  15 * 60 * 1000,
+  60 * 1000,
+  24 * 60 * 60 * 1000
+);
+const ADMIN_LOGIN_MAX_ATTEMPTS = readIntEnv(
+  "ADMIN_LOGIN_MAX_ATTEMPTS",
+  8,
+  3,
+  50
+);
+
+const OPERATOR_CACHE_TTL_MS = readIntEnv(
+  "OPERATOR_CACHE_TTL_MS",
   5 * 60 * 1000,
   30000,
   60 * 60 * 1000
 );
 
-const TRANSLATION_CACHE_TTL_MS = clampNumber(
-  process.env.TRANSLATION_CACHE_TTL_MS,
+const TRANSLATION_CACHE_TTL_MS = readIntEnv(
+  "TRANSLATION_CACHE_TTL_MS",
   15 * 60 * 1000,
   60000,
   2 * 60 * 60 * 1000
 );
 
-const TRANSLATION_CACHE_LIMIT = clampNumber(
-  process.env.TRANSLATION_CACHE_LIMIT,
+const TRANSLATION_CACHE_LIMIT = readIntEnv(
+  "TRANSLATION_CACHE_LIMIT",
   500,
   50,
   5000
 );
 
-const SUGGESTION_OPENAI_CONCURRENCY = clampNumber(
-  process.env.SUGGESTION_OPENAI_CONCURRENCY,
+const SUGGESTION_OPENAI_CONCURRENCY = readIntEnv(
+  "SUGGESTION_OPENAI_CONCURRENCY",
   6,
   1,
   20
 );
 
-const TRANSLATION_OPENAI_CONCURRENCY = clampNumber(
-  process.env.TRANSLATION_OPENAI_CONCURRENCY,
+const TRANSLATION_OPENAI_CONCURRENCY = readIntEnv(
+  "TRANSLATION_OPENAI_CONCURRENCY",
   2,
   1,
   10
 );
 
-const SUGGESTION_OPENAI_QUEUE_LIMIT = clampNumber(
-  process.env.SUGGESTION_OPENAI_QUEUE_LIMIT,
+const SUGGESTION_OPENAI_QUEUE_LIMIT = readIntEnv(
+  "SUGGESTION_OPENAI_QUEUE_LIMIT",
   60,
   1,
   300
 );
 
-const TRANSLATION_OPENAI_QUEUE_LIMIT = clampNumber(
-  process.env.TRANSLATION_OPENAI_QUEUE_LIMIT,
+const TRANSLATION_OPENAI_QUEUE_LIMIT = readIntEnv(
+  "TRANSLATION_OPENAI_QUEUE_LIMIT",
   30,
   1,
   200
 );
 
-const SUGGESTION_OPENAI_QUEUE_WAIT_MS = clampNumber(
-  process.env.SUGGESTION_OPENAI_QUEUE_WAIT_MS,
+const SUGGESTION_OPENAI_QUEUE_WAIT_MS = readIntEnv(
+  "SUGGESTION_OPENAI_QUEUE_WAIT_MS",
   12000,
   1000,
   30000
 );
 
-const TRANSLATION_OPENAI_QUEUE_WAIT_MS = clampNumber(
-  process.env.TRANSLATION_OPENAI_QUEUE_WAIT_MS,
+const TRANSLATION_OPENAI_QUEUE_WAIT_MS = readIntEnv(
+  "TRANSLATION_OPENAI_QUEUE_WAIT_MS",
   6000,
   1000,
   20000
 );
 
-const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = clampNumber(
-  process.env.PER_OPERATOR_SUGGESTION_QUEUE_LIMIT,
+const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = readIntEnv(
+  "PER_OPERATOR_SUGGESTION_QUEUE_LIMIT",
   3,
   1,
   10
 );
 
-const PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS = clampNumber(
-  process.env.PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS,
+const PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS = readIntEnv(
+  "PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS",
   12000,
   1000,
   30000
 );
 
-const MAX_CONTEXT_LINES = clampNumber(
-  process.env.MAX_CONTEXT_LINES,
-  8,
-  4,
-  15
-);
+const DEFAULT_MODEL_PRICING = {
+  "gpt-4o": { input: 2.5, output: 10 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6 },
+  "gpt-4.1": { input: 2, output: 8 },
+  "gpt-4.1-mini": { input: 0.4, output: 1.6 }
+};
 
-const MIN_RESPONSE_LENGTH = clampNumber(
-  process.env.MIN_RESPONSE_LENGTH,
-  55,
-  20,
-  180
-);
+function getDefaultPricingForModel(model = "") {
+  return DEFAULT_MODEL_PRICING[normalizeText(model)] || { input: 0, output: 0 };
+}
 
-const SUGGESTION_MEMORY_TTL_MS = 20 * 60 * 1000;
-const SUGGESTION_MEMORY_LIMIT = 700;
+const pricingSuggestionDefault = getDefaultPricingForModel(OPENAI_MODEL_SUGGESTIONS);
+const pricingTranslateDefault = getDefaultPricingForModel(OPENAI_MODEL_TRANSLATE);
+
+const SUGGESTION_INPUT_COST_PER_1M = readFloatEnv(
+  "SUGGESTION_INPUT_COST_PER_1M",
+  pricingSuggestionDefault.input,
+  0,
+  100000
+);
+const SUGGESTION_OUTPUT_COST_PER_1M = readFloatEnv(
+  "SUGGESTION_OUTPUT_COST_PER_1M",
+  pricingSuggestionDefault.output,
+  0,
+  100000
+);
+const TRANSLATE_INPUT_COST_PER_1M = readFloatEnv(
+  "TRANSLATE_INPUT_COST_PER_1M",
+  pricingTranslateDefault.input,
+  0,
+  100000
+);
+const TRANSLATE_OUTPUT_COST_PER_1M = readFloatEnv(
+  "TRANSLATE_OUTPUT_COST_PER_1M",
+  pricingTranslateDefault.output,
+  0,
+  100000
+);
 
 const TARGET_SUGGESTION_SPECS = [
   { min: 90, max: 170, ideal: 125 },
   { min: 100, max: 190, ideal: 140 },
   { min: 120, max: 230, ideal: 170 }
 ];
+
+const SUGGESTION_MEMORY_TTL_MS = 20 * 60 * 1000;
+const SUGGESTION_MEMORY_LIMIT = 700;
 
 if (!OPENAI_API_KEY) {
   console.error("Falta OPENAI_API_KEY");
@@ -159,6 +239,10 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+/* =========================================================
+ * APP / STATE
+ * ======================================================= */
+
 const app = express();
 app.disable("x-powered-by");
 app.use(cors());
@@ -170,6 +254,7 @@ const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
 const recentSuggestionMemory = new Map();
 const operatorSuggestionQueues = new Map();
+const adminLoginAttempts = new Map();
 
 const runtimeStats = {
   startedAt: Date.now(),
@@ -205,6 +290,16 @@ const runtimeStats = {
     suggestionCalls: 0,
     translationCalls: 0,
     lastMs: 0
+  },
+  admin: {
+    loginTotal: 0,
+    loginOk: 0,
+    loginError: 0,
+    operatorList: 0,
+    operatorCreate: 0,
+    operatorUpdate: 0,
+    operatorDelete: 0,
+    dashboardLoads: 0
   }
 };
 
@@ -234,13 +329,9 @@ app.use((err, _req, res, next) => {
   return next(err);
 });
 
-function clampNumber(raw, fallback, min, max) {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  if (n < min) return min;
-  if (n > max) return max;
-  return n;
-}
+/* =========================================================
+ * GENERIC UTILS
+ * ======================================================= */
 
 function createRequestId() {
   try {
@@ -252,19 +343,6 @@ function createRequestId() {
 
 function normalizeSpaces(text = "") {
   return String(text ?? "").replace(/\s+/g, " ").trim();
-}
-
-function removeAccents(text = "") {
-  return String(text ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
-function normalizeText(text = "") {
-  return removeAccents(String(text ?? ""))
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function cleanHuman(text = "") {
@@ -295,13 +373,126 @@ function dedupeStrings(items = []) {
   return out;
 }
 
-function formatOperatorName(name = "") {
-  return normalizeSpaces(name)
-    .toLowerCase()
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+function cleanLine(text = "") {
+  return cleanHuman(
+    String(text ?? "")
+      .replace(/^\s*\d+[\).\-\s:]*/, "")
+      .replace(/^\s*[•\-–—]+\s*/, "")
+  );
+}
+
+function countChars(text = "") {
+  return normalizeSpaces(String(text || "")).length;
+}
+
+function countQuestions(text = "") {
+  const t = String(text || "");
+  const abiertas = (t.match(/¿/g) || []).length;
+  const cerradas = (t.match(/\?/g) || []).length;
+  return Math.max(abiertas, cerradas);
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function roundMoney(n = 0) {
+  return Number(safeNumber(n, 0).toFixed(6));
+}
+
+function formatDateISO(date = new Date()) {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function firstDayOfMonthUTC(date = new Date()) {
+  return formatDateISO(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)));
+}
+
+function isValidISODate(text = "") {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(text || ""));
+}
+
+function addDaysISO(dateISO = "", days = 0) {
+  const d = new Date(`${dateISO}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setUTCDate(d.getUTCDate() + days);
+  return formatDateISO(d);
+}
+
+function compareISODate(a = "", b = "") {
+  return String(a).localeCompare(String(b));
+}
+
+function buildDateRange(fromRaw = "", toRaw = "") {
+  const today = formatDateISO(new Date());
+  let from = isValidISODate(fromRaw) ? fromRaw : firstDayOfMonthUTC(new Date());
+  let to = isValidISODate(toRaw) ? toRaw : today;
+
+  if (compareISODate(from, to) > 0) {
+    const tmp = from;
+    from = to;
+    to = tmp;
+  }
+
+  return {
+    from,
+    to,
+    startIso: `${from}T00:00:00.000Z`,
+    endExclusiveIso: `${addDaysISO(to, 1)}T00:00:00.000Z`
+  };
+}
+
+async function selectAllPages(builderFactory, pageSize = 1000) {
+  let from = 0;
+  const rows = [];
+
+  while (true) {
+    const { data, error } = await builderFactory(from, from + pageSize - 1);
+
+    if (error) {
+      throw error;
+    }
+
+    const chunk = Array.isArray(data) ? data : [];
+    rows.push(...chunk);
+
+    if (chunk.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return rows;
+}
+
+function base64UrlEncode(input = "") {
+  const buffer = Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(String(input), "utf8");
+
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(input = "") {
+  const normalized = String(input)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  const padding = normalized.length % 4 === 0
+    ? ""
+    : "=".repeat(4 - (normalized.length % 4));
+
+  return Buffer.from(normalized + padding, "base64").toString("utf8");
 }
 
 function safeCompare(a = "", b = "") {
@@ -317,25 +508,41 @@ function safeCompare(a = "", b = "") {
   }
 }
 
-function safeNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
+function combineUsageData(items = []) {
+  const total = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
+  };
+
+  let found = false;
+
+  for (const item of items) {
+    const usage = item?.usage || item;
+    if (!usage) continue;
+
+    total.prompt_tokens += safeNumber(usage.prompt_tokens);
+    total.completion_tokens += safeNumber(usage.completion_tokens);
+    total.total_tokens += safeNumber(usage.total_tokens);
+
+    if (
+      safeNumber(usage.prompt_tokens) ||
+      safeNumber(usage.completion_tokens) ||
+      safeNumber(usage.total_tokens)
+    ) {
+      found = true;
+    }
+  }
+
+  return found ? { usage: total } : null;
 }
 
-function countQuestions(text = "") {
-  return (String(text || "").match(/\?/g) || []).length;
-}
-
-function countChars(text = "") {
-  return normalizeSpaces(String(text || "")).length;
-}
-
-function getOperatorCacheKey(name = "") {
-  return normalizeText(formatOperatorName(name));
-}
+/* =========================================================
+ * OPERATOR AUTH
+ * ======================================================= */
 
 function readOperatorCache(name = "") {
-  const key = getOperatorCacheKey(name);
+  const key = normalizeText(formatOperatorName(name));
   const entry = operatorAuthCache.get(key);
 
   if (!entry) return "";
@@ -349,13 +556,28 @@ function readOperatorCache(name = "") {
 }
 
 function writeOperatorCache(name = "", value = "") {
-  const key = getOperatorCacheKey(name);
+  const key = normalizeText(formatOperatorName(name));
   if (!key || !value) return;
 
   operatorAuthCache.set(key, {
     value,
     expiresAt: Date.now() + OPERATOR_CACHE_TTL_MS
   });
+}
+
+function deleteOperatorCache(name = "") {
+  const key = normalizeText(formatOperatorName(name));
+  if (!key) return;
+  operatorAuthCache.delete(key);
+}
+
+function formatOperatorName(name = "") {
+  return normalizeSpaces(name)
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 async function validateOperatorAccess(operador = "", clave = "") {
@@ -399,9 +621,174 @@ async function authorizeOperator(req, res, next) {
     req.operadorAutorizado = await validateOperatorAccess(operador, clave);
     return next();
   } catch (err) {
-    return res.json({ ok: false, error: err.message || "No autorizado" });
+    return res.json({
+      ok: false,
+      error: err.message || "No autorizado"
+    });
   }
 }
+
+/* =========================================================
+ * ADMIN AUTH
+ * ======================================================= */
+
+function adminConfigured() {
+  return Boolean(ADMIN_USER && ADMIN_PASSWORD && ADMIN_TOKEN_SECRET);
+}
+
+function signAdminToken(payloadB64 = "") {
+  return base64UrlEncode(
+    createHmac("sha256", ADMIN_TOKEN_SECRET).update(payloadB64).digest()
+  );
+}
+
+function createAdminToken(usuario = ADMIN_USER) {
+  const now = Date.now();
+  const payload = {
+    sub: usuario || ADMIN_USER,
+    role: "admin",
+    iat: now,
+    exp: now + (ADMIN_TOKEN_TTL_HOURS * 60 * 60 * 1000),
+    nonce: createRequestId()
+  };
+
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const signature = signAdminToken(payloadB64);
+
+  return `${payloadB64}.${signature}`;
+}
+
+function verifyAdminToken(token = "") {
+  const [payloadB64, signature] = String(token || "").split(".");
+
+  if (!payloadB64 || !signature) {
+    throw new Error("Token admin invalido");
+  }
+
+  const expected = signAdminToken(payloadB64);
+  if (!safeCompare(signature, expected)) {
+    throw new Error("Token admin invalido");
+  }
+
+  let payload = null;
+
+  try {
+    payload = JSON.parse(base64UrlDecode(payloadB64));
+  } catch (_err) {
+    throw new Error("Token admin invalido");
+  }
+
+  if (!payload?.sub || payload.role !== "admin") {
+    throw new Error("Token admin invalido");
+  }
+
+  if (!payload?.exp || payload.exp < Date.now()) {
+    throw new Error("Sesion admin expirada");
+  }
+
+  return payload;
+}
+
+function cleanupAdminLoginAttempts() {
+  const now = Date.now();
+
+  for (const [key, entry] of adminLoginAttempts.entries()) {
+    const fresh = (entry?.timestamps || []).filter(
+      (ts) => (now - ts) < ADMIN_LOGIN_WINDOW_MS
+    );
+
+    if (!fresh.length) {
+      adminLoginAttempts.delete(key);
+      continue;
+    }
+
+    adminLoginAttempts.set(key, { timestamps: fresh });
+  }
+}
+
+function getAdminRateKey(req, usuario = "") {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = forwarded || req.ip || "sin-ip";
+  return `${ip}::${normalizeText(usuario || "admin")}`;
+}
+
+function isAdminLoginBlocked(rateKey = "") {
+  if (!rateKey) return false;
+  cleanupAdminLoginAttempts();
+  const entry = adminLoginAttempts.get(rateKey);
+  if (!entry) return false;
+  return (entry.timestamps || []).length >= ADMIN_LOGIN_MAX_ATTEMPTS;
+}
+
+function registerAdminAttempt(rateKey = "", ok = false) {
+  if (!rateKey) return;
+
+  if (ok) {
+    adminLoginAttempts.delete(rateKey);
+    return;
+  }
+
+  cleanupAdminLoginAttempts();
+
+  const entry = adminLoginAttempts.get(rateKey) || { timestamps: [] };
+  entry.timestamps.push(Date.now());
+  adminLoginAttempts.set(rateKey, entry);
+}
+
+function getAdminTokenFromRequest(req) {
+  const auth = String(req.headers.authorization || "");
+
+  if (/^Bearer\s+/i.test(auth)) {
+    return auth.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  return String(
+    req.headers["x-admin-token"] ||
+    req.body?.token ||
+    req.query?.token ||
+    ""
+  );
+}
+
+function adminCredentialsValid(usuario = "", password = "") {
+  return (
+    safeCompare(normalizeText(usuario), normalizeText(ADMIN_USER)) &&
+    safeCompare(String(password || ""), String(ADMIN_PASSWORD || ""))
+  );
+}
+
+function authorizeAdmin(req, res, next) {
+  if (!adminConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET"
+    });
+  }
+
+  try {
+    const token = getAdminTokenFromRequest(req);
+
+    if (!token) {
+      return res.status(401).json({
+        ok: false,
+        error: "Sesion admin requerida"
+      });
+    }
+
+    const payload = verifyAdminToken(token);
+    req.adminAuth = payload;
+    return next();
+  } catch (err) {
+    return res.status(401).json({
+      ok: false,
+      error: err.message || "Sesion admin invalida"
+    });
+  }
+}
+
+/* =========================================================
+ * OPENAI LIMITERS / QUEUES
+ * ======================================================= */
 
 class ConcurrencyLimiter {
   constructor({ name, maxConcurrent, maxQueue, waitTimeoutMs }) {
@@ -465,7 +852,9 @@ class ConcurrencyLimiter {
           if (job.started) return;
 
           const idx = this.queue.indexOf(job);
-          if (idx >= 0) this.queue.splice(idx, 1);
+          if (idx >= 0) {
+            this.queue.splice(idx, 1);
+          }
 
           reject(new Error(`Servidor ocupado. Tiempo de espera agotado en ${this.name}`));
         }, this.waitTimeoutMs);
@@ -505,6 +894,7 @@ function getOrCreateOperatorQueueState(operadorKey) {
       queue: []
     });
   }
+
   return operatorSuggestionQueues.get(operadorKey);
 }
 
@@ -607,6 +997,22 @@ function getSharedInFlight(map, key, factory) {
   };
 }
 
+function countOperatorSuggestionsRunning() {
+  let total = 0;
+  for (const state of operatorSuggestionQueues.values()) {
+    if (state.running) total += 1;
+  }
+  return total;
+}
+
+function countOperatorSuggestionsQueued() {
+  let total = 0;
+  for (const state of operatorSuggestionQueues.values()) {
+    total += state.queue.length;
+  }
+  return total;
+}
+
 async function callOpenAI({
   lane = "sugerencias",
   model,
@@ -661,11 +1067,13 @@ async function callOpenAI({
         if (response.status === 429) {
           throw new Error("OpenAI esta ocupado. Intenta de nuevo en unos segundos");
         }
+
         throw new Error(data?.error?.message || "Error consultando OpenAI");
       }
 
       runtimeStats.openai.ok += 1;
       runtimeStats.openai.lastMs = Date.now() - startedAt;
+
       return data;
     } catch (err) {
       runtimeStats.openai.error += 1;
@@ -685,6 +1093,79 @@ async function callOpenAI({
     }
   });
 }
+
+/* =========================================================
+ * SUGGESTIONS ENGINE
+ * ======================================================= */
+
+const STOPWORDS = new Set([
+  "a", "al", "algo", "alguien", "alla", "allá", "and", "ante", "antes", "asi",
+  "así", "aqui", "aquí", "be", "but", "by", "como", "con", "cual", "cuales",
+  "cuáles", "de", "del", "do", "donde", "dónde", "el", "ella", "ellas", "ellos",
+  "en", "eres", "es", "esa", "esas", "ese", "eso", "esos", "esta", "está",
+  "estas", "este", "esto", "estos", "for", "from", "gracias", "ha", "hay",
+  "he", "hola", "how", "i", "is", "it", "la", "las", "lo", "los", "me", "mi",
+  "mis", "mucho", "muy", "my", "no", "nos", "o", "of", "on", "or", "para",
+  "pero", "por", "porque", "que", "qué", "quien", "quién", "se", "si", "sí",
+  "sin", "so", "su", "sus", "te", "that", "the", "this", "to", "tu", "tus",
+  "un", "una", "uno", "unos", "unas", "was", "we", "what", "where", "which",
+  "who", "why", "y", "ya", "yo", "you", "your"
+]);
+
+const BANNED_TOPIC_WORDS = new Set([
+  "minutes",
+  "minute",
+  "hours",
+  "hour",
+  "today",
+  "yesterday",
+  "typing",
+  "unseen",
+  "seen",
+  "original",
+  "draft",
+  "online"
+]);
+
+const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|tu energía|como te decia|como te decía|frase vacia|frase vacía|mejor dicho|te respondí mejor)\b/i;
+const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|teléfono|numero|número|phone)\b/i;
+const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|café|cena|drink|dinner|direccion|dirección|hotel|llamame|llámame|llamarte|call me)\b/i;
+const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
+const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|cómo estás|que tal|qué tal)\b/i;
+const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ah[ií] en lo de)\b/i;
+
+const RISK_CATALOG = {
+  contacto_externo: {
+    key: "contacto_externo",
+    label: "Contacto externo",
+    severity: 100,
+    guidance: "No pidas ni aceptes contacto externo. Redirige con naturalidad a seguir por este chat."
+  },
+  pregunta_pago_plataforma: {
+    key: "pregunta_pago_plataforma",
+    label: "Duda de pago o plataforma",
+    severity: 92,
+    guidance: "No inventes políticas ni cobros. Responde con prudencia y sin vender humo."
+  },
+  redes_externas: {
+    key: "redes_externas",
+    label: "Redes externas detectadas",
+    severity: 90,
+    guidance: "No confirmes identidades externas ni saques la conversación fuera."
+  },
+  abandono_ritmo_contacto: {
+    key: "abandono_ritmo_contacto",
+    label: "Abandono por ritmo o contacto",
+    severity: 95,
+    guidance: "Baja presión, valida el ritmo y evita que la conversación se pierda."
+  },
+  desconfianza_realidad: {
+    key: "desconfianza_realidad",
+    label: "Desconfianza o prueba de realidad",
+    severity: 75,
+    guidance: "Sonar claro, concreto y humano. No ponerse a la defensiva."
+  }
+};
 
 function normalizeChatSignals(raw = {}) {
   return {
@@ -730,6 +1211,17 @@ function formatContextLines(lines = []) {
     .join("\n");
 }
 
+function sanitizeLocation(raw = "") {
+  const text = cleanHuman(raw);
+  if (!text) return "";
+  if (text.length < 3 || text.length > 32) return "";
+  if (/\d/.test(text)) return "";
+  if (/^(about|bio|interested in|looking for|my content|present requests)$/i.test(normalizeText(text))) {
+    return "";
+  }
+  return text;
+}
+
 function parseProfile(perfil = "") {
   const raw = String(perfil || "");
 
@@ -754,19 +1246,8 @@ function parseProfile(perfil = "") {
   };
 }
 
-function sanitizeLocation(raw = "") {
-  const text = cleanHuman(raw);
-  if (!text) return "";
-  if (text.length < 3 || text.length > 32) return "";
-  if (/\d/.test(text)) return "";
-  if (/^(about|bio|interested in|looking for|my content|present requests)$/i.test(normalizeText(text))) {
-    return "";
-  }
-  return text;
-}
-
-function pickProfileDetail(perfil = {}, texto = "") {
-  const joined = normalizeText(texto);
+function pickProfileDetail(perfil = {}, text = "") {
+  const joined = normalizeText(text);
 
   const pool = [
     ...(perfil.interesesEnComun || []).map((value) => ({ type: "interes_comun", value })),
@@ -812,7 +1293,6 @@ function getLastDialogRole(contextLines = []) {
   const line = [...contextLines].reverse().find(
     (x) => x.role === "clienta" || x.role === "operador"
   );
-
   return line?.role || "";
 }
 
@@ -843,39 +1323,6 @@ function detectMode({ textoPlano = "", clientePlano = "", contextLines = [], cha
 
   return contextLines.length ? "REAPERTURA_SUAVE" : "APERTURA_FRIA";
 }
-
-const RISK_CATALOG = {
-  contacto_externo: {
-    key: "contacto_externo",
-    label: "Contacto externo",
-    severity: 100,
-    guidance: "No pidas ni aceptes contacto externo. Redirige con naturalidad a seguir por este chat."
-  },
-  pregunta_pago_plataforma: {
-    key: "pregunta_pago_plataforma",
-    label: "Duda de pago o plataforma",
-    severity: 92,
-    guidance: "No inventes politicas ni cobros. Responde con prudencia y sin vender humo."
-  },
-  redes_externas: {
-    key: "redes_externas",
-    label: "Redes externas detectadas",
-    severity: 90,
-    guidance: "No confirmes identidades externas ni saques la conversacion fuera."
-  },
-  abandono_ritmo_contacto: {
-    key: "abandono_ritmo_contacto",
-    label: "Abandono por ritmo o contacto",
-    severity: 95,
-    guidance: "Baja presion, valida el ritmo y evita que la conversacion se pierda."
-  },
-  desconfianza_realidad: {
-    key: "desconfianza_realidad",
-    label: "Desconfianza o prueba de realidad",
-    severity: 75,
-    guidance: "Sonar claro, concreto y humano. No ponerse a la defensiva."
-  }
-};
 
 function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" }) {
   const text = normalizeText(
@@ -927,7 +1374,7 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
       key: "none",
       label: "Sin riesgo especial",
       severity: 0,
-      guidance: "Mantener una conversacion natural y util dentro del chat."
+      guidance: "Mantener una conversación natural y útil dentro del chat."
     },
     all: risks
   };
@@ -998,19 +1445,6 @@ function detectTone(caso = {}) {
   return "natural, cálido y útil";
 }
 
-const STOPWORDS = new Set([
-  "a", "al", "algo", "alguien", "alla", "allá", "and", "ante", "antes", "asi",
-  "así", "aqui", "aquí", "be", "but", "by", "como", "con", "cual", "cuales",
-  "de", "del", "do", "donde", "el", "ella", "ellas", "ellos", "en", "eres",
-  "es", "esa", "ese", "eso", "esta", "este", "esto", "for", "from", "gracias",
-  "ha", "hay", "he", "hola", "how", "i", "is", "it", "la", "las", "lo", "los",
-  "me", "mi", "mis", "mucho", "muy", "my", "no", "nos", "o", "of", "on", "or",
-  "para", "pero", "por", "porque", "que", "qué", "quien", "se", "si", "sin",
-  "so", "su", "sus", "te", "that", "the", "this", "to", "tu", "tus", "un",
-  "una", "uno", "unos", "unas", "was", "we", "what", "where", "which", "who",
-  "why", "y", "ya", "yo", "you", "your"
-]);
-
 function extractKeywords(text = "") {
   const counts = new Map();
 
@@ -1018,6 +1452,7 @@ function extractKeywords(text = "") {
     if (!word) continue;
     if (word.length < 4) continue;
     if (STOPWORDS.has(word)) continue;
+    if (BANNED_TOPIC_WORDS.has(word)) continue;
     if (!/^[a-z0-9]+$/i.test(word)) continue;
     counts.set(word, (counts.get(word) || 0) + 1);
   }
@@ -1068,7 +1503,6 @@ function pruneSuggestionMemory() {
 
 function readRecentSuggestions(memoryKey = "") {
   pruneSuggestionMemory();
-
   const entry = recentSuggestionMemory.get(memoryKey);
   if (!entry) return [];
 
@@ -1120,29 +1554,6 @@ function extractOptions(raw = "") {
     .filter(Boolean);
 }
 
-function looksTooSimilar(a = "", b = "") {
-  const na = normalizeText(a);
-  const nb = normalizeText(b);
-
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  if (na.includes(nb) || nb.includes(na)) return true;
-
-  const setA = new Set(na.split(/\s+/).filter(Boolean));
-  const wordsB = nb.split(/\s+/).filter(Boolean);
-
-  if (!wordsB.length) return false;
-
-  const overlap = wordsB.filter((w) => setA.has(w)).length;
-  return overlap / wordsB.length >= 0.8;
-}
-
-const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|tu energía|como te decia|como te decía|frase vacia|frase vacía)\b/i;
-const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|teléfono|numero|número|phone)\b/i;
-const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|café|cena|drink|dinner|direccion|dirección|hotel|llamame|llámame|llamarte|call me)\b/i;
-const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
-const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|cómo estás|que tal|qué tal)\b/i;
-
 function scoreLength(length = 0, spec = {}) {
   if (length < MIN_RESPONSE_LENGTH) return 0;
 
@@ -1163,6 +1574,22 @@ function scoreLength(length = 0, spec = {}) {
 
   const gap = length - max;
   return Math.max(0, Math.min(1, 0.75 - (gap / Math.max(1, max))));
+}
+
+function looksTooSimilar(a = "", b = "") {
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+
+  const setA = new Set(na.split(/\s+/).filter(Boolean));
+  const wordsB = nb.split(/\s+/).filter(Boolean);
+  if (!wordsB.length) return false;
+
+  const overlap = wordsB.filter((w) => setA.has(w)).length;
+  return overlap / wordsB.length >= 0.8;
 }
 
 function isSuggestionForbidden(suggestion = "", caso = {}) {
@@ -1193,25 +1620,36 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
 
   let score = 0;
 
-  score += scoreLength(length, spec) * 0.34;
+  score += scoreLength(length, spec) * 0.32;
   score += countQuestions(s) <= 1 ? 0.08 : -0.15;
 
   const overlapClient = keywordOverlap(s, caso.clientKeywords || []);
   const overlapDraft = keywordOverlap(s, caso.draftKeywords || []);
   const overlapDetail = keywordOverlap(s, caso.detailKeywords || []);
+  const overlapOperator = keywordOverlap(s, caso.operatorKeywords || []);
+  const overlapThemes = keywordOverlap(s, caso.activeThemes || []);
 
   if (caso.mode === "RESPUESTA_CHAT") {
-    score += overlapClient > 0 ? 0.22 : -0.12;
+    score += overlapClient > 0 ? 0.20 : -0.12;
+    score += overlapOperator > 0 ? 0.08 : 0;
   } else {
-    score += (overlapDraft > 0 || overlapDetail > 0) ? 0.14 : 0;
+    score += (overlapDraft > 0 || overlapDetail > 0 || overlapOperator > 0) ? 0.14 : 0;
+  }
+
+  if (overlapThemes > 0) {
+    score += 0.10;
   }
 
   if (caso.detallePerfil?.value && overlapDetail > 0) {
-    score += 0.10;
+    score += 0.08;
   }
 
   if (EMPTY_MIRROR_REGEX.test(n)) {
     score -= 0.18;
+  }
+
+  if (ONE_WORD_MIRROR_REGEX.test(n)) {
+    score -= 0.20;
   }
 
   if (EMPTY_GENERIC_START_REGEX.test(n) && caso.mode !== "APERTURA_FRIA") {
@@ -1237,6 +1675,21 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
     /\b(real|claro|natural)\b/.test(n)
   ) {
     score += 0.08;
+  }
+
+  if (
+    caso.risk?.primary?.key === "pregunta_pago_plataforma" &&
+    /\b(prefiero no inventar|no quiero inventarte|sin inventar)\b/.test(n)
+  ) {
+    score += 0.10;
+  }
+
+  if (
+    caso.mode === "RESPUESTA_CHAT" &&
+    (caso.lastClientIsQuestion || false) &&
+    overlapClient === 0
+  ) {
+    score -= 0.08;
   }
 
   return Math.max(0, Math.min(1, score));
@@ -1277,8 +1730,8 @@ function selectFinalCandidates(pool = []) {
 function isWeakResult(candidates = [], selected = []) {
   if (selected.length < 3) return true;
   const avg = selected.reduce((sum, item) => sum + item.score, 0) / selected.length;
-  if (avg < 0.58) return true;
-  return selected.some((item) => item.score < 0.46) || !candidates.length;
+  if (avg < 0.60) return true;
+  return selected.some((item) => item.score < 0.48) || !candidates.length;
 }
 
 function buildWeaknessFeedback(candidates = [], caso = {}) {
@@ -1300,6 +1753,22 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     candidates.every((item) => keywordOverlap(item.text, caso.clientKeywords || []) === 0)
   ) {
     notes.push("- Falta alusión real a lo último de la clienta.");
+  }
+
+  if (
+    candidates.length &&
+    candidates.some((item) => ONE_WORD_MIRROR_REGEX.test(normalizeText(item.text)))
+  ) {
+    notes.push("- Evita fórmulas tipo 'eso que dijiste sobre X' o 'ahí en lo de X'.");
+  }
+
+  if (
+    caso.operatorKeywords?.length &&
+    candidates.length &&
+    candidates.every((item) => keywordOverlap(item.text, caso.operatorKeywords || []) === 0) &&
+    caso.mode !== "RESPUESTA_CHAT"
+  ) {
+    notes.push("- Conserva mejor el hilo que el operador ya venía construyendo.");
   }
 
   if (
@@ -1342,38 +1811,44 @@ function buildSpecText() {
 
 function buildSystemPrompt(caso = {}) {
   return [
-    "Eres el motor de sugerencias de una extension de chat interno.",
-    "Debes devolver exactamente 3 opciones listas para enviar en español.",
-    "Tu trabajo es mejorar el borrador del operador para que suene humano, útil y con intención real.",
+    "Eres el motor de sugerencias de una herramienta interna de chat.",
+    "Debes devolver exactamente 3 opciones finales en español, listas para enviar.",
+    "Tu trabajo es ayudar al operador a responder mejor usando el hilo real de la conversación.",
     "",
     `Objetivo principal: ${caso.objective}`,
     `Tono: ${caso.tone}`,
     `Modo: ${caso.mode}`,
     `Riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
     "",
+    "PRIORIDADES",
+    "- responder primero a lo último de la clienta cuando exista mensaje real",
+    "- conservar el hilo que el operador ya viene construyendo",
+    "- sonar humano, concreto y útil",
+    "- usar hechos reales del chat antes que frases genéricas",
+    "",
     "REGLAS OBLIGATORIAS",
-    "- responde primero a lo ultimo de la clienta cuando exista mensaje real",
-    "- si no existe mensaje real de la clienta, no escribas como si ya hubiera contestado",
-    "- cada opcion debe ser distinta de verdad",
-    "- usa 1 o 2 frases por opcion",
-    "- maximo 1 pregunta por opcion",
+    "- si no existe mensaje nuevo de la clienta, no escribas como si ya hubiera contestado",
+    "- cada opción debe ser distinta de verdad",
+    "- usa 1 o 2 frases por opción",
+    "- máximo 1 pregunta por opción",
     "- sin emojis",
     "- sin comillas",
     "- sin nombres inventados",
     "- sin ciudades inventadas",
-    "- no inventes politicas, pagos, tarifas, soporte ni condiciones de la plataforma",
+    "- no inventes políticas, pagos, tarifas, soporte ni condiciones de la plataforma",
     "- no pidas ni aceptes contacto externo",
     "- no invites a salir de la app",
     "- no propongas encuentros, direcciones ni llamadas",
-    "- evita frases espejo o vacias",
-    "- evita hola, que tal o como estas si no suman nada",
-    "- usa como maximo un detalle de perfil si ayuda de verdad",
-    "- si el borrador esta flojo, rehacelo por completo",
+    "- evita presión, culpa o manipulación",
+    "- evita frases espejo o vacías",
+    "- evita fórmulas como 'eso que dijiste sobre X' si X es solo una palabra suelta",
+    "- usa como máximo un detalle de perfil si ayuda de verdad",
+    "- si el borrador está flojo, reházalo por completo",
     "",
-    "VARIACION DESEADA",
-    "1. directa y facil de enviar",
-    "2. calida y conversacional",
-    "3. mas trabajada y con mejor gancho, sin sonar pesada",
+    "VARIACIÓN DESEADA",
+    "1. directa y fácil de enviar",
+    "2. cálida y alusiva",
+    "3. más trabajada y con mejor gancho, sin sonar pesada",
     "",
     "LARGO ORIENTATIVO",
     buildSpecText(),
@@ -1390,11 +1865,11 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     [
       "RESUMEN DEL CASO",
       `- tipo de contacto: ${caso.tipoContacto}`,
-      `- intencion detectada: ${caso.intent}`,
+      `- intención detectada: ${caso.intent}`,
       `- objetivo: ${caso.objective}`,
       `- tono: ${caso.tone}`,
       `- riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
-      `- guia de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversación natural y útil"}`
+      `- guía de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversación natural y útil"}`
     ].join("\n"),
     [
       "BORRADOR DEL OPERADOR",
@@ -1403,7 +1878,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       '"""'
     ].join("\n"),
     [
-      "ULTIMO MENSAJE REAL DE LA CLIENTA",
+      "ÚLTIMO MENSAJE REAL DE LA CLIENTA",
       '"""',
       caso.clientePlano || "Sin mensaje claro de la clienta",
       '"""'
@@ -1411,20 +1886,34 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     [
       "CONTEXTO RECIENTE",
       '"""',
-      caso.contextoPlano || "Sin contexto util",
+      caso.contextoPlano || "Sin contexto útil",
       '"""'
     ].join("\n"),
     [
-      "PERFIL RESUMIDO",
-      `- intereses en comun: ${(caso.perfil?.interesesEnComun || []).join(" | ") || "ninguno"}`,
-      `- intereses de la clienta: ${(caso.perfil?.interesesClienta || []).join(" | ") || "ninguno"}`,
-      `- datos de la clienta: ${(caso.perfil?.datosClienta || []).join(" | ") || "ninguno"}`,
-      `- ubicacion util: ${caso.perfil?.ubicacionClienta || "ninguna"}`,
-      `- detalle prioritario: ${caso.detallePerfil?.value || "ninguno"}`
+      "HILO DEL OPERADOR",
+      (caso.operatorRecent || []).length
+        ? caso.operatorRecent.map((x, i) => `${i + 1}. ${x}`).join("\n")
+        : "Sin mensajes recientes del operador"
     ].join("\n"),
     [
-      "PALABRAS CLAVE RELEVANTES",
-      caso.clientKeywords?.join(" | ") || "sin keywords"
+      "HILO DE LA CLIENTA",
+      (caso.clientRecent || []).length
+        ? caso.clientRecent.map((x, i) => `${i + 1}. ${x}`).join("\n")
+        : "Sin mensajes recientes de la clienta"
+    ].join("\n"),
+    [
+      "KEYWORDS",
+      `- clienta: ${(caso.clientKeywords || []).join(" | ") || "ninguna"}`,
+      `- operador: ${(caso.operatorKeywords || []).join(" | ") || "ninguna"}`,
+      `- temas activos: ${(caso.activeThemes || []).join(" | ") || "ninguno"}`
+    ].join("\n"),
+    [
+      "PERFIL RESUMIDO",
+      `- intereses en común: ${(caso.perfil?.interesesEnComun || []).join(" | ") || "ninguno"}`,
+      `- intereses de la clienta: ${(caso.perfil?.interesesClienta || []).join(" | ") || "ninguno"}`,
+      `- datos de la clienta: ${(caso.perfil?.datosClienta || []).join(" | ") || "ninguno"}`,
+      `- ubicación útil: ${caso.perfil?.ubicacionClienta || "ninguna"}`,
+      `- detalle prioritario: ${caso.detallePerfil?.value || "ninguno"}`
     ].join("\n"),
     [
       "RESPUESTAS RECIENTES A EVITAR",
@@ -1450,10 +1939,11 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
 
   blocks.push([
     "IMPORTANTE",
-    "- haz opciones con alusion real, no plantillas",
-    "- no copies el borrador si esta pobre",
-    "- deja una salida facil para que la otra persona responda",
-    "- manten todo dentro de la plataforma"
+    "- haz opciones con alusión real, no plantillas",
+    "- no copies el borrador si está pobre",
+    "- deja una salida fácil para que la otra persona responda",
+    "- mantén todo dentro de la plataforma",
+    "- no construyas las 3 opciones alrededor de una sola keyword débil"
   ].join("\n"));
 
   return blocks.join("\n\n").trim();
@@ -1464,7 +1954,7 @@ function pickTemperature(caso = {}, isRepair = false) {
 
   if (caso.mode === "APERTURA_FRIA") t = 0.86;
   if (caso.mode === "REAPERTURA_SUAVE") t = 0.82;
-  if (caso.mode === "RESPUESTA_CHAT") t = 0.74;
+  if (caso.mode === "RESPUESTA_CHAT") t = 0.72;
 
   switch (caso.risk?.primary?.key) {
     case "pregunta_pago_plataforma":
@@ -1561,12 +2051,11 @@ function fallbackReplySuggestions(caso = {}) {
     ];
   }
 
-  if (caso.clientKeywords?.length) {
-    const kw = caso.clientKeywords[0];
+  if ((caso.activeThemes || []).length) {
     return [
-      `Lo que dijiste sobre ${kw} me dejó con curiosidad. Quiero responderte bien sin volver esto pesado. ¿Te salió por experiencia o por intuición?`,
-      `Ahí en lo de ${kw} sí noté algo con más fondo. Me interesa entender si lo ves así desde hace tiempo o si hubo algo que te hizo pensarlo así.`,
-      `Eso que dijiste de ${kw} tiene más miga de la que parece. Me dan ganas de seguir por ahí porque ya suena a una conversación más real que la típica.`
+      "Lo que acabas de contar me dejó con curiosidad. Quiero responderte bien sin volver esto pesado. ¿Te salió por experiencia o por intuición?",
+      "Ahí sí noté algo con más fondo. Me interesa entender si lo ves así desde hace tiempo o si hubo algo que te hizo pensarlo así.",
+      "Eso que acabas de contar tiene más miga de la que parece. Me dan ganas de seguir por ahí porque ya suena a una conversación más real que la típica."
     ];
   }
 
@@ -1665,6 +2154,26 @@ function buildCase(input = {}) {
     [textoPlano, clientePlano, contextoPlano].filter(Boolean).join("\n")
   );
 
+  const operatorRecent = rawContextLines
+    .filter((x) => x.role === "operador")
+    .slice(-4)
+    .map((x) => x.text);
+
+  const clientRecent = rawContextLines
+    .filter((x) => x.role === "clienta")
+    .slice(-4)
+    .map((x) => x.text);
+
+  const operatorKeywords = extractKeywords(operatorRecent.join(" "));
+  const clientKeywords = extractKeywords(clientePlano || clientRecent.join(" "));
+  const draftKeywords = extractKeywords(textoPlano);
+  const detailKeywords = detallePerfil?.value ? extractKeywords(detallePerfil.value) : [];
+  const activeThemes = dedupeStrings([
+    ...clientKeywords.slice(0, 4),
+    ...operatorKeywords.slice(0, 4),
+    ...draftKeywords.slice(0, 4)
+  ]).slice(0, 8);
+
   const baseCase = {
     operador,
     pageType,
@@ -1677,25 +2186,26 @@ function buildCase(input = {}) {
     mode,
     tipoContacto,
     risk,
-    detallePerfil
+    detallePerfil,
+    operatorRecent,
+    clientRecent,
+    operatorKeywords,
+    clientKeywords,
+    draftKeywords,
+    detailKeywords,
+    activeThemes,
+    lastClientIsQuestion: /\?/.test(clientePlano || "")
   };
 
   const intent = detectIntent(baseCase);
   const objective = detectObjective({ ...baseCase, intent });
   const tone = detectTone({ ...baseCase, intent });
 
-  const clientKeywords = extractKeywords(clientePlano);
-  const draftKeywords = extractKeywords(textoPlano);
-  const detailKeywords = detallePerfil?.value ? extractKeywords(detallePerfil.value) : [];
-
   const caso = {
     ...baseCase,
     intent,
     objective,
-    tone,
-    clientKeywords,
-    draftKeywords,
-    detailKeywords
+    tone
   };
 
   caso.memoryKey = getSuggestionMemoryKey(caso);
@@ -1734,35 +2244,6 @@ async function callSuggestionModel(caso = {}, recent = [], previousOptions = [],
     options: extractOptions(data?.choices?.[0]?.message?.content || ""),
     usageData: data
   };
-}
-
-function combineUsageData(items = []) {
-  const total = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0
-  };
-
-  let found = false;
-
-  for (const item of items) {
-    const usage = item?.usage || item;
-    if (!usage) continue;
-
-    total.prompt_tokens += safeNumber(usage.prompt_tokens);
-    total.completion_tokens += safeNumber(usage.completion_tokens);
-    total.total_tokens += safeNumber(usage.total_tokens);
-
-    if (
-      safeNumber(usage.prompt_tokens) ||
-      safeNumber(usage.completion_tokens) ||
-      safeNumber(usage.total_tokens)
-    ) {
-      found = true;
-    }
-  }
-
-  return found ? { usage: total } : null;
 }
 
 async function generateSuggestionsCore(input = {}) {
@@ -1804,7 +2285,7 @@ async function generateSuggestionsCore(input = {}) {
       pool.push(...mapOptionsToCandidates(repairPass.options, "openai_2", caso));
     }
   } catch (_err) {
-    // Si falla OpenAI, seguimos con fallback útil.
+    // Si OpenAI falla, seguimos con fallback útil.
   }
 
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
@@ -1826,7 +2307,6 @@ async function generateSuggestionsCore(input = {}) {
   }
 
   const final = selected.slice(0, 3).map((item) => item.text);
-
   writeRecentSuggestions(caso.memoryKey, final);
 
   return {
@@ -1851,6 +2331,10 @@ async function generateSuggestions(input = {}) {
   const result = await sharedJob.promise;
   return { ...result, shared: sharedJob.shared };
 }
+
+/* =========================================================
+ * TRANSLATION
+ * ======================================================= */
 
 function getTranslationCacheKey(text = "") {
   return normalizeText(text).slice(0, 1200);
@@ -1941,6 +2425,10 @@ async function translateText(text = "") {
   return { ...result, shared: sharedJob.shared };
 }
 
+/* =========================================================
+ * WARNINGS
+ * ======================================================= */
+
 function cleanWarningCounts(raw = {}) {
   const clean = {};
   const entries = Object.entries(raw || {}).slice(0, 100);
@@ -1956,20 +2444,9 @@ function cleanWarningCounts(raw = {}) {
   return clean;
 }
 
-function isValidIsoDate(text = "") {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(text || ""));
-}
-
-function formatDateISO(date = new Date()) {
-  const yyyy = date.getUTCFullYear();
-  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(date.getUTCDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
 async function saveWarningSummary({ operador = "", extension_id = "", fecha = "", counts = {} }) {
   const operadorFinal = formatOperatorName(operador || "");
-  const fechaFinal = isValidIsoDate(fecha) ? fecha : formatDateISO(new Date());
+  const fechaFinal = isValidISODate(fecha) ? fecha : formatDateISO(new Date());
   const countsClean = cleanWarningCounts(counts);
 
   if (!operadorFinal) {
@@ -2019,6 +2496,10 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
   return { rowsUpserted: payload.length };
 }
 
+/* =========================================================
+ * CONSUMPTION / COSTS
+ * ======================================================= */
+
 async function registerConsumption({
   operador = "",
   extension_id = "",
@@ -2061,36 +2542,888 @@ function registerConsumptionAsync(payload) {
   });
 }
 
-app.get("/health", (_req, res) => {
-  return res.json({
+/* =========================================================
+ * ANALYTICS
+ * ======================================================= */
+
+function getCostsByType(tipo = "") {
+  const t = String(tipo || "").toUpperCase();
+
+  if (t.startsWith("IA")) {
+    return {
+      input: SUGGESTION_INPUT_COST_PER_1M,
+      output: SUGGESTION_OUTPUT_COST_PER_1M,
+      lane: "IA"
+    };
+  }
+
+  if (t.startsWith("TRAD")) {
+    return {
+      input: TRANSLATE_INPUT_COST_PER_1M,
+      output: TRANSLATE_OUTPUT_COST_PER_1M,
+      lane: "TRAD"
+    };
+  }
+
+  return {
+    input: 0,
+    output: 0,
+    lane: "OTRO"
+  };
+}
+
+function calculateEstimatedCost({ tipo = "", prompt_tokens = 0, completion_tokens = 0 }) {
+  const costs = getCostsByType(tipo);
+
+  const inputCost = (safeNumber(prompt_tokens) / 1000000) * costs.input;
+  const outputCost = (safeNumber(completion_tokens) / 1000000) * costs.output;
+
+  return roundMoney(inputCost + outputCost);
+}
+
+async function loadConsumptionRange(range, operadoresFiltrados = []) {
+  return selectAllPages((from, to) => {
+    let query = supabase
+      .from("consumo")
+      .select("operador,tipo,tokens,prompt_tokens,completion_tokens,request_ok,created_at,extension_id")
+      .gte("created_at", range.startIso)
+      .lt("created_at", range.endExclusiveIso)
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (operadoresFiltrados.length) {
+      query = query.in("operador", operadoresFiltrados);
+    }
+
+    return query;
+  });
+}
+
+async function loadWarningsRange(range, operadoresFiltrados = []) {
+  return selectAllPages((from, to) => {
+    let query = supabase
+      .from("warning_resumen_diario")
+      .select("operador,extension_id,fecha,frase,cantidad_total,created_at,updated_at")
+      .gte("fecha", range.from)
+      .lte("fecha", range.to)
+      .order("fecha", { ascending: false })
+      .range(from, to);
+
+    if (operadoresFiltrados.length) {
+      query = query.in("operador", operadoresFiltrados);
+    }
+
+    return query;
+  });
+}
+
+function createDashboardSummary() {
+  return {
+    total_requests: 0,
+    ok_requests: 0,
+    error_requests: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    cache_hits: 0,
+    shared_hits: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    active_operators: 0,
+    warnings_total: 0,
+    warnings_unique_pairs: 0
+  };
+}
+
+function createOperatorStat(operador = "") {
+  return {
+    operador,
+    requests_total: 0,
+    ok_requests: 0,
+    error_requests: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    cache_hits: 0,
+    shared_hits: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0,
+    last_activity: ""
+  };
+}
+
+function createSerieDia(fecha = "") {
+  return {
+    fecha,
+    requests_total: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0
+  };
+}
+
+function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, operadoresFiltrados = [] }) {
+  const summary = createDashboardSummary();
+  const operatorMap = new Map();
+  const warningOperatorTotals = new Map();
+  const warningTopMap = new Map();
+  const seriesMap = new Map();
+
+  for (const row of consumoRows) {
+    const operador = formatOperatorName(row.operador || "anon") || "Anon";
+    const tipo = normalizeSpaces(row.tipo || "");
+    const totalTokens = safeNumber(row.tokens);
+    const promptTokens = safeNumber(row.prompt_tokens);
+    const completionTokens = safeNumber(row.completion_tokens);
+    const requestOk = row.request_ok !== false;
+    const fecha = String(row.created_at || "").slice(0, 10) || range.from;
+
+    const cost = calculateEstimatedCost({
+      tipo,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens
+    });
+
+    summary.total_requests += 1;
+    if (requestOk) summary.ok_requests += 1;
+    else summary.error_requests += 1;
+
+    if (tipo.startsWith("IA")) summary.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) summary.trad_requests += 1;
+    if (tipo.endsWith("_CACHE")) summary.cache_hits += 1;
+    if (tipo.endsWith("_SHARED")) summary.shared_hits += 1;
+
+    summary.total_tokens += totalTokens;
+    summary.prompt_tokens += promptTokens;
+    summary.completion_tokens += completionTokens;
+    summary.estimated_cost_total += cost;
+
+    if (!operatorMap.has(operador)) {
+      operatorMap.set(operador, createOperatorStat(operador));
+    }
+
+    const op = operatorMap.get(operador);
+    op.requests_total += 1;
+    if (requestOk) op.ok_requests += 1;
+    else op.error_requests += 1;
+    if (tipo.startsWith("IA")) op.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) op.trad_requests += 1;
+    if (tipo.endsWith("_CACHE")) op.cache_hits += 1;
+    if (tipo.endsWith("_SHARED")) op.shared_hits += 1;
+    op.total_tokens += totalTokens;
+    op.prompt_tokens += promptTokens;
+    op.completion_tokens += completionTokens;
+    op.estimated_cost_total += cost;
+
+    if (!op.last_activity || String(row.created_at || "") > op.last_activity) {
+      op.last_activity = String(row.created_at || "");
+    }
+
+    if (!seriesMap.has(fecha)) {
+      seriesMap.set(fecha, createSerieDia(fecha));
+    }
+
+    const serie = seriesMap.get(fecha);
+    serie.requests_total += 1;
+    if (tipo.startsWith("IA")) serie.ia_requests += 1;
+    if (tipo.startsWith("TRAD")) serie.trad_requests += 1;
+    serie.total_tokens += totalTokens;
+    serie.prompt_tokens += promptTokens;
+    serie.completion_tokens += completionTokens;
+    serie.estimated_cost_total += cost;
+  }
+
+  for (const row of warningRows) {
+    const operador = formatOperatorName(row.operador || "anon") || "Anon";
+    const frase = normalizeSpaces(row.frase || "");
+    const cantidad = safeNumber(row.cantidad_total);
+    const fecha = String(row.fecha || "") || range.from;
+
+    summary.warnings_total += cantidad;
+
+    const pairKey = `${operador}||${normalizeText(frase)}`;
+    if (!warningTopMap.has(pairKey)) {
+      warningTopMap.set(pairKey, {
+        operador,
+        frase,
+        total_count: 0,
+        last_date: fecha
+      });
+    }
+
+    const top = warningTopMap.get(pairKey);
+    top.total_count += cantidad;
+    if (!top.last_date || fecha > top.last_date) {
+      top.last_date = fecha;
+    }
+
+    warningOperatorTotals.set(
+      operador,
+      safeNumber(warningOperatorTotals.get(operador)) + cantidad
+    );
+
+    if (!seriesMap.has(fecha)) {
+      seriesMap.set(fecha, createSerieDia(fecha));
+    }
+
+    const serie = seriesMap.get(fecha);
+    serie.warnings_total += cantidad;
+  }
+
+  summary.warnings_unique_pairs = warningTopMap.size;
+
+  for (const [operador, totalWarnings] of warningOperatorTotals.entries()) {
+    if (!operatorMap.has(operador)) {
+      operatorMap.set(operador, createOperatorStat(operador));
+    }
+
+    operatorMap.get(operador).warnings_total = totalWarnings;
+  }
+
+  summary.active_operators = operatorMap.size;
+  summary.estimated_cost_total = roundMoney(summary.estimated_cost_total);
+
+  const operatorStats = Array.from(operatorMap.values())
+    .map((op) => ({
+      ...op,
+      estimated_cost_total: roundMoney(op.estimated_cost_total)
+    }))
+    .sort((a, b) => {
+      if (b.estimated_cost_total !== a.estimated_cost_total) {
+        return b.estimated_cost_total - a.estimated_cost_total;
+      }
+
+      if (b.total_tokens !== a.total_tokens) {
+        return b.total_tokens - a.total_tokens;
+      }
+
+      return a.operador.localeCompare(b.operador);
+    });
+
+  const warningTop = Array.from(warningTopMap.values())
+    .sort((a, b) => {
+      if (b.total_count !== a.total_count) {
+        return b.total_count - a.total_count;
+      }
+      return a.operador.localeCompare(b.operador);
+    });
+
+  const series = Array.from(seriesMap.values())
+    .map((x) => ({
+      ...x,
+      estimated_cost_total: roundMoney(x.estimated_cost_total)
+    }))
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return {
+    generated_at: new Date().toISOString(),
+    range: {
+      from: range.from,
+      to: range.to
+    },
+    summary,
+    operator_stats: operatorStats,
+    warning_top: warningTop,
+    series,
+    operator_filter: operadoresFiltrados,
+    pricing: {
+      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
+      translate_model: OPENAI_MODEL_TRANSLATE,
+      suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
+      suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+      translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
+      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
+    }
+  };
+}
+
+/* =========================================================
+ * ADMIN / OPERATORS
+ * ======================================================= */
+
+function validateAdminOperatorName(name = "") {
+  const finalName = formatOperatorName(name);
+
+  if (!finalName) {
+    throw new Error("Escribe un nombre valido");
+  }
+
+  if (finalName.length < 3) {
+    throw new Error("El nombre del operador es demasiado corto");
+  }
+
+  if (finalName.length > 80) {
+    throw new Error("El nombre del operador es demasiado largo");
+  }
+
+  return finalName;
+}
+
+async function listOperatorsAdmin() {
+  const { data, error } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .order("nombre", { ascending: true });
+
+  if (error) {
+    throw new Error("No se pudo leer la lista de operadores");
+  }
+
+  return Array.isArray(data) ? data : [];
+}
+
+async function findOperatorByNameAdmin(name = "") {
+  const finalName = validateAdminOperatorName(name);
+
+  const { data, error } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .ilike("nombre", finalName)
+    .limit(10);
+
+  if (error) {
+    throw new Error("No se pudo buscar el operador");
+  }
+
+  return Array.isArray(data) && data.length ? data[0] : null;
+}
+
+function summarizeOperators(operators = []) {
+  const total = operators.length;
+  const activos = operators.filter((x) => Boolean(x.activo)).length;
+  const inactivos = total - activos;
+
+  return { total, activos, inactivos };
+}
+
+async function createOrReactivateOperatorAdmin(name = "") {
+  const finalName = validateAdminOperatorName(name);
+  const existing = await findOperatorByNameAdmin(finalName);
+
+  if (existing) {
+    const needsUpdate = !existing.activo || existing.nombre !== finalName;
+
+    if (!needsUpdate) {
+      return {
+        action: "exists",
+        operator: existing
+      };
+    }
+
+    deleteOperatorCache(existing.nombre);
+
+    const { data, error } = await supabase
+      .from("operadores")
+      .update({
+        nombre: finalName,
+        activo: true
+      })
+      .eq("id", existing.id)
+      .select("id, nombre, activo, created_at")
+      .single();
+
+    if (error || !data) {
+      throw new Error("No se pudo actualizar el operador");
+    }
+
+    return {
+      action: existing.activo ? "updated" : "reactivated",
+      operator: data
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("operadores")
+    .insert([
+      {
+        nombre: finalName,
+        activo: true
+      }
+    ])
+    .select("id, nombre, activo, created_at")
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "No se pudo crear el operador");
+  }
+
+  return {
+    action: "created",
+    operator: data
+  };
+}
+
+async function updateOperatorStatusAdmin(id = 0, activo = true) {
+  const operatorId = Math.max(0, Number.parseInt(id, 10) || 0);
+
+  if (!operatorId) {
+    throw new Error("ID de operador invalido");
+  }
+
+  const { data: existing, error: readError } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .eq("id", operatorId)
+    .single();
+
+  if (readError || !existing) {
+    throw new Error("Operador no encontrado");
+  }
+
+  deleteOperatorCache(existing.nombre);
+
+  const { data, error } = await supabase
+    .from("operadores")
+    .update({
+      activo: Boolean(activo)
+    })
+    .eq("id", operatorId)
+    .select("id, nombre, activo, created_at")
+    .single();
+
+  if (error || !data) {
+    throw new Error("No se pudo actualizar el operador");
+  }
+
+  if (data.activo) {
+    writeOperatorCache(data.nombre, data.nombre);
+  }
+
+  return data;
+}
+
+async function deleteOperatorAdmin(id = 0) {
+  const operatorId = Math.max(0, Number.parseInt(id, 10) || 0);
+
+  if (!operatorId) {
+    throw new Error("ID de operador invalido");
+  }
+
+  const { data: existing, error: readError } = await supabase
+    .from("operadores")
+    .select("id, nombre, activo, created_at")
+    .eq("id", operatorId)
+    .single();
+
+  if (readError || !existing) {
+    throw new Error("Operador no encontrado");
+  }
+
+  deleteOperatorCache(existing.nombre);
+
+  const { error } = await supabase
+    .from("operadores")
+    .delete()
+    .eq("id", operatorId);
+
+  if (error) {
+    throw new Error("No se pudo eliminar el operador");
+  }
+
+  return existing;
+}
+
+function parseBulkNames(raw = "") {
+  const names = String(raw ?? "")
+    .split(/\r?\n|,/)
+    .map((item) => formatOperatorName(item))
+    .filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+
+  for (const name of names) {
+    const key = normalizeText(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+
+  return out.slice(0, 300);
+}
+
+function parseOperatorFilter(raw = "") {
+  const names = String(raw ?? "")
+    .split(",")
+    .map((item) => formatOperatorName(item))
+    .filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+
+  for (const name of names) {
+    const key = normalizeText(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+
+  return out.slice(0, 100);
+}
+
+/* =========================================================
+ * HEALTH / ADMIN ASSETS
+ * ======================================================= */
+
+function getHealthPayload() {
+  return {
     ok: true,
-    service: "server unico prueba ia",
+    service: "server pro unico",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
+    admin: {
+      configured: adminConfigured(),
+      token_ttl_hours: ADMIN_TOKEN_TTL_HOURS
+    },
+    pricing: {
+      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
+      translate_model: OPENAI_MODEL_TRANSLATE,
+      suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
+      suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+      translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
+      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
+    },
     models: {
       sugerencias: OPENAI_MODEL_SUGGESTIONS,
       traduccion: OPENAI_MODEL_TRANSLATE
     },
-    config: {
-      suggestion_max_tokens: SUGGESTION_MAX_TOKENS,
-      suggestion_timeout_ms: OPENAI_TIMEOUT_SUGGESTIONS_MS,
-      translate_timeout_ms: OPENAI_TIMEOUT_TRANSLATE_MS
+    suggestion_config: {
+      max_tokens: SUGGESTION_MAX_TOKENS
     },
     queues: {
+      operator_suggestions: {
+        running: countOperatorSuggestionsRunning(),
+        waiting: countOperatorSuggestionsQueued(),
+        operators: operatorSuggestionQueues.size,
+        max_waiting_per_operator: PER_OPERATOR_SUGGESTION_QUEUE_LIMIT
+      },
       openai_suggestions: {
         active: suggestionsOpenAILimiter.activeCount,
-        waiting: suggestionsOpenAILimiter.queuedCount
+        waiting: suggestionsOpenAILimiter.queuedCount,
+        max_concurrent: SUGGESTION_OPENAI_CONCURRENCY
       },
       openai_translate: {
         active: translationOpenAILimiter.activeCount,
-        waiting: translationOpenAILimiter.queuedCount
-      },
-      operator_suggestions: {
-        operators: operatorSuggestionQueues.size
+        waiting: translationOpenAILimiter.queuedCount,
+        max_concurrent: TRANSLATION_OPENAI_CONCURRENCY
       }
     },
     stats: runtimeStats
+  };
+}
+
+function getAdminHtmlPath() {
+  return path.join(__dirname, "admin.html");
+}
+
+function getAdminJsPath() {
+  return path.join(__dirname, "admin.js");
+}
+
+function sendAdminHtml(req, res) {
+  const filePath = getAdminHtmlPath();
+
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+
+  return res.status(200).type("html").send(`
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Admin</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#07111d; color:#fff; padding:40px; }
+    .box { max-width:760px; margin:auto; background:#0f172a; border:1px solid rgba(255,255,255,.08); padding:24px; border-radius:18px; }
+    h1 { margin-top:0; }
+    code { background:rgba(255,255,255,.08); padding:2px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Admin disponible</h1>
+    <p>El backend ya expone <code>/admin-api/*</code>, pero no encontró el archivo <code>admin.html</code> en Railway.</p>
+    <p>Sube de nuevo tus archivos <code>admin.html</code> y <code>admin.js</code> para recuperar el panel visual completo.</p>
+  </div>
+</body>
+</html>
+  `);
+}
+
+function sendAdminJs(req, res) {
+  const filePath = getAdminJsPath();
+
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+
+  return res
+    .status(200)
+    .type("application/javascript")
+    .send(`console.warn("No se encontro admin.js en Railway");`);
+}
+
+/* =========================================================
+ * ROUTES
+ * ======================================================= */
+
+app.get("/", (_req, res) => {
+  return res.redirect("/admin");
+});
+
+app.get("/health", (_req, res) => {
+  return res.json(getHealthPayload());
+});
+
+app.get("/admin", sendAdminHtml);
+app.get("/admin.js", sendAdminJs);
+
+/* =========================
+ * ADMIN API
+ * ======================= */
+
+app.post("/admin-api/login", async (req, res) => {
+  runtimeStats.admin.loginTotal += 1;
+
+  try {
+    if (!adminConfigured()) {
+      runtimeStats.admin.loginError += 1;
+      return res.status(503).json({
+        ok: false,
+        error: "Configura ADMIN_USER, ADMIN_PASSWORD y ADMIN_TOKEN_SECRET"
+      });
+    }
+
+    const { usuario = "", password = "" } = req.body || {};
+    const rateKey = getAdminRateKey(req, usuario);
+
+    if (isAdminLoginBlocked(rateKey)) {
+      runtimeStats.admin.loginError += 1;
+      return res.status(429).json({
+        ok: false,
+        error: "Demasiados intentos. Vuelve a intentarlo mas tarde"
+      });
+    }
+
+    if (!adminCredentialsValid(usuario, password)) {
+      registerAdminAttempt(rateKey, false);
+      runtimeStats.admin.loginError += 1;
+
+      return res.status(401).json({
+        ok: false,
+        error: "Credenciales admin invalidas"
+      });
+    }
+
+    registerAdminAttempt(rateKey, true);
+    runtimeStats.admin.loginOk += 1;
+
+    const user = String(usuario || "").trim() || "admin";
+
+    return res.json({
+      ok: true,
+      token: createAdminToken(user),
+      user,
+      operator_shared_key: OPERATOR_SHARED_KEY
+    });
+  } catch (err) {
+    runtimeStats.admin.loginError += 1;
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo iniciar sesion admin"
+    });
+  }
+});
+
+app.get("/admin-api/session", authorizeAdmin, async (req, res) => {
+  return res.json({
+    ok: true,
+    user: req.adminAuth?.sub || "admin",
+    operator_shared_key: OPERATOR_SHARED_KEY
   });
 });
+
+app.get("/admin-api/operators", authorizeAdmin, async (_req, res) => {
+  try {
+    runtimeStats.admin.operatorList += 1;
+
+    const operators = await listOperatorsAdmin();
+    const summary = summarizeOperators(operators);
+
+    return res.json({
+      ok: true,
+      operators,
+      summary
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo cargar la lista de operadores"
+    });
+  }
+});
+
+app.post("/admin-api/operators", authorizeAdmin, async (req, res) => {
+  try {
+    const { nombre = "" } = req.body || {};
+    const result = await createOrReactivateOperatorAdmin(nombre);
+
+    if (result.action === "created") runtimeStats.admin.operatorCreate += 1;
+    if (result.action === "updated" || result.action === "reactivated") {
+      runtimeStats.admin.operatorUpdate += 1;
+    }
+
+    return res.json({
+      ok: true,
+      action: result.action,
+      operator: result.operator
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo guardar el operador"
+    });
+  }
+});
+
+app.post("/admin-api/operators/bulk", authorizeAdmin, async (req, res) => {
+  try {
+    const { texto = "" } = req.body || {};
+    const names = parseBulkNames(texto);
+
+    if (!names.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "No se detectaron nombres validos"
+      });
+    }
+
+    const result = {
+      created: [],
+      reactivated: [],
+      updated: [],
+      existing: [],
+      errors: []
+    };
+
+    for (const name of names) {
+      try {
+        const item = await createOrReactivateOperatorAdmin(name);
+
+        if (item.action === "created") result.created.push(item.operator);
+        if (item.action === "reactivated") result.reactivated.push(item.operator);
+        if (item.action === "updated") result.updated.push(item.operator);
+        if (item.action === "exists") result.existing.push(item.operator);
+      } catch (err) {
+        result.errors.push({
+          nombre: name,
+          error: err.message || "Error procesando operador"
+        });
+      }
+    }
+
+    runtimeStats.admin.operatorCreate += result.created.length;
+    runtimeStats.admin.operatorUpdate += result.reactivated.length + result.updated.length;
+
+    const operators = await listOperatorsAdmin();
+    const summary = summarizeOperators(operators);
+
+    return res.json({
+      ok: true,
+      result,
+      operators,
+      summary
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo procesar el alta masiva"
+    });
+  }
+});
+
+app.patch("/admin-api/operators/:id/status", authorizeAdmin, async (req, res) => {
+  try {
+    const activo = req.body?.activo === true || String(req.body?.activo) === "true";
+    const operator = await updateOperatorStatusAdmin(req.params.id, activo);
+
+    runtimeStats.admin.operatorUpdate += 1;
+
+    return res.json({
+      ok: true,
+      operator
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo actualizar el estado del operador"
+    });
+  }
+});
+
+app.delete("/admin-api/operators/:id", authorizeAdmin, async (req, res) => {
+  try {
+    const deleted = await deleteOperatorAdmin(req.params.id);
+    runtimeStats.admin.operatorDelete += 1;
+
+    return res.json({
+      ok: true,
+      deleted
+    });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: err.message || "No se pudo eliminar el operador"
+    });
+  }
+});
+
+app.get("/admin-api/dashboard", authorizeAdmin, async (req, res) => {
+  try {
+    runtimeStats.admin.dashboardLoads += 1;
+
+    const range = buildDateRange(
+      req.query?.from || "",
+      req.query?.to || ""
+    );
+
+    const operadoresFiltrados = parseOperatorFilter(req.query?.operadores || "");
+
+    const [consumoRows, warningRows] = await Promise.all([
+      loadConsumptionRange(range, operadoresFiltrados),
+      loadWarningsRange(range, operadoresFiltrados)
+    ]);
+
+    const dashboard = buildDashboardAnalytics({
+      consumoRows,
+      warningRows,
+      range,
+      operadoresFiltrados
+    });
+
+    return res.json({
+      ok: true,
+      ...dashboard
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "No se pudo cargar el dashboard"
+    });
+  }
+});
+
+/* =========================
+ * OPERATOR API
+ * ======================= */
 
 app.post("/login", authorizeOperator, async (req, res) => {
   return res.json({
@@ -2285,6 +3618,10 @@ app.post("/traducir", authorizeOperator, async (req, res) => {
   }
 });
 
+/* =========================================================
+ * FALLBACKS / ERRORS
+ * ======================================================= */
+
 app.use((err, _req, res, _next) => {
   console.error("Error no controlado:", err);
   if (res.headersSent) return;
@@ -2292,7 +3629,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server unico prueba IA activo en puerto ${PORT}`);
+  console.log(`Server unico completo activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
   console.log(`SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
 });
