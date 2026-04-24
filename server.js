@@ -256,20 +256,27 @@ const OPENAI_TIMEOUT_SUGGESTIONS_MS = readIntEnv(
 
 const OPENAI_TIMEOUT_TRANSLATE_MS = readIntEnv(
   "OPENAI_TIMEOUT_TRANSLATE_MS",
-  10000,
+  18000,
   4000,
-  30000
+  45000
 );
 
 const SUGGESTION_MAX_TOKENS = readIntEnv(
   "SUGGESTION_MAX_TOKENS",
   580,
   300,
-  1200
+  1400
 );
 
-const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 10, 4, 18);
-const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 80, 20, 180);
+const MAIL_MAX_TOKENS = readIntEnv(
+  "MAIL_MAX_TOKENS",
+  900,
+  400,
+  1800
+);
+
+const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 18, 4, 36);
+const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 80, 20, 220);
 
 const OPERATOR_SHARED_KEY = String(process.env.OPERATOR_SHARED_KEY || "2026");
 
@@ -312,7 +319,7 @@ const TRANSLATION_CACHE_TTL_MS = readIntEnv(
 
 const TRANSLATION_CACHE_LIMIT = readIntEnv(
   "TRANSLATION_CACHE_LIMIT",
-  500,
+  900,
   50,
   5000
 );
@@ -415,14 +422,20 @@ const TRANSLATE_OUTPUT_COST_PER_1M = readFloatEnv(
   100000
 );
 
-const TARGET_SUGGESTION_SPECS = [
+const CHAT_TARGET_SPECS = [
   { min: 150, max: 200, ideal: 175 },
   { min: 200, max: 300, ideal: 245 },
   { min: 250, max: 400, ideal: 320 }
 ];
 
+const MAIL_TARGET_SPECS = [
+  { min: 260, max: 420, ideal: 340 },
+  { min: 380, max: 620, ideal: 500 },
+  { min: 520, max: 850, ideal: 680 }
+];
+
 const SUGGESTION_MEMORY_TTL_MS = 20 * 60 * 1000;
-const SUGGESTION_MEMORY_LIMIT = 700;
+const SUGGESTION_MEMORY_LIMIT = 900;
 
 if (!OPENAI_API_KEY) {
   console.error("Falta OPENAI_API_KEY");
@@ -460,6 +473,9 @@ const runtimeStats = {
     total: 0,
     ok: 0,
     error: 0,
+    enganche: 0,
+    contexto: 0,
+    mail: 0,
     inflightHits: 0,
     secondPasses: 0,
     fallbackOnly: 0,
@@ -524,11 +540,12 @@ app.use((err, _req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
     return res.status(400).json({ ok: false, error: "JSON invalido" });
   }
+
   return next(err);
 });
 
 /* =========================================================
- * OPERATOR AUTH
+ * AUTH OPERADOR
  * ======================================================= */
 
 function formatOperatorName(name = "") {
@@ -619,7 +636,7 @@ async function authorizeOperator(req, res, next) {
 }
 
 /* =========================================================
- * ADMIN AUTH
+ * AUTH ADMIN
  * ======================================================= */
 
 function adminConfigured() {
@@ -778,7 +795,7 @@ function authorizeAdmin(req, res, next) {
 }
 
 /* =========================================================
- * QUEUES / LIMITERS
+ * QUEUES
  * ======================================================= */
 
 class ConcurrencyLimiter {
@@ -843,9 +860,7 @@ class ConcurrencyLimiter {
           if (job.started) return;
 
           const idx = this.queue.indexOf(job);
-          if (idx >= 0) {
-            this.queue.splice(idx, 1);
-          }
+          if (idx >= 0) this.queue.splice(idx, 1);
 
           reject(new Error(`Servidor ocupado. Tiempo de espera agotado en ${this.name}`));
         }, this.waitTimeoutMs);
@@ -1089,6 +1104,7 @@ async function callOpenAI({
   });
 }
 
+/* ===== FIN PARTE 1/3 ===== */
 /* =========================================================
  * SUGGESTION ENGINE
  * ======================================================= */
@@ -1173,7 +1189,10 @@ function normalizeChatSignals(raw = {}) {
     hay_operador_visible: Boolean(raw?.hay_operador_visible),
     solo_operador_visible: Boolean(raw?.solo_operador_visible),
     total_clienta_visible: Number(raw?.total_clienta_visible || 0),
-    total_operador_visible: Number(raw?.total_operador_visible || 0)
+    total_operador_visible: Number(raw?.total_operador_visible || 0),
+    modo_manual: String(raw?.modo_manual || "").trim(),
+    usar_perfil: Boolean(raw?.usar_perfil),
+    usar_chat: Boolean(raw?.usar_chat)
   };
 }
 
@@ -1201,9 +1220,9 @@ function parseContextLines(context = "") {
     });
 }
 
-function formatContextLines(lines = []) {
+function formatContextLines(lines = [], limit = MAX_CONTEXT_LINES) {
   return lines
-    .slice(-MAX_CONTEXT_LINES)
+    .slice(-limit)
     .map((line) => {
       if (line.role === "clienta") return `CLIENTA: ${line.text}`;
       if (line.role === "operador") return `OPERADOR: ${line.text}`;
@@ -1241,6 +1260,7 @@ function isBadProfileValue(value = "") {
     "datos_clienta",
     "profile_anchors",
     "raw_profile",
+    "about",
     "about me",
     "bio",
     "interested in",
@@ -1281,6 +1301,7 @@ function sanitizeClientName(name = "") {
 
   if (!clean) return "";
   if (n === "me") return "";
+  if (n === "about") return "";
   if (n.startsWith("about ")) return "";
   if (/\d/.test(clean)) return "";
   if (clean.length < 2 || clean.length > 40) return "";
@@ -1379,70 +1400,6 @@ function pickProfileDetail(perfil = {}, text = "") {
   return { type: "none", value: "", priority: 0 };
 }
 
-function inferContactType(chatSignals = {}, contextLines = []) {
-  const hasDialog = contextLines.some(
-    (x) => x.role === "clienta" || x.role === "operador"
-  );
-
-  if (
-    hasDialog ||
-    chatSignals.total_clienta_visible > 0 ||
-    chatSignals.total_operador_visible > 0
-  ) {
-    return "viejo";
-  }
-
-  return "nuevo";
-}
-
-function getLastDialogRole(contextLines = []) {
-  const line = [...contextLines].reverse().find(
-    (x) => x.role === "clienta" || x.role === "operador"
-  );
-  return line?.role || "";
-}
-
-function detectMode({ textoPlano = "", clientePlano = "", contextLines = [], chatSignals = {} }) {
-  const clientCount = contextLines.filter((x) => x.role === "clienta").length;
-  const operatorCount = contextLines.filter((x) => x.role === "operador").length;
-  const lastDialogRole = getLastDialogRole(contextLines);
-
-  if (clientCount === 0 && operatorCount > 0) {
-    return "APERTURA_SIN_RESPUESTA";
-  }
-
-  if (
-    (chatSignals.total_clienta_visible || 0) === 0 &&
-    (chatSignals.total_operador_visible || 0) > 0
-  ) {
-    return "APERTURA_SIN_RESPUESTA";
-  }
-
-  if (
-    (chatSignals.ultimo_role_visible === "clienta" && chatSignals.hay_clienta_visible) ||
-    (clientePlano && lastDialogRole === "clienta")
-  ) {
-    return "RESPUESTA_CHAT";
-  }
-
-  if (
-    chatSignals.solo_operador_visible ||
-    chatSignals.ultimo_role_visible === "operador"
-  ) {
-    return "REAPERTURA_SUAVE";
-  }
-
-  if (
-    /\b(sigues ahi|no respondes|desapareciste|me dejaste en visto|retomar|retomo)\b/.test(
-      normalizeText(textoPlano)
-    )
-  ) {
-    return "REAPERTURA_SUAVE";
-  }
-
-  return contextLines.length ? "REAPERTURA_SUAVE" : "APERTURA_FRIA";
-}
-
 function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" }) {
   const text = normalizeText(
     [textoPlano, clientePlano, contextoPlano].filter(Boolean).join("\n")
@@ -1459,29 +1416,34 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
 
   const hasContactWords = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|facebook|tiktok|twitter|numero|telefono|phone|mail|email|correo)\b/.test(text);
   const hasOffAppWords = /\b(fuera de la app|por otra app|otra app|outside the app|text me|call me|add me|escribeme|pasame|pasa tu|dame tu|te dejo mi|my number|mi numero|mi telefono)\b/.test(text);
+
   if (hasContactWords || hasOffAppWords) {
     pushRisk(RISK_CATALOG.contacto_externo);
   }
 
   const hasPaymentWords = /\b(gratis|gratuito|free|premium|suscripcion|subscription|tokens|coins|credits|billing|pago|pagar|pay|cuesta|cobra|cobran)\b/.test(text);
-  const hasPlatformWords = /\b(plataforma|platform|app|cuenta|account|usuario|user)\b/.test(text);
+  const hasPlatformWords = /\b(plataforma|platform|app|cuenta|account|usuario|user|site|sitio)\b/.test(text);
+
   if (hasPaymentWords && hasPlatformWords) {
     pushRisk(RISK_CATALOG.pregunta_pago_plataforma);
   }
 
   const hasSocialWords = /\b(instagram|insta|facebook|tiktok|snapchat|snap|twitter|redes sociales|social media)\b/.test(text);
   const hasFoundWords = /\b(encontre|vi|found|i found|te vi|saw|tu perfil|your profile|outside|afuera)\b/.test(text);
+
   if (hasSocialWords && hasFoundWords) {
     pushRisk(RISK_CATALOG.redes_externas);
   }
 
-  const hasRhythmWords = /\b(no puedo seguir el ritmo|no puedo mantener el ritmo|cant keep up|cannot keep up|too fast|demasiado rapido|mucha intensidad|me abruma|me supera|no tengo tiempo|sin tiempo|busy|ocupad[oa]|hablamos luego|talk later)\b/.test(text);
+  const hasRhythmWords = /\b(no puedo seguir el ritmo|no puedo mantener el ritmo|cant keep up|cannot keep up|too fast|demasiado rapido|mucha intensidad|me abruma|me supera|no tengo tiempo|sin tiempo|busy|ocupad[oa]|hablamos luego|talk later|leave|leaving|abandon|abandonar|site|sitio)\b/.test(text);
   const hasLeaveContactWords = /\b(te dejo mi|mi numero|mi telefono|whatsapp|telegram|email|correo)\b/.test(text);
+
   if (hasRhythmWords || (hasLeaveContactWords && /\b(no puedo|sin tiempo|ocupad[oa]|busy|ritmo)\b/.test(text))) {
     pushRisk(RISK_CATALOG.abandono_ritmo_contacto);
   }
 
   const hasDistrustWords = /\b(fake|falso|falsa|real|eres real|scam|estafa|bot|catfish)\b/.test(text);
+
   if (hasDistrustWords) {
     pushRisk(RISK_CATALOG.desconfianza_realidad);
   }
@@ -1499,73 +1461,34 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
   };
 }
 
-function detectIntent(caso = {}) {
-  if (caso.risk?.primary?.key === "pregunta_pago_plataforma") {
-    return "ACLARAR_Y_REDIRECCIONAR";
-  }
+function normalizeMode(inputMode = "", pageType = "chat") {
+  const mode = normalizeText(inputMode);
 
-  if (
-    caso.risk?.primary?.key === "contacto_externo" ||
-    caso.risk?.primary?.key === "redes_externas"
-  ) {
-    return "CONTENER_Y_MANTENER_AQUI";
-  }
+  if (pageType === "mail") return "mail";
+  if (mode.includes("enganche")) return "enganche";
+  if (mode.includes("contexto") || mode.includes("correccion")) return "contexto_correccion";
 
-  if (caso.risk?.primary?.key === "abandono_ritmo_contacto") {
-    return "RETENER_SIN_PRESION";
-  }
-
-  if (caso.risk?.primary?.key === "desconfianza_realidad") {
-    return "DAR_CONFIANZA";
-  }
-
-  if (caso.mode === "APERTURA_FRIA") return "ENGANCHAR";
-  if (caso.mode === "APERTURA_SIN_RESPUESTA") return "ABRIR_CON_PERFIL";
-  if (caso.mode === "REAPERTURA_SUAVE") return "REENGANCHAR";
-
-  return "MANTENER_CONVERSACION";
+  return "contexto_correccion";
 }
 
-function detectObjective(caso = {}) {
-  switch (caso.intent) {
-    case "ACLARAR_Y_REDIRECCIONAR":
-      return "Aclarar sin inventar politicas ni pagos y mantener viva la conversacion dentro del chat";
-    case "CONTENER_Y_MANTENER_AQUI":
-      return "Redirigir con naturalidad para seguir aqui sin sonar cortante";
-    case "RETENER_SIN_PRESION":
-      return "Bajar intensidad, validar el ritmo y evitar que la conversacion se caiga";
-    case "DAR_CONFIANZA":
-      return "Reducir desconfianza con una respuesta clara, humana y nada defensiva";
-    case "ABRIR_CON_PERFIL":
-      return "Abrir conversacion desde datos reales del perfil sin fingir confianza previa";
-    case "ENGANCHAR":
-      return "Abrir con curiosidad concreta usando perfil o contexto real";
-    case "REENGANCHAR":
-      return "Reabrir sin reclamo usando perfil o un dato real para dar motivo de respuesta";
-    default:
-      return "Responder lo ultimo de ella y avanzar con un gancho claro";
-  }
+function getTargetSpecs(caso = {}) {
+  return caso.pageType === "mail" ? MAIL_TARGET_SPECS : CHAT_TARGET_SPECS;
 }
 
-function detectTone(caso = {}) {
-  switch (caso.risk?.primary?.key) {
-    case "pregunta_pago_plataforma":
-      return "claro, prudente y natural";
-    case "contacto_externo":
-    case "redes_externas":
-      return "calido, firme y relajado";
-    case "abandono_ritmo_contacto":
-      return "tranquilo, empatico y sin presion";
-    case "desconfianza_realidad":
-      return "claro, sereno y humano";
-    default:
-      break;
-  }
+function getMaxTokensForCase(caso = {}) {
+  return caso.pageType === "mail" ? MAIL_MAX_TOKENS : SUGGESTION_MAX_TOKENS;
+}
 
-  if (caso.mode === "APERTURA_FRIA") return "ligero, curioso y humano";
-  if (caso.mode === "APERTURA_SIN_RESPUESTA") return "natural, respetuoso y basado en perfil";
-  if (caso.mode === "REAPERTURA_SUAVE") return "suave, relajado y sin reclamo";
-  return "natural, calido y util";
+function getOutputType(caso = {}) {
+  if (caso.pageType === "mail") return "IA_MAIL";
+  if (caso.modoAyuda === "enganche") return "IA_ENGANCHE";
+  return "IA_CONTEXTO";
+}
+
+function inferContactType(caso = {}) {
+  if (caso.pageType === "mail") return "mail";
+  if (caso.modoAyuda === "enganche") return "nuevo_o_sin_respuesta";
+  return "conversacion";
 }
 
 function extractKeywordSignals(text = "") {
@@ -1631,7 +1554,10 @@ function addressesClientDirectly(text = "", caso = {}) {
   const name = normalizeText(caso.perfil?.nombreClienta || "");
 
   if (name && n.startsWith(`${name},`)) return true;
-  if (/\b(vi que|me llamo la atencion|me dio curiosidad|note que|entiendo que|imagino que|me gusta que)\b/.test(n)) return true;
+
+  if (/\b(vi que|me llamo la atencion|me dio curiosidad|note que|entiendo que|imagino que|me gusta que|lei que|lei en tu perfil)\b/.test(n)) {
+    return true;
+  }
 
   return false;
 }
@@ -1639,7 +1565,8 @@ function addressesClientDirectly(text = "", caso = {}) {
 function getSuggestionMemoryKey(caso = {}) {
   return [
     normalizeText(caso.operador || "anon").slice(0, 80),
-    normalizeText(caso.mode || "x"),
+    normalizeText(caso.pageType || "chat"),
+    normalizeText(caso.modoAyuda || "contexto"),
     normalizeText(caso.textoPlano || "").slice(0, 220),
     normalizeText(caso.clientePlano || "").slice(0, 180),
     normalizeText(caso.contextoPlano || "").slice(-260),
@@ -1665,6 +1592,7 @@ function pruneSuggestionMemory() {
 
 function readRecentSuggestions(memoryKey = "") {
   pruneSuggestionMemory();
+
   const entry = recentSuggestionMemory.get(memoryKey);
   if (!entry) return [];
 
@@ -1680,6 +1608,7 @@ function writeRecentSuggestions(memoryKey = "", values = []) {
   if (!memoryKey || !values.length) return;
 
   pruneSuggestionMemory();
+
   recentSuggestionMemory.set(memoryKey, {
     values: values.slice(0, 9),
     expiresAt: Date.now() + SUGGESTION_MEMORY_TTL_MS
@@ -1748,6 +1677,7 @@ function looksTooSimilar(a = "", b = "") {
 
   const setA = new Set(na.split(/\s+/).filter(Boolean));
   const wordsB = nb.split(/\s+/).filter(Boolean);
+
   if (!wordsB.length) return false;
 
   const overlap = wordsB.filter((w) => setA.has(w)).length;
@@ -1757,21 +1687,25 @@ function looksTooSimilar(a = "", b = "") {
 function isSuggestionForbidden(suggestion = "", caso = {}) {
   const s = cleanSuggestion(suggestion);
   const n = normalizeText(s);
+  const minLength = caso.pageType === "mail" ? 160 : MIN_RESPONSE_LENGTH;
 
   if (!s) return true;
-  if (countChars(s) < MIN_RESPONSE_LENGTH) return true;
-  if (countQuestions(s) > 1) return true;
+  if (countChars(s) < minLength) return true;
+  if (caso.pageType !== "mail" && countQuestions(s) > 1) return true;
   if (INTERNAL_LABEL_REGEX.test(s)) return true;
   if (DISALLOWED_CONTACT_REGEX.test(n)) return true;
   if (DISALLOWED_MEET_REGEX.test(n)) return true;
   if (META_REGEX.test(n)) return true;
-  if (talksAboutClientInThirdPerson(s, caso)) return true;
 
-  if (caso.mode === "APERTURA_SIN_RESPUESTA" && FALSE_FAMILIARITY_REGEX.test(n)) {
-    return true;
-  }
+  if (caso.modoAyuda === "enganche" && talksAboutClientInThirdPerson(s, caso)) return true;
+  if (caso.modoAyuda === "enganche" && FALSE_FAMILIARITY_REGEX.test(n)) return true;
 
-  if (caso.mode !== "APERTURA_FRIA" && EMPTY_GENERIC_START_REGEX.test(n) && countChars(s) < 130) {
+  if (
+    caso.modoAyuda === "contexto_correccion" &&
+    caso.chatSignals?.hay_clienta_visible &&
+    /^hola\b|^hey\b|^buenas\b/i.test(n) &&
+    countChars(s) < 160
+  ) {
     return true;
   }
 
@@ -1784,12 +1718,13 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   const s = cleanSuggestion(suggestion);
   const n = normalizeText(s);
   const length = countChars(s);
-  const spec = TARGET_SUGGESTION_SPECS[Math.min(index, TARGET_SUGGESTION_SPECS.length - 1)];
+  const specs = getTargetSpecs(caso);
+  const spec = specs[Math.min(index, specs.length - 1)];
 
   let score = 0;
 
   score += scoreLength(length, spec) * 0.34;
-  score += countQuestions(s) <= 1 ? 0.08 : -0.15;
+  score += countQuestions(s) <= (caso.pageType === "mail" ? 3 : 1) ? 0.08 : -0.15;
 
   const overlapClient = keywordOverlap(s, caso.clientKeywords || []);
   const overlapDraft = keywordOverlap(s, caso.draftKeywords || []);
@@ -1798,20 +1733,17 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   const overlapThemes = keywordOverlap(s, caso.activeThemes || []);
   const overlapProfile = keywordOverlap(s, caso.profileKeywords || []);
 
-  if (caso.mode === "RESPUESTA_CHAT") {
-    score += overlapClient > 0 ? 0.16 : -0.08;
-    score += overlapOperator > 0 ? 0.07 : 0;
+  if (caso.pageType === "mail") {
+    score += overlapClient > 0 ? 0.12 : 0;
+    score += overlapDraft > 0 ? 0.12 : 0;
+    score += length >= spec.min ? 0.08 : -0.05;
+  } else if (caso.modoAyuda === "enganche") {
+    score += caso.profileAvailable && overlapProfile > 0 ? 0.24 : -0.12;
+    score += addressesClientDirectly(s, caso) ? 0.08 : -0.04;
   } else {
-    score += (overlapDraft > 0 || overlapDetail > 0 || overlapOperator > 0) ? 0.10 : 0;
-  }
-
-  if (caso.profileAvailable) {
-    score += overlapProfile > 0 ? 0.22 : -0.10;
-    score += addressesClientDirectly(s, caso) ? 0.08 : -0.05;
-  }
-
-  if (caso.mode === "APERTURA_SIN_RESPUESTA") {
-    score += FALSE_FAMILIARITY_REGEX.test(n) ? -0.40 : 0.08;
+    score += overlapClient > 0 ? 0.18 : 0;
+    score += overlapDraft > 0 ? 0.10 : 0;
+    score += overlapOperator > 0 ? 0.06 : 0;
   }
 
   if (overlapThemes > 0) score += 0.07;
@@ -1819,7 +1751,7 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
 
   if (EMPTY_MIRROR_REGEX.test(n)) score -= 0.18;
   if (ONE_WORD_MIRROR_REGEX.test(n)) score -= 0.20;
-  if (EMPTY_GENERIC_START_REGEX.test(n) && caso.mode !== "APERTURA_FRIA") score -= 0.10;
+  if (EMPTY_GENERIC_START_REGEX.test(n) && caso.modoAyuda !== "enganche" && caso.pageType !== "mail") score -= 0.10;
 
   if (
     ["contacto_externo", "redes_externas"].includes(caso.risk?.primary?.key) &&
@@ -1830,30 +1762,19 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
 
   if (
     caso.risk?.primary?.key === "abandono_ritmo_contacto" &&
-    /\b(con calma|sin presion|a tu ritmo|tranqui)\b/.test(n)
+    /\b(con calma|sin presion|a tu ritmo|tranqui|sin correr)\b/.test(n)
   ) {
     score += 0.12;
   }
 
   if (
     caso.risk?.primary?.key === "desconfianza_realidad" &&
-    /\b(real|claro|natural)\b/.test(n)
+    /\b(real|claro|natural|honesto|honesta)\b/.test(n)
   ) {
     score += 0.08;
   }
 
-  if (
-    caso.risk?.primary?.key === "pregunta_pago_plataforma" &&
-    /\b(prefiero no inventar|no quiero inventarte|sin inventar)\b/.test(n)
-  ) {
-    score += 0.10;
-  }
-
   if (caso.affectionLoadHigh && countEndearments(s) >= 2) {
-    score -= 0.08;
-  }
-
-  if (caso.mode === "RESPUESTA_CHAT" && caso.lastClientIsQuestion && overlapClient === 0) {
     score -= 0.08;
   }
 
@@ -1875,7 +1796,9 @@ function mapOptionsToCandidates(options = [], source = "", caso = {}) {
     .filter((item) => item.text && item.score > 0);
 }
 
-function selectFinalCandidates(pool = []) {
+function selectFinalCandidates(pool = [], caso = {}) {
+  const specs = getTargetSpecs(caso);
+
   const ranked = [...pool].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (b.length !== a.length) return b.length - a.length;
@@ -1884,8 +1807,8 @@ function selectFinalCandidates(pool = []) {
 
   const selected = [];
 
-  for (let slot = 0; slot < TARGET_SUGGESTION_SPECS.length; slot += 1) {
-    const spec = TARGET_SUGGESTION_SPECS[slot];
+  for (let slot = 0; slot < specs.length; slot += 1) {
+    const spec = specs[slot];
 
     let candidate = ranked.find((item) => {
       if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
@@ -1895,7 +1818,7 @@ function selectFinalCandidates(pool = []) {
     if (!candidate) {
       candidate = ranked.find((item) => {
         if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
-        return item.length >= Math.round(spec.min * 0.75) && item.length <= Math.round(spec.max * 1.2);
+        return item.length >= Math.round(spec.min * 0.72) && item.length <= Math.round(spec.max * 1.22);
       });
     }
 
@@ -1913,19 +1836,21 @@ function selectFinalCandidates(pool = []) {
   return selected.slice(0, 3);
 }
 
-function isWeakResult(candidates = [], selected = []) {
+function isWeakResult(candidates = [], selected = [], caso = {}) {
   if (selected.length < 3) return true;
 
   const avg = selected.reduce((sum, item) => sum + item.score, 0) / selected.length;
-  if (avg < 0.58) return true;
+
+  if (avg < 0.56) return true;
+
+  const specs = getTargetSpecs(caso);
 
   for (let i = 0; i < selected.length; i += 1) {
-    const spec = TARGET_SUGGESTION_SPECS[i];
+    const spec = specs[i];
     const item = selected[i];
-    if (!item) return true;
 
-    if (item.length < Math.round(spec.min * 0.75)) return true;
-    if (i === 2 && item.length < 230) return true;
+    if (!item) return true;
+    if (item.length < Math.round(spec.min * 0.72)) return true;
   }
 
   return false;
@@ -1947,11 +1872,22 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
   }
 
   if (
+    caso.modoAyuda === "enganche" &&
     caso.profileAvailable &&
     candidates.length &&
     candidates.every((item) => keywordOverlap(item.text, caso.profileKeywords || []) === 0)
   ) {
-    notes.push("- Falta usar datos reales del perfil. Cada opcion debe apoyarse en 1 o 2 datos del perfil si estan disponibles.");
+    notes.push("- Falta usar datos reales del perfil. Cada opcion debe apoyarse en 1 o 2 datos del perfil.");
+  }
+
+  if (
+    caso.modoAyuda === "contexto_correccion" &&
+    caso.pageType !== "mail" &&
+    caso.chatSignals?.hay_clienta_visible &&
+    candidates.length &&
+    candidates.every((item) => keywordOverlap(item.text, caso.clientKeywords || []) === 0)
+  ) {
+    notes.push("- Falta responder al contexto real y a lo ultimo de la clienta.");
   }
 
   if (
@@ -1969,128 +1905,84 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
   }
 
   if (
-    caso.mode === "APERTURA_SIN_RESPUESTA" &&
+    caso.modoAyuda === "enganche" &&
     candidates.length &&
     candidates.some((item) => FALSE_FAMILIARITY_REGEX.test(normalizeText(item.text)))
   ) {
     notes.push("- No finjas confianza previa. No digas 'nuestras conversaciones', 'me acorde de ti' ni 'lo que hablamos'.");
   }
 
-  if (
-    caso.mode === "RESPUESTA_CHAT" &&
-    candidates.length &&
-    candidates.every((item) => keywordOverlap(item.text, caso.clientKeywords || []) === 0)
-  ) {
-    notes.push("- Falta alusion real a lo ultimo de la clienta.");
-  }
-
-  if (
-    candidates.length &&
-    candidates.some((item) => ONE_WORD_MIRROR_REGEX.test(normalizeText(item.text)))
-  ) {
-    notes.push("- Evita formulas tipo 'eso que dijiste sobre X' o 'ahi en lo de X'.");
-  }
-
   if (!notes.length) {
     notes.push("- Hazlas mas especificas, mas utiles y menos genericas.");
   }
 
-  notes.push("- Recuerda: opcion 1 de 150 a 200 caracteres, opcion 2 de 200 a 300, opcion 3 de 250 a 400.");
+  if (caso.pageType === "mail") {
+    notes.push("- En mail, entrega versiones de carta corregidas, naturales y mas completas.");
+  } else {
+    notes.push("- Recuerda: opcion 1 de 150 a 200 caracteres, opcion 2 de 200 a 300, opcion 3 de 250 a 400.");
+  }
 
   return notes.join("\n");
 }
 
-function buildSpecText() {
-  return TARGET_SUGGESTION_SPECS
+function buildSpecText(caso = {}) {
+  return getTargetSpecs(caso)
     .map((spec, index) => `${index + 1}. ${spec.min}-${spec.max} caracteres`)
     .join("\n");
 }
 
-function buildSystemPrompt(caso = {}) {
+/* =========================================================
+ * PROMPTS
+ * ======================================================= */
+
+function buildEngancheSystemPrompt(caso = {}) {
   const name = caso.perfil?.nombreClienta || "la clienta";
 
   return [
-    "Eres el motor de sugerencias de una herramienta interna de chat.",
+    "Eres el motor de ENGANCHE de una herramienta interna de chat.",
     "Debes devolver exactamente 3 opciones finales en espanol, listas para enviar.",
-    "Tu trabajo es transformar el borrador del operador en mensajes directos para la clienta.",
+    "Tu unico trabajo es crear una entrada atractiva usando datos reales del perfil.",
     "",
     "REGLA CENTRAL",
-    "- el borrador del operador NO es una pregunta para ti",
-    "- el borrador del operador es una intencion mal escrita que debes convertir en un mensaje listo para enviar",
+    "- este modo NO usa historial del chat",
+    "- no finjas que ya hubo conversacion",
+    "- no digas: nuestras conversaciones, lo que hablamos, me acorde de ti, seguimos donde quedamos",
     `- escribe directamente a ${name}, no hables sobre ella en tercera persona`,
-    "- prohibido escribir frases tipo: 'La historia de Gabriela...', 'Gabriela parece...', 'La vida de Gabriela...'",
     "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, ABOUT_TEXT, RAW_PROFILE o PROFILE_ANCHORS",
-    "- si hay nombre disponible, puedes iniciar con el nombre de forma natural",
-    "",
-    `Objetivo principal: ${caso.objective}`,
-    `Tono: ${caso.tone}`,
-    `Modo: ${caso.mode}`,
-    `Riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
-    "",
-    "SI EL MODO ES APERTURA_SIN_RESPUESTA",
-    "- significa que hay mensajes previos del operador pero la clienta no ha contestado",
-    "- no finjas que ya hubo conversacion real",
-    "- prohibido decir: nuestras conversaciones, lo que hablamos, me acorde de ti, como me dijiste, seguimos donde quedamos",
-    "- usa el perfil como ancla principal",
     "",
     "USO DEL PERFIL",
-    "- si hay ABOUT_TEXT, ese texto personal tiene prioridad alta",
-    "- si hay datos reales de perfil, usalos como fuente principal cuando el chat esta vacio, viejo o con poco dialogo",
-    "- cada opcion debe apoyarse en 1 o 2 datos reales del perfil si existen",
-    "- prioriza ABOUT_TEXT, personalidad visible, intereses, lo que busca y pais",
-    "- usa estado civil solo si la intencion habla de amor, confianza, pasado, nueva etapa o conexion emocional",
-    "- no inventes viudez, divorcio, hijos, ciudad, pais ni intenciones",
+    "- si hay ABOUT_TEXT, usalo como prioridad alta",
+    "- usa maximo 1 o 2 datos reales del perfil por opcion",
+    "- puedes usar nombre, pais, intereses, looking for, about me o about text",
+    "- usa estado civil solo si suma de forma natural y no invasiva",
+    "- no inventes ciudad, pais, hijos, estado civil ni intenciones",
     "- si el perfil dice Married, no lo conviertas en Divorced o Widowed",
     "- si el perfil dice Divorced, no lo conviertas en Widowed",
-    "- no uses todos los datos juntos; elige los mas naturales",
     "",
-    "NUCLEO DE TRANSFORMACION",
-    "- interpreta la intencion del operador antes de escribir",
-    "- no copies frases debiles del operador",
-    "- si el operador escribe algo generico, conserva la intencion y vuelve el mensaje especifico",
-    "- si el operador intenta sonar interesado, hazlo mas natural y menos necesitado",
-    "- si el operador intenta reenganchar, evita suplica, culpa o ansiedad",
-    "- si el operador intenta coquetear, hazlo sutil, conversacional y no repetitivo",
-    "- si hay riesgo, sal de la situacion sin cortar el vinculo ni perder la conversacion",
+    "TONO",
+    "- natural",
+    "- atractivo",
+    "- humano",
+    "- no necesitado",
+    "- no intenso",
+    "- no generico",
     "",
-    "PRIORIDADES",
-    "- responder primero a lo ultimo de la clienta cuando exista mensaje real",
-    "- si no hay mensaje nuevo de la clienta, usar perfil como ancla principal",
-    "- conservar el hilo que el operador ya viene construyendo sin inventar respuesta de ella",
-    "- sonar humano, concreto y util",
-    "- usar hechos reales del chat o perfil antes que frases genericas",
-    "- dejar una salida facil para que la clienta responda",
-    "",
-    "REGLAS OBLIGATORIAS",
-    "- si no existe mensaje nuevo de la clienta, no escribas como si ya hubiera contestado",
-    "- cada opcion debe ser distinta de verdad",
+    "REGLAS",
     "- maximo 1 pregunta por opcion",
     "- sin emojis",
     "- sin comillas",
-    "- sin nombres inventados",
-    "- sin ciudades inventadas",
-    "- no inventes politicas, pagos, tarifas, soporte ni condiciones de la plataforma",
-    "- no pidas ni aceptes contacto externo",
+    "- no propongas encuentros, llamadas ni contacto externo",
     "- no invites a salir de la app",
-    "- no propongas encuentros, direcciones ni llamadas",
-    "- evita presion, culpa o manipulacion",
-    "- evita frases espejo o vacias",
-    "- evita formulas como 'eso que dijiste sobre X' si X es solo una palabra suelta",
-    "- si el borrador esta flojo, rehacelo por completo",
+    "- no uses frases vacias como hola como estas",
+    "- no copies el borrador si esta flojo",
     "",
-    "VARIACION DESEADA",
-    "1. Directa: 150 a 200 caracteres. Clara, natural y facil de enviar.",
-    "2. Atractiva: 200 a 300 caracteres. Mejor alusion al contexto o perfil y una respuesta facil de continuar.",
-    "3. Desarrollada: 250 a 400 caracteres. Mayor profundidad emocional, mejor lectura del perfil/contexto y un gancho mas fuerte, sin sonar intensa ni pesada.",
-    "",
-    "IMPORTANTE SOBRE LONGITUD",
-    "- respeta el rango de caracteres de cada opcion",
-    "- no hagas opciones demasiado cortas",
-    "- la tercera opcion nunca debe ser breve",
-    "- extender no significa rellenar; extender significa usar perfil o contexto real",
+    "VARIACION",
+    "1. Directa: 150 a 200 caracteres.",
+    "2. Atractiva: 200 a 300 caracteres.",
+    "3. Desarrollada: 250 a 400 caracteres.",
     "",
     "LARGO EXACTO ESPERADO",
-    buildSpecText(),
+    buildSpecText(caso),
     "",
     "Devuelve solo:",
     "1. ...",
@@ -2099,49 +1991,142 @@ function buildSystemPrompt(caso = {}) {
   ].join("\n").trim();
 }
 
+function buildContextSystemPrompt(caso = {}) {
+  return [
+    "Eres el motor de CONTEXTO Y CORRECCION de una herramienta interna de chat.",
+    "Debes devolver exactamente 3 opciones finales en espanol, listas para enviar.",
+    "Tu unico trabajo es corregir y mejorar el borrador del operador usando la conversacion real.",
+    "",
+    "REGLA CENTRAL",
+    "- este modo NO usa perfil",
+    "- usa solo el contexto del chat y el borrador del operador",
+    "- si hay mensajes reales de la clienta, responde al momento actual",
+    "- si ya hay conversacion activa, NO saludes como apertura",
+    "- no escribas como cliente nuevo si hay historial real",
+    "- conserva la intencion del operador, pero corrige ansiedad, presion, reclamo o tono debil",
+    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
+    "",
+    "SITUACIONES DE RIESGO",
+    "- si el operador presiona, reclama o suena ansioso, baja la presion",
+    "- si la clienta habla de abandonar, sitio, datos personales, cansancio o ritmo, valida y calma",
+    "- si hay contacto externo, no lo aceptes y mantente dentro del chat",
+    "- si hay desconfianza, responde claro sin ponerte defensiva",
+    "",
+    "TONO",
+    "- natural",
+    "- emocionalmente inteligente",
+    "- sin culpa",
+    "- sin suplica",
+    "- sin manipulacion",
+    "- conversacional",
+    "",
+    "REGLAS",
+    "- maximo 1 pregunta por opcion",
+    "- sin emojis",
+    "- sin comillas",
+    "- no inventes hechos",
+    "- no inventes politicas ni pagos",
+    "- no propongas encuentros, llamadas ni contacto externo",
+    "- si hay ultimo mensaje de la clienta, responde primero a eso",
+    "",
+    "VARIACION",
+    "1. Directa: 150 a 200 caracteres.",
+    "2. Atractiva: 200 a 300 caracteres.",
+    "3. Desarrollada: 250 a 400 caracteres.",
+    "",
+    "LARGO EXACTO ESPERADO",
+    buildSpecText(caso),
+    "",
+    "Devuelve solo:",
+    "1. ...",
+    "2. ...",
+    "3. ..."
+  ].join("\n").trim();
+}
+
+function buildMailSystemPrompt(caso = {}) {
+  return [
+    "Eres el motor de CARTAS de una herramienta interna.",
+    "Debes devolver exactamente 3 versiones finales en espanol, listas para enviar como carta.",
+    "Tu trabajo es mejorar el borrador del operador usando el contexto del mail o carta.",
+    "",
+    "REGLA CENTRAL",
+    "- este modo es para cartas/mails, no para chat corto",
+    "- corrige errores",
+    "- mejora el tono",
+    "- extiende solo si aporta",
+    "- responde al hilo anterior si existe",
+    "- conserva la intencion del operador",
+    "- no uses perfil si no fue enviado",
+    "- no inventes datos",
+    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
+    "",
+    "TONO",
+    "- natural",
+    "- cercano",
+    "- claro",
+    "- con buena redaccion",
+    "- sin sonar robotico",
+    "- sin exceso de intensidad",
+    "",
+    "REGLAS",
+    "- sin emojis",
+    "- sin comillas",
+    "- no pidas contacto externo",
+    "- no propongas encuentros, llamadas ni salir de la app",
+    "- no inventes promesas",
+    "- no conviertas la carta en una respuesta corta de chat",
+    "",
+    "VARIACION",
+    "1. Carta breve corregida.",
+    "2. Carta mas completa y natural.",
+    "3. Carta desarrollada, con mejor hilo y mejor cierre.",
+    "",
+    "LARGO ESPERADO",
+    buildSpecText(caso),
+    "",
+    "Devuelve solo:",
+    "1. ...",
+    "2. ...",
+    "3. ..."
+  ].join("\n").trim();
+}
+
+function buildSystemPrompt(caso = {}) {
+  if (caso.pageType === "mail") return buildMailSystemPrompt(caso);
+  if (caso.modoAyuda === "enganche") return buildEngancheSystemPrompt(caso);
+  return buildContextSystemPrompt(caso);
+}
+
 function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback = "") {
-  const blocks = [
+  const common = [
     [
       "RESUMEN DEL CASO",
-      `- tipo de contacto: ${caso.tipoContacto}`,
-      `- intencion detectada: ${caso.intent}`,
+      `- modo ayuda: ${caso.modoAyuda}`,
+      `- page_type: ${caso.pageType}`,
+      `- tipo contacto: ${caso.tipoContacto}`,
       `- objetivo: ${caso.objective}`,
       `- tono: ${caso.tone}`,
-      `- modo: ${caso.mode}`,
       `- riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
-      `- guia de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversacion natural y util"}`
+      `- guia riesgo: ${caso.risk?.primary?.guidance || "Mantener conversacion natural"}`
     ].join("\n"),
     [
       "BORRADOR DEL OPERADOR",
       '"""',
       caso.textoPlano || "Sin borrador claro",
       '"""'
-    ].join("\n"),
-    [
-      "ULTIMO MENSAJE REAL DE LA CLIENTA",
-      '"""',
-      caso.clientePlano || "Sin mensaje claro de la clienta",
-      '"""'
-    ].join("\n"),
-    [
-      "CONTEXTO RECIENTE",
+    ].join("\n")
+  ];
+
+  if (caso.pageType === "mail") {
+    common.push([
+      "CONTEXTO DE MAIL / CARTA",
       '"""',
       caso.contextoPlano || "Sin contexto util",
       '"""'
-    ].join("\n"),
-    [
-      "HILO DEL OPERADOR",
-      (caso.operatorRecent || []).length
-        ? caso.operatorRecent.map((x, i) => `${i + 1}. ${x}`).join("\n")
-        : "Sin mensajes recientes del operador"
-    ].join("\n"),
-    [
-      "HILO DE LA CLIENTA",
-      (caso.clientRecent || []).length
-        ? caso.clientRecent.map((x, i) => `${i + 1}. ${x}`).join("\n")
-        : "Sin mensajes recientes de la clienta"
-    ].join("\n"),
-    [
+    ].join("\n"));
+  } else if (caso.modoAyuda === "enganche") {
+    common.push([
       "PERFIL REAL DISPONIBLE",
       `- nombre: ${caso.perfil?.nombreClienta || ""}`,
       `- pais: ${caso.perfil?.paisClienta || ""}`,
@@ -2151,97 +2136,122 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       `- busca: ${(caso.perfil?.lookingFor || []).join(" | ")}`,
       `- personalidad visible: ${(caso.perfil?.aboutMe || []).join(" | ")}`,
       `- texto personal: ${caso.perfil?.aboutText || ""}`
-    ].join("\n"),
-    [
-      "KEYWORDS",
-      `- clienta: ${(caso.clientKeywords || []).join(" | ") || "ninguna"}`,
-      `- operador: ${(caso.operatorKeywords || []).join(" | ") || "ninguna"}`,
-      `- perfil: ${(caso.profileKeywords || []).join(" | ") || "ninguna"}`,
-      `- temas activos: ${(caso.activeThemes || []).join(" | ") || "ninguno"}`
-    ].join("\n"),
-    [
-      "RESPUESTAS RECIENTES A EVITAR",
-      recent.length
-        ? recent.map((x, i) => `${i + 1}. ${x}`).join("\n")
-        : "ninguna"
-    ].join("\n")
-  ];
+    ].join("\n"));
+  } else {
+    common.push([
+      "ULTIMO MENSAJE REAL DE LA CLIENTA",
+      '"""',
+      caso.clientePlano || "Sin mensaje claro de la clienta",
+      '"""'
+    ].join("\n"));
+
+    common.push([
+      "CONTEXTO RECIENTE DEL CHAT",
+      '"""',
+      caso.contextoPlano || "Sin contexto util",
+      '"""'
+    ].join("\n"));
+  }
+
+  common.push([
+    "KEYWORDS",
+    `- clienta: ${(caso.clientKeywords || []).join(" | ") || "ninguna"}`,
+    `- operador: ${(caso.operatorKeywords || []).join(" | ") || "ninguna"}`,
+    `- perfil: ${caso.modoAyuda === "enganche" ? ((caso.profileKeywords || []).join(" | ") || "ninguna") : "no usar perfil"}`,
+    `- temas activos: ${(caso.activeThemes || []).join(" | ") || "ninguno"}`
+  ].join("\n"));
+
+  common.push([
+    "RESPUESTAS RECIENTES A EVITAR",
+    recent.length
+      ? recent.map((x, i) => `${i + 1}. ${x}`).join("\n")
+      : "ninguna"
+  ].join("\n"));
 
   if (previousOptions.length) {
-    blocks.push([
+    common.push([
       "OPCIONES ANTERIORES FLOJAS",
       previousOptions.map((x, i) => `${i + 1}. ${x}`).join("\n")
     ].join("\n"));
   }
 
   if (feedback) {
-    blocks.push([
+    common.push([
       "CORRECCIONES QUE DEBES APLICAR",
       feedback
     ].join("\n"));
   }
 
-  blocks.push([
-    "INTERPRETACION DEL BORRADOR",
-    "Antes de generar, decide mentalmente:",
-    "1. que quiere lograr el operador",
-    "2. que datos reales del perfil conviene usar",
-    "3. que parte del borrador debe eliminarse por generica, repetitiva o riesgosa",
-    "4. como hablarle directamente a la clienta sin hablar sobre ella en tercera persona",
-    "5. si no hay respuesta de la clienta, no finjas familiaridad previa"
-  ].join("\n"));
+  if (caso.pageType === "mail") {
+    common.push([
+      "INSTRUCCIONES FINALES",
+      "- mejora el borrador como carta",
+      "- corrige errores",
+      "- extiende con naturalidad si hace falta",
+      "- no inventes datos",
+      "- no uses etiquetas internas",
+      "- entrega 3 versiones de carta"
+    ].join("\n"));
+  } else if (caso.modoAyuda === "enganche") {
+    common.push([
+      "INSTRUCCIONES FINALES",
+      "- usa perfil, no chat",
+      "- no finjas conversacion previa",
+      "- si hay ABOUT_TEXT, priorizalo",
+      "- habla directamente con la clienta",
+      "- no uses etiquetas internas",
+      "- entrega 3 opciones de enganche"
+    ].join("\n"));
+  } else {
+    common.push([
+      "INSTRUCCIONES FINALES",
+      "- usa conversacion, no perfil",
+      "- corrige el texto del operador",
+      "- responde al momento actual",
+      "- no saludes como apertura si hay conversacion activa",
+      "- baja presion si hay ansiedad o reclamo",
+      "- entrega 3 opciones corregidas"
+    ].join("\n"));
+  }
 
-  blocks.push([
-    "IMPORTANTE",
-    "- habla directamente con la clienta",
-    "- no digas 'La historia de Gabriela' ni 'Gabriela parece'",
-    "- no uses etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, ABOUT_TEXT, RAW_PROFILE o PROFILE_ANCHORS",
-    "- si hay ABOUT_TEXT, usalo como dato emocional de alta prioridad",
-    "- si hay perfil, usa perfil real como base",
-    "- no copies el borrador si esta pobre",
-    "- no inventes datos",
-    "- deja una salida facil para que la otra persona responda",
-    "- manten todo dentro de la plataforma",
-    "- opcion 1: 150-200 caracteres",
-    "- opcion 2: 200-300 caracteres",
-    "- opcion 3: 250-400 caracteres"
-  ].join("\n"));
-
-  return blocks.join("\n\n").trim();
+  return common.join("\n\n").trim();
 }
 
 function pickTemperature(caso = {}, isRepair = false) {
-  let t = 0.76;
+  let t = 0.72;
 
-  if (caso.mode === "APERTURA_FRIA") t = 0.82;
-  if (caso.mode === "APERTURA_SIN_RESPUESTA") t = 0.76;
-  if (caso.mode === "REAPERTURA_SUAVE") t = 0.78;
-  if (caso.mode === "RESPUESTA_CHAT") t = 0.70;
+  if (caso.modoAyuda === "enganche") t = 0.82;
+  if (caso.modoAyuda === "contexto_correccion") t = 0.68;
+  if (caso.pageType === "mail") t = 0.72;
 
   switch (caso.risk?.primary?.key) {
     case "pregunta_pago_plataforma":
-      t = 0.60;
+      t = 0.58;
       break;
     case "contacto_externo":
     case "redes_externas":
-      t = 0.68;
+      t = 0.64;
       break;
     case "abandono_ritmo_contacto":
-      t = 0.66;
+      t = 0.62;
       break;
     case "desconfianza_realidad":
-      t = 0.64;
+      t = 0.62;
       break;
     default:
       break;
   }
 
   if (isRepair) {
-    return Math.max(0.56, Math.min(0.86, t - 0.08));
+    return Math.max(0.54, Math.min(0.86, t - 0.08));
   }
 
-  return Math.max(0.56, Math.min(0.86, t));
+  return Math.max(0.54, Math.min(0.86, t));
 }
+
+/* =========================================================
+ * FALLBACKS
+ * ======================================================= */
 
 function buildProfileBasedFallbacks(caso = {}) {
   const name = namePrefix(caso);
@@ -2252,7 +2262,6 @@ function buildProfileBasedFallbacks(caso = {}) {
   const looking = profile.lookingFor || [];
   const country = profile.paisClienta || "";
 
-  const aboutTextShort = aboutText.length > 180 ? `${aboutText.slice(0, 180).trim()}...` : aboutText;
   const aboutTextTiny = aboutText.length > 95 ? `${aboutText.slice(0, 95).trim()}...` : aboutText;
   const aboutTextMedium = aboutText.length > 135 ? `${aboutText.slice(0, 135).trim()}...` : aboutText;
 
@@ -2334,43 +2343,88 @@ function buildProfileBasedFallbacks(caso = {}) {
   return [];
 }
 
+function fallbackContextSuggestions(caso = {}) {
+  const lastClient = caso.clientePlano || "";
+  const draft = caso.textoPlano || "";
+
+  if (caso.risk?.primary?.key === "abandono_ritmo_contacto") {
+    return [
+      "No quiero que sientas que te estoy presionando. Solo me preocupó un poco lo que dijiste, y prefiero que podamos hablar con calma, sin que esto se vuelva pesado para ti.",
+      "Entiendo que quizá ahora tienes muchas cosas encima. No quiero empujarte ni hacerte sentir incómoda; solo me gustaría que sigamos hablando de una forma tranquila y sincera.",
+      "Si algo de esto te hizo sentir presionada, prefiero bajarle el ritmo. Me importa más que la conversación se sienta cómoda para ti que insistir de una forma que pueda alejarte."
+    ];
+  }
+
+  if (lastClient) {
+    return [
+      "Entiendo lo que dices y no quiero responderte desde la prisa. Prefiero hacerlo con calma, porque lo que me cuentas merece una respuesta más clara y más humana.",
+      "Me quedo con lo que acabas de decir, porque no suena como algo pequeño. Quiero entenderlo bien y responderte sin presionarte ni cambiar el sentido de la conversación.",
+      "Lo que dices me hace pensar que esta conversación necesita más calma que intensidad. Prefiero escucharte bien y seguir desde ahí, sin hacerte sentir que tienes que responder de una forma específica."
+    ];
+  }
+
+  if (draft) {
+    return [
+      "Quise decirlo de una forma más clara y tranquila, sin que suene intenso ni repetitivo. Me interesa que la conversación siga natural y que no se sienta forzada.",
+      "Prefiero escribirlo mejor para que no parezca presión ni reclamo. La idea es que se entienda lo que quiero decir, pero con un tono más cómodo y cercano.",
+      "Quiero que esto suene más natural y menos impulsivo. A veces una frase más tranquila abre mejor la conversación que insistir demasiado o escribir desde la ansiedad."
+    ];
+  }
+
+  return [];
+}
+
+function fallbackMailSuggestions(caso = {}) {
+  const draft = caso.textoPlano || "";
+
+  if (draft && draft.length > 40) {
+    return [
+      `Quise responderte con calma porque me parece mejor escribir algo que se sienta natural y no solo una frase rápida. ${draft}`,
+      `Me gustó tomarme un momento para escribirte mejor, porque una carta permite decir las cosas con más claridad. ${draft}`,
+      `Quiero que esta carta se sienta honesta y fácil de leer, sin sonar demasiado perfecta ni vacía. ${draft}`
+    ];
+  }
+
+  return [
+    "Gracias por escribirme. Me gusta poder responder con calma, porque una carta permite decir las cosas de una manera más clara y cercana que un mensaje rápido.",
+    "Me dio gusto leer tu mensaje. Prefiero responderte con una carta que tenga un poco más de intención, porque así la conversación se siente más real y menos automática.",
+    "Quise tomarme un momento para responderte bien. A veces una carta sencilla, honesta y bien escrita puede decir mucho más que una respuesta rápida sin dirección."
+  ];
+}
+
 function fallbackRiskSuggestions(caso = {}) {
-  const profileFallback = buildProfileBasedFallbacks(caso);
+  if (caso.modoAyuda === "enganche") {
+    const profile = buildProfileBasedFallbacks(caso);
+    if (profile.length) return profile;
+  }
 
   switch (caso.risk?.primary?.key) {
     case "contacto_externo":
       return [
         `${namePrefix(caso)}prefiero que sigamos por aqui y sin correr. Me interesa mas que la conversacion se sienta real antes que moverla fuera del chat.`,
         `${namePrefix(caso)}podemos llevarlo tranquilo por este chat. Para mi tiene mas sentido ver si la conversacion fluye bien aqui antes que saltar de una app a otra.`,
-        profileFallback[2] || `${namePrefix(caso)}antes de mover nada fuera de aqui prefiero ver si de verdad la charla tiene sentido. Me gusta mas descubrir si hay una conexion real que apurar algo que todavia estamos empezando.`
+        `${namePrefix(caso)}antes de mover nada fuera de aqui prefiero ver si de verdad la charla tiene sentido. Me gusta mas descubrir si hay una conexion real que apurar algo que todavia estamos empezando.`
       ];
 
     case "pregunta_pago_plataforma":
       return [
         `${namePrefix(caso)}sobre como lo maneja la plataforma prefiero no inventarte nada. Lo que si me importa es que por aqui la charla se sienta real.`,
         `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser claro y seguir con lo que si podemos construir aqui: una conversacion real.`,
-        profileFallback[2] || `${namePrefix(caso)}con temas de plataforma prefiero no suponer cosas que no se. Mejor sigamos desde algo mas humano: me interesa saber que te hizo entrar aqui y que clase de conexion esperas encontrar.`
+        `${namePrefix(caso)}con temas de plataforma prefiero no suponer cosas que no se. Mejor sigamos desde algo mas humano y desde una conversacion que se sienta clara.`
       ];
 
     case "redes_externas":
       return [
         `${namePrefix(caso)}aunque hayas visto algo fuera, prefiero que lo llevemos por aqui y sin mezclar cosas. Me interesa mas conocerte desde esta conversacion.`,
         `${namePrefix(caso)}yo mantendria la charla por este chat para que sea mas simple y natural. Si algo te dio curiosidad, prefiero que lo hablemos aqui con calma.`,
-        profileFallback[2] || `${namePrefix(caso)}antes de cruzar nada con otras redes prefiero que aqui la conversacion se sienta clara y real. Si hay curiosidad, podemos darle espacio sin sacar la charla de aqui.`
-      ];
-
-    case "abandono_ritmo_contacto":
-      return [
-        `${namePrefix(caso)}tranquila, no hace falta llevar esto con prisa ni estar pendiente todo el tiempo. Podemos hablar con calma y ver si la charla se da natural.`,
-        `${namePrefix(caso)}si el ritmo te pesa, mejor bajarlo y seguir sin presion. A veces funciona mucho mas una conversacion tranquila que estar encima.`,
-        profileFallback[2] || `${namePrefix(caso)}no necesito que respondas rapido ni que esto se vuelva una obligacion. Me basta con que cuando entres aqui la charla se sienta comoda, real y con ganas de seguir.`
+        `${namePrefix(caso)}antes de cruzar nada con otras redes prefiero que aqui la conversacion se sienta clara y real. Si hay curiosidad, podemos darle espacio sin sacar la charla de aqui.`
       ];
 
     case "desconfianza_realidad":
       return [
         `${namePrefix(caso)}te respondo simple y claro: prefiero que esto suene natural antes que perfecto. Si algo te genera duda, dimelo directo y lo hablamos.`,
         `${namePrefix(caso)}no me interesa sonar armado ni vender una imagen rara. Prefiero una conversacion clara y normal, de esas que se sostienen solas.`,
-        profileFallback[2] || `${namePrefix(caso)}si algo te hace ruido, mejor decirlo de frente y seguir desde ahi. Para mi tiene mas valor una charla clara que una respuesta demasiado ensayada.`
+        `${namePrefix(caso)}si algo te hace ruido, mejor decirlo de frente y seguir desde ahi. Para mi tiene mas valor una charla clara que una respuesta demasiado ensayada.`
       ];
 
     default:
@@ -2378,56 +2432,41 @@ function fallbackRiskSuggestions(caso = {}) {
   }
 }
 
-function fallbackReplySuggestions(caso = {}) {
-  const profileFallback = buildProfileBasedFallbacks(caso);
-  if (profileFallback.length) return profileFallback;
-
-  return [
-    `${namePrefix(caso)}me gusto leerte. Quiero que esto vaya por una linea natural, no por frases hechas. Eso que dices te sale mas por intuicion o por experiencia?`,
-    `${namePrefix(caso)}suena a que ahi hay una idea real detras. Me dio curiosidad saber si lo ves asi desde hace tiempo o si te paso algo que te hizo pensarlo.`,
-    `${namePrefix(caso)}lo que dices tiene un punto interesante. Me gustaria saber si lo sientes asi por caracter o porque ya te toco vivir algo parecido, porque ahi una conversacion empieza a sentirse menos tipica.`
-  ];
-}
-
-function fallbackReengagementSuggestions(caso = {}) {
-  const profileFallback = buildProfileBasedFallbacks(caso);
-  if (profileFallback.length) return profileFallback;
-
-  return [
-    `${namePrefix(caso)}paso por aqui con una pregunta simple y real: que suele hacer que una conversacion te parezca interesante desde el principio?`,
-    `${namePrefix(caso)}en vez de dejar un mensaje mas del monton, prefiero preguntarte algo concreto: que te hace seguir una charla por aqui?`,
-    `${namePrefix(caso)}reaparezco con una facil para no sonar copiado: eres mas de conversaciones tranquilas o de gente que entra con un poco mas de chispa y logra sacarte una respuesta real?`
-  ];
-}
-
-function fallbackOpeningSuggestions(caso = {}) {
-  const profileFallback = buildProfileBasedFallbacks(caso);
-  if (profileFallback.length) return profileFallback;
-
-  return [
-    `${namePrefix(caso)}prefiero empezar con algo simple y real: que tipo de conversacion si te dan ganas de seguir cuando alguien te escribe por aqui?`,
-    `${namePrefix(caso)}no quise abrir con una frase vacia, asi que voy con una sencilla: que suele llamar tu atencion cuando alguien te empieza a hablar?`,
-    `${namePrefix(caso)}antes que sonar igual que todos, prefiero preguntarte algo directo: eres mas de charlas tranquilas o de gente que entra con mas chispa y logra que la conversacion se sienta diferente?`
-  ];
-}
-
 function fallbackSuggestions(caso = {}) {
   const risk = fallbackRiskSuggestions(caso);
   if (risk.length) return risk;
 
-  if (caso.mode === "RESPUESTA_CHAT") return fallbackReplySuggestions(caso);
-  if (caso.mode === "APERTURA_SIN_RESPUESTA") return fallbackOpeningSuggestions(caso);
-  if (caso.mode === "REAPERTURA_SUAVE") return fallbackReengagementSuggestions(caso);
+  if (caso.pageType === "mail") return fallbackMailSuggestions(caso);
 
-  return fallbackOpeningSuggestions(caso);
+  if (caso.modoAyuda === "enganche") {
+    const profile = buildProfileBasedFallbacks(caso);
+    if (profile.length) return profile;
+  }
+
+  return fallbackContextSuggestions(caso);
 }
 
 function emergencySuggestions(caso = {}) {
-  const name = namePrefix(caso);
+  if (caso.pageType === "mail") {
+    return [
+      "Gracias por escribirme. Quise responderte con calma, porque una carta merece sentirse clara, natural y con un poco más de intención que una respuesta rápida.",
+      "Me gustó leer tu mensaje y preferí responder de una forma más cuidada. A veces una carta sencilla puede abrir mejor una conversación que muchas frases sueltas.",
+      "Quiero que esta carta se sienta cercana y honesta, sin sonar exagerada. Me interesa que podamos seguir hablando de una manera tranquila, clara y agradable."
+    ];
+  }
+
+  if (caso.modoAyuda === "enganche") {
+    return [
+      `${namePrefix(caso)}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y me gustaria saber que tipo de conversacion te hace sentir comoda por aqui.`,
+      `${namePrefix(caso)}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una pregunta que de verdad abra un poco la puerta.`,
+      `${namePrefix(caso)}me dio curiosidad saber un poco mas de ti sin sonar como un mensaje copiado. Me interesa mas una conversacion tranquila y natural que una entrada demasiado perfecta.`
+    ];
+  }
+
   return [
-    `${name}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y me gustaria saber que tipo de conversacion te hace sentir comoda por aqui.`,
-    `${name}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una pregunta que de verdad abra un poco la puerta.`,
-    `${name}me dio curiosidad saber un poco mas de ti sin sonar como un mensaje copiado. Me interesa mas una conversacion tranquila y natural que una entrada demasiado perfecta.`
+    "No quiero que esto suene como presión ni como reclamo. Prefiero escribirlo de una forma más tranquila, para que la conversación pueda seguir sin sentirse pesada.",
+    "Quise decirlo mejor porque la intención no era incomodar. Me interesa que podamos hablar con calma y que esto se mantenga natural, sin forzar nada.",
+    "Prefiero bajar un poco el ritmo y escribirlo de manera más clara. A veces una respuesta tranquila ayuda más que insistir demasiado o sonar ansioso."
   ];
 }
 
@@ -2440,7 +2479,7 @@ function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
     if (INTERNAL_LABEL_REGEX.test(clean)) return;
     if (DISALLOWED_CONTACT_REGEX.test(normalizeText(clean))) return;
     if (DISALLOWED_MEET_REGEX.test(normalizeText(clean))) return;
-    if (FALSE_FAMILIARITY_REGEX.test(normalizeText(clean)) && caso.mode === "APERTURA_SIN_RESPUESTA") return;
+    if (FALSE_FAMILIARITY_REGEX.test(normalizeText(clean)) && caso.modoAyuda === "enganche") return;
     if (final.some((x) => looksTooSimilar(x, clean))) return;
     final.push(clean);
   };
@@ -2460,39 +2499,38 @@ function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
   }
 
   while (final.length < 3) {
-    final.push(emergencySuggestions(caso)[final.length] || emergencySuggestions(caso)[0]);
+    const fallback = emergencySuggestions(caso)[final.length] || emergencySuggestions(caso)[0];
+    final.push(fallback);
   }
 
-  if (final.length > 3) {
-    return final.slice(0, 3);
-  }
-
-  return final;
+  return final.slice(0, 3);
 }
+
+/* =========================================================
+ * CASE BUILDER
+ * ======================================================= */
 
 function buildCase(input = {}) {
   const operador = String(input.operador || "").trim();
-  const pageType = String(input.page_type || "").trim().toLowerCase();
 
+  const pageType = String(input.page_type || input.pageType || "chat").trim().toLowerCase() === "mail"
+    ? "mail"
+    : "chat";
+
+  const modoAyuda = normalizeMode(input.modo_ayuda || input.modoAyuda || "", pageType);
+  const chatSignals = normalizeChatSignals(input.chat_signals || input.chatSignals || {});
   const rawContextLines = parseContextLines(input.contexto || "").slice(-MAX_CONTEXT_LINES);
-  const contextoPlano = formatContextLines(rawContextLines);
+  const contextoPlano = formatContextLines(rawContextLines, pageType === "mail" ? 28 : MAX_CONTEXT_LINES);
 
-  let clientePlano = cleanSuggestion(String(input.cliente || "").slice(0, 420));
+  let clientePlano = cleanSuggestion(String(input.cliente || "").slice(0, 700));
+
   if (!clientePlano) {
     const lastClient = [...rawContextLines].reverse().find((x) => x.role === "clienta");
     clientePlano = lastClient ? cleanSuggestion(lastClient.text) : "";
   }
 
-  const textoPlano = cleanSuggestion(String(input.texto || "").slice(0, 700));
-  const perfil = parseProfile(input.perfil || "");
-  const chatSignals = normalizeChatSignals(input.chat_signals || {});
-
-  const mode = detectMode({
-    textoPlano,
-    clientePlano,
-    contextLines: rawContextLines,
-    chatSignals
-  });
+  const textoPlano = cleanSuggestion(String(input.texto || "").slice(0, pageType === "mail" ? 3000 : 900));
+  const perfil = modoAyuda === "enganche" ? parseProfile(input.perfil || "") : parseProfile("");
 
   const risk = detectRisks({
     textoPlano,
@@ -2500,29 +2538,27 @@ function buildCase(input = {}) {
     contextoPlano
   });
 
-  const tipoContacto = inferContactType(chatSignals, rawContextLines);
-
-  const detallePerfil = pickProfileDetail(
-    perfil,
-    [
-      textoPlano,
-      clientePlano,
-      contextoPlano,
-      perfil.profileAnchors,
-      perfil.rawProfile,
-      perfil.aboutText
-    ].filter(Boolean).join("\n")
-  );
-
   const operatorRecent = rawContextLines
     .filter((x) => x.role === "operador")
-    .slice(-5)
+    .slice(-7)
     .map((x) => x.text);
 
   const clientRecent = rawContextLines
     .filter((x) => x.role === "clienta")
-    .slice(-5)
+    .slice(-7)
     .map((x) => x.text);
+
+  const detallePerfil = modoAyuda === "enganche"
+    ? pickProfileDetail(
+      perfil,
+      [
+        textoPlano,
+        perfil.profileAnchors,
+        perfil.rawProfile,
+        perfil.aboutText
+      ].filter(Boolean).join("\n")
+    )
+    : { type: "none", value: "", priority: 0 };
 
   const operatorKeywords = extractKeywordSignals(operatorRecent.join(" "));
   const clientKeywords = extractKeywordSignals(clientePlano || clientRecent.join(" "));
@@ -2531,26 +2567,39 @@ function buildCase(input = {}) {
   const profileKeywords = perfil.profileKeywords || [];
 
   const activeThemes = dedupeStrings([
-    ...clientKeywords.slice(0, 4),
-    ...operatorKeywords.slice(0, 4),
-    ...draftKeywords.slice(0, 4),
-    ...profileKeywords.slice(0, 6)
-  ]).slice(0, 12);
+    ...clientKeywords.slice(0, 5),
+    ...operatorKeywords.slice(0, 5),
+    ...draftKeywords.slice(0, 5),
+    ...profileKeywords.slice(0, modoAyuda === "enganche" ? 8 : 0)
+  ]).slice(0, 16);
 
-  const affectionLoadHigh = countEndearments(operatorRecent.join(" ")) >= 4;
-  const profileAvailable = hasUsableProfile(perfil);
+  const profileAvailable = modoAyuda === "enganche" && hasUsableProfile(perfil);
 
-  const baseCase = {
+  let objective = "";
+  let tone = "";
+
+  if (pageType === "mail") {
+    objective = "Mejorar una carta usando el contexto del mail, corrigiendo errores y extendiendo solo si aporta";
+    tone = "natural, claro, cercano y bien redactado";
+  } else if (modoAyuda === "enganche") {
+    objective = "Crear una entrada atractiva usando datos reales del perfil sin fingir conversacion previa";
+    tone = "curioso, natural, atractivo y sin presion";
+  } else {
+    objective = "Corregir el texto del operador usando la conversacion real y responder al momento actual";
+    tone = "natural, calmado, contextual y emocionalmente inteligente";
+  }
+
+  const caso = {
     operador,
     pageType,
+    modoAyuda,
     textoPlano,
     clientePlano,
     contextoPlano,
     contextLines: rawContextLines,
     perfil,
     chatSignals,
-    mode,
-    tipoContacto,
+    tipoContacto: inferContactType({ pageType, modoAyuda }),
     risk,
     detallePerfil,
     operatorRecent,
@@ -2561,23 +2610,17 @@ function buildCase(input = {}) {
     detailKeywords,
     profileKeywords,
     activeThemes,
-    affectionLoadHigh,
+    affectionLoadHigh: countEndearments(operatorRecent.join(" ")) >= 4,
     profileAvailable,
-    lastClientIsQuestion: /\?/.test(clientePlano || "")
-  };
-
-  const intent = detectIntent(baseCase);
-  const objective = detectObjective({ ...baseCase, intent });
-  const tone = detectTone({ ...baseCase, intent });
-
-  const caso = {
-    ...baseCase,
-    intent,
+    lastClientIsQuestion: /\?/.test(clientePlano || ""),
     objective,
-    tone
+    tone,
+    targetLanguage: normalizeSpaces(input.target_language || input.targetLanguage || "English"),
+    targetLanguageCode: normalizeSpaces(input.target_language_code || input.targetLanguageCode || "en").toLowerCase()
   };
 
   caso.memoryKey = getSuggestionMemoryKey(caso);
+
   return caso;
 }
 
@@ -2585,9 +2628,10 @@ function buildInFlightSuggestionKey(input = {}) {
   return [
     normalizeText(input.operador || "anon").slice(0, 80),
     normalizeText(input.page_type || "chat"),
+    normalizeText(input.modo_ayuda || "contexto"),
     normalizeText(input.texto || "").slice(0, 260),
     normalizeText(input.cliente || "").slice(0, 220),
-    normalizeText(input.contexto || "").slice(-320),
+    normalizeText(input.contexto || "").slice(-420),
     normalizeText(input.perfil || "").slice(0, 520),
     normalizeText(JSON.stringify(input.chat_signals || {})).slice(0, 200)
   ].join("||");
@@ -2602,7 +2646,7 @@ async function callSuggestionModel(caso = {}, recent = [], previousOptions = [],
       { role: "user", content: buildUserPrompt(caso, recent, previousOptions, feedback) }
     ],
     temperature: pickTemperature(caso, isRepair),
-    maxTokens: SUGGESTION_MAX_TOKENS,
+    maxTokens: getMaxTokensForCase(caso),
     timeoutMs: OPENAI_TIMEOUT_SUGGESTIONS_MS,
     topP: 0.95,
     frequencyPenalty: isRepair ? 0.12 : 0.22,
@@ -2617,11 +2661,6 @@ async function callSuggestionModel(caso = {}, recent = [], previousOptions = [],
 
 async function generateSuggestionsCore(input = {}) {
   const caso = buildCase(input);
-
-  if (caso.pageType && caso.pageType !== "chat") {
-    throw new Error("La IA solo funciona en una vista real de chat");
-  }
-
   const recent = readRecentSuggestions(caso.memoryKey);
   const usages = [];
   const pool = [];
@@ -2629,14 +2668,17 @@ async function generateSuggestionsCore(input = {}) {
 
   try {
     const firstPass = await callSuggestionModel(caso, recent);
-    if (firstPass.usageData) usages.push(firstPass.usageData);
+
+    if (firstPass.usageData) {
+      usages.push(firstPass.usageData);
+    }
 
     const firstCandidates = mapOptionsToCandidates(firstPass.options, "openai_1", caso);
     pool.push(...firstCandidates);
 
-    const selectedFirst = selectFinalCandidates(firstCandidates);
+    const selectedFirst = selectFinalCandidates(firstCandidates, caso);
 
-    if (isWeakResult(firstCandidates, selectedFirst)) {
+    if (isWeakResult(firstCandidates, selectedFirst, caso)) {
       secondPassUsed = true;
       runtimeStats.suggestions.secondPasses += 1;
 
@@ -2650,7 +2692,9 @@ async function generateSuggestionsCore(input = {}) {
         true
       );
 
-      if (repairPass.usageData) usages.push(repairPass.usageData);
+      if (repairPass.usageData) {
+        usages.push(repairPass.usageData);
+      }
 
       pool.push(...mapOptionsToCandidates(repairPass.options, "openai_2", caso));
     }
@@ -2661,7 +2705,7 @@ async function generateSuggestionsCore(input = {}) {
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
   pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
 
-  const selected = selectFinalCandidates(pool);
+  const selected = selectFinalCandidates(pool, caso);
   const final = ensureExactlyThreeSuggestions(selected, caso);
 
   if (final.length < 3 || selected.length < 3) {
@@ -2674,7 +2718,10 @@ async function generateSuggestionsCore(input = {}) {
     sugerencias: final,
     usageData: combineUsageData(usages),
     secondPassUsed,
-    usedFallbackOnly: selected.length ? selected.every((x) => x.source === "fallback" || x.source === "emergency") : true
+    usedFallbackOnly: selected.length
+      ? selected.every((x) => x.source === "fallback" || x.source === "emergency")
+      : true,
+    caso
   };
 }
 
@@ -2697,8 +2744,31 @@ async function generateSuggestions(input = {}) {
  * TRANSLATION
  * ======================================================= */
 
-function getTranslationCacheKey(text = "") {
-  return normalizeText(text).slice(0, 1200);
+function normalizeLanguagePayload(payload = {}) {
+  const targetLanguage = normalizeSpaces(
+    payload.target_language ||
+    payload.targetLanguage ||
+    payload.idioma ||
+    payload.language ||
+    "English"
+  );
+
+  const targetLanguageCode = normalizeSpaces(
+    payload.target_language_code ||
+    payload.targetLanguageCode ||
+    payload.idioma_codigo ||
+    payload.language_code ||
+    "en"
+  ).toLowerCase();
+
+  return {
+    target_language: targetLanguage || "English",
+    target_language_code: targetLanguageCode || "en"
+  };
+}
+
+function getTranslationCacheKey(text = "", languageCode = "en") {
+  return `${normalizeText(languageCode || "en")}::${normalizeText(text).slice(0, 1800)}`;
 }
 
 function readTranslationCache(key = "") {
@@ -2736,47 +2806,71 @@ function writeTranslationCache(key = "", value = "") {
   }
 }
 
-async function translateTextCore(text = "") {
+function buildTranslationSystemPrompt(language = "English") {
+  return [
+    `Traduce el texto al idioma ${language}.`,
+    "Debe sonar natural, humano y apropiado para chat o carta.",
+    "Reglas:",
+    "- no uses comillas",
+    "- no expliques nada",
+    "- no agregues notas",
+    "- conserva intencion y tono",
+    "- si el texto esta en el mismo idioma destino, mejoralo suavemente sin cambiar el sentido",
+    "- devuelve solo una version final"
+  ].join("\n");
+}
+
+async function translateTextCore(text = "", language = "English", languageCode = "en") {
+  const maxTokens = text.length > 1200 ? 900 : text.length > 600 ? 520 : 240;
+
   const data = await callOpenAI({
     lane: "traduccion",
     model: OPENAI_MODEL_TRANSLATE,
     messages: [
       {
         role: "system",
-        content: [
-          "Traduce al ingles natural de chat como una persona real escribiria.",
-          "Reglas:",
-          "- no uses comillas",
-          "- no uses simbolos raros",
-          "- no suenes perfecto ni robotico",
-          "- conserva intencion y tono",
-          "- devuelve solo una version final"
-        ].join("\n")
+        content: buildTranslationSystemPrompt(language)
       },
       { role: "user", content: String(text ?? "") }
     ],
-    temperature: 0.25,
-    maxTokens: 180,
+    temperature: 0.22,
+    maxTokens,
     timeoutMs: OPENAI_TIMEOUT_TRANSLATE_MS
   });
 
   const translated = cleanHuman(data?.choices?.[0]?.message?.content || "");
 
   if (!translated) {
-    throw new Error("No se pudo traducir");
+    throw new Error(`No se pudo traducir a ${language}`);
   }
 
   return {
     traducido: translated,
-    usageData: data
+    usageData: data,
+    target_language: language,
+    target_language_code: languageCode
   };
 }
 
-async function translateText(text = "") {
+async function translateText(text = "", language = "English", languageCode = "en") {
+  const cacheKey = getTranslationCacheKey(text, languageCode);
+  const cached = readTranslationCache(cacheKey);
+
+  if (cached) {
+    return {
+      traducido: cached,
+      usageData: null,
+      shared: false,
+      cached: true,
+      target_language: language,
+      target_language_code: languageCode
+    };
+  }
+
   const sharedJob = getSharedInFlight(
     inflightTranslationJobs,
-    getTranslationCacheKey(text),
-    () => translateTextCore(text)
+    cacheKey,
+    () => translateTextCore(text, language, languageCode)
   );
 
   if (sharedJob.shared) {
@@ -2784,10 +2878,12 @@ async function translateText(text = "") {
   }
 
   const result = await sharedJob.promise;
+  writeTranslationCache(cacheKey, result.traducido);
 
   return {
     ...result,
-    shared: sharedJob.shared
+    shared: sharedJob.shared,
+    cached: false
   };
 }
 
@@ -2804,6 +2900,7 @@ function cleanWarningCounts(raw = {}) {
     const count = Math.max(0, Math.min(999999, Number.parseInt(countRaw, 10) || 0));
 
     if (!phrase || count <= 0) continue;
+
     clean[phrase] = (clean[phrase] || 0) + count;
   }
 
@@ -2820,6 +2917,7 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
   }
 
   const phrases = Object.keys(countsClean);
+
   if (!phrases.length) {
     return { rowsUpserted: 0 };
   }
@@ -2836,6 +2934,7 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
   }
 
   const current = new Map();
+
   for (const row of existing || []) {
     current.set(String(row.frase || ""), Number(row.cantidad_total || 0));
   }
@@ -2862,6 +2961,7 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
   return { rowsUpserted: payload.length };
 }
 
+/* ===== FIN PARTE 2/3 ===== */
 /* =========================================================
  * CONSUMPTION / COST
  * ======================================================= */
@@ -2945,7 +3045,7 @@ function calculateEstimatedCost({ tipo = "", prompt_tokens = 0, completion_token
 }
 
 /* =========================================================
- * DASHBOARD / ANALYTICS
+ * DASHBOARD
  * ======================================================= */
 
 async function loadConsumptionRange(range, operadoresFiltrados = []) {
@@ -2990,6 +3090,9 @@ function createDashboardSummary() {
     ok_requests: 0,
     error_requests: 0,
     ia_requests: 0,
+    ia_enganche_requests: 0,
+    ia_contexto_requests: 0,
+    ia_mail_requests: 0,
     trad_requests: 0,
     cache_hits: 0,
     shared_hits: 0,
@@ -3010,6 +3113,9 @@ function createOperatorStat(operador = "") {
     ok_requests: 0,
     error_requests: 0,
     ia_requests: 0,
+    ia_enganche_requests: 0,
+    ia_contexto_requests: 0,
+    ia_mail_requests: 0,
     trad_requests: 0,
     cache_hits: 0,
     shared_hits: 0,
@@ -3034,6 +3140,18 @@ function createSerieDia(fecha = "") {
     estimated_cost_total: 0,
     warnings_total: 0
   };
+}
+
+function applyTipoCounters(target, tipo = "") {
+  const t = String(tipo || "").toUpperCase();
+
+  if (t.startsWith("IA")) target.ia_requests += 1;
+  if (t.startsWith("IA_ENGANCHE")) target.ia_enganche_requests += 1;
+  if (t.startsWith("IA_CONTEXTO")) target.ia_contexto_requests += 1;
+  if (t.startsWith("IA_MAIL")) target.ia_mail_requests += 1;
+  if (t.startsWith("TRAD")) target.trad_requests += 1;
+  if (t.endsWith("_CACHE")) target.cache_hits += 1;
+  if (t.endsWith("_SHARED")) target.shared_hits += 1;
 }
 
 function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, operadoresFiltrados = [] }) {
@@ -3061,11 +3179,7 @@ function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, op
     summary.total_requests += 1;
     if (requestOk) summary.ok_requests += 1;
     else summary.error_requests += 1;
-
-    if (tipo.startsWith("IA")) summary.ia_requests += 1;
-    if (tipo.startsWith("TRAD")) summary.trad_requests += 1;
-    if (tipo.endsWith("_CACHE")) summary.cache_hits += 1;
-    if (tipo.endsWith("_SHARED")) summary.shared_hits += 1;
+    applyTipoCounters(summary, tipo);
 
     summary.total_tokens += totalTokens;
     summary.prompt_tokens += promptTokens;
@@ -3080,10 +3194,8 @@ function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, op
     op.requests_total += 1;
     if (requestOk) op.ok_requests += 1;
     else op.error_requests += 1;
-    if (tipo.startsWith("IA")) op.ia_requests += 1;
-    if (tipo.startsWith("TRAD")) op.trad_requests += 1;
-    if (tipo.endsWith("_CACHE")) op.cache_hits += 1;
-    if (tipo.endsWith("_SHARED")) op.shared_hits += 1;
+    applyTipoCounters(op, tipo);
+
     op.total_tokens += totalTokens;
     op.prompt_tokens += promptTokens;
     op.completion_tokens += completionTokens;
@@ -3442,7 +3554,7 @@ function parseOperatorFilter(raw = "") {
 function getHealthPayload() {
   return {
     ok: true,
-    service: "server unico completo profile-aware v3",
+    service: "server unico split-ai profile-context-mail-translate",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: {
       configured: adminConfigured(),
@@ -3461,11 +3573,12 @@ function getHealthPayload() {
       traduccion: OPENAI_MODEL_TRANSLATE
     },
     suggestion_config: {
-      max_tokens: SUGGESTION_MAX_TOKENS,
-      target_lengths: TARGET_SUGGESTION_SPECS,
-      profile_aware: true,
-      about_text_priority: true,
-      apertura_sin_respuesta: true,
+      chat_max_tokens: SUGGESTION_MAX_TOKENS,
+      mail_max_tokens: MAIL_MAX_TOKENS,
+      chat_target_lengths: CHAT_TARGET_SPECS,
+      mail_target_lengths: MAIL_TARGET_SPECS,
+      split_buttons: true,
+      dynamic_translation_language: true,
       force_three_options: true
     },
     queues: {
@@ -3649,6 +3762,7 @@ app.post("/admin-api/operators", authorizeAdmin, async (req, res) => {
     const result = await createOrReactivateOperatorAdmin(nombre);
 
     if (result.action === "created") runtimeStats.admin.operatorCreate += 1;
+
     if (result.action === "updated" || result.action === "reactivated") {
       runtimeStats.admin.operatorUpdate += 1;
     }
@@ -3666,6 +3780,7 @@ app.post("/admin-api/operators", authorizeAdmin, async (req, res) => {
   }
 });
 
+/* ===== FIN PARTE 3/3 - SECCION A ===== */
 app.post("/admin-api/operators/bulk", authorizeAdmin, async (req, res) => {
   try {
     const { texto = "" } = req.body || {};
@@ -3850,7 +3965,10 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
       perfil = "",
       extension_id = "",
       chat_signals = {},
-      page_type = ""
+      page_type = "chat",
+      modo_ayuda = "contexto_correccion",
+      target_language = "English",
+      target_language_code = "en"
     } = req.body || {};
 
     if (!String(texto || "").trim()) {
@@ -3868,16 +3986,36 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
       cliente,
       perfil,
       chat_signals,
-      page_type
+      page_type,
+      modo_ayuda,
+      target_language,
+      target_language_code
     });
 
+    const tipoBase = getOutputType(resultado.caso || buildCase({
+      operador,
+      texto,
+      contexto,
+      cliente,
+      perfil,
+      chat_signals,
+      page_type,
+      modo_ayuda,
+      target_language,
+      target_language_code
+    }));
+
+    if (tipoBase === "IA_ENGANCHE") runtimeStats.suggestions.enganche += 1;
+    if (tipoBase === "IA_CONTEXTO") runtimeStats.suggestions.contexto += 1;
+    if (tipoBase === "IA_MAIL") runtimeStats.suggestions.mail += 1;
+
     const tipo = resultado.shared
-      ? "IA_SHARED"
+      ? `${tipoBase}_SHARED`
       : resultado.usedFallbackOnly
-        ? "IA_FALLBACK"
+        ? `${tipoBase}_FALLBACK`
         : resultado.secondPassUsed
-          ? "IA_2PASS"
-          : "IA";
+          ? `${tipoBase}_2PASS`
+          : tipoBase;
 
     if (resultado.usedFallbackOnly) {
       runtimeStats.suggestions.fallbackOnly += 1;
@@ -3908,7 +4046,10 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
             cliente,
             perfil,
             chat_signals,
-            page_type
+            page_type,
+            modo_ayuda,
+            target_language,
+            target_language_code
           }))
     });
   } catch (err) {
@@ -3916,7 +4057,7 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
       operador,
       extension_id: req.body?.extension_id || "",
       data: null,
-      tipo: "IA",
+      tipo: "IA_ERROR",
       mensaje_operador: req.body?.texto || "",
       request_ok: false
     });
@@ -3932,7 +4073,10 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
         cliente: req.body?.cliente || "",
         perfil: req.body?.perfil || "",
         chat_signals: req.body?.chat_signals || {},
-        page_type: req.body?.page_type || "chat"
+        page_type: req.body?.page_type || "chat",
+        modo_ayuda: req.body?.modo_ayuda || "contexto_correccion",
+        target_language: req.body?.target_language || "English",
+        target_language_code: req.body?.target_language_code || "en"
       });
 
       return res.json({
@@ -3962,34 +4106,27 @@ app.post("/traducir", authorizeOperator, async (req, res) => {
       return res.json({ ok: false, error: "Texto vacio" });
     }
 
-    const cacheKey = getTranslationCacheKey(text);
-    const cached = readTranslationCache(cacheKey);
+    const language = normalizeLanguagePayload(req.body || {});
+    const result = await translateText(
+      text,
+      language.target_language,
+      language.target_language_code
+    );
 
-    if (cached) {
-      runtimeStats.translations.cacheHits += 1;
-      runtimeStats.translations.ok += 1;
-      runtimeStats.translations.lastMs = Date.now() - startedAt;
+    const tipoBase = `TRAD_${String(language.target_language_code || "en").toUpperCase()}`;
+    const tipo = result.cached
+      ? `${tipoBase}_CACHE`
+      : result.shared
+        ? `${tipoBase}_SHARED`
+        : tipoBase;
 
-      registerConsumptionAsync({
-        operador,
-        extension_id,
-        data: null,
-        tipo: "TRAD_CACHE",
-        mensaje_operador: text,
-        request_ok: true
-      });
-
-      return res.json({ ok: true, traducido: cached });
-    }
-
-    const result = await translateText(text);
-    writeTranslationCache(cacheKey, result.traducido);
+    if (result.cached) runtimeStats.translations.cacheHits += 1;
 
     registerConsumptionAsync({
       operador,
       extension_id,
-      data: result.shared ? null : result.usageData,
-      tipo: result.shared ? "TRAD_SHARED" : "TRAD",
+      data: result.shared || result.cached ? null : result.usageData,
+      tipo,
       mensaje_operador: text,
       request_ok: true
     });
@@ -3999,14 +4136,16 @@ app.post("/traducir", authorizeOperator, async (req, res) => {
 
     return res.json({
       ok: true,
-      traducido: result.traducido
+      traducido: result.traducido,
+      target_language: language.target_language,
+      target_language_code: language.target_language_code
     });
   } catch (err) {
     registerConsumptionAsync({
       operador,
       extension_id: req.body?.extension_id || "",
       data: null,
-      tipo: "TRAD",
+      tipo: "TRAD_ERROR",
       mensaje_operador: req.body?.texto || "",
       request_ok: false
     });
@@ -4035,8 +4174,10 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server unico completo profile-aware v3 activo en puerto ${PORT}`);
+  console.log(`Server split IA activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
-  console.log(`SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
-  console.log(`Rangos IA => 1:${TARGET_SUGGESTION_SPECS[0].min}-${TARGET_SUGGESTION_SPECS[0].max}, 2:${TARGET_SUGGESTION_SPECS[1].min}-${TARGET_SUGGESTION_SPECS[1].max}, 3:${TARGET_SUGGESTION_SPECS[2].min}-${TARGET_SUGGESTION_SPECS[2].max}`);
+  console.log(`CHAT SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
+  console.log(`MAIL_MAX_TOKENS => ${MAIL_MAX_TOKENS}`);
+  console.log(`Rangos chat => 1:${CHAT_TARGET_SPECS[0].min}-${CHAT_TARGET_SPECS[0].max}, 2:${CHAT_TARGET_SPECS[1].min}-${CHAT_TARGET_SPECS[1].max}, 3:${CHAT_TARGET_SPECS[2].min}-${CHAT_TARGET_SPECS[2].max}`);
+  console.log(`Rangos mail => 1:${MAIL_TARGET_SPECS[0].min}-${MAIL_TARGET_SPECS[0].max}, 2:${MAIL_TARGET_SPECS[1].min}-${MAIL_TARGET_SPECS[1].max}, 3:${MAIL_TARGET_SPECS[2].min}-${MAIL_TARGET_SPECS[2].max}`);
 });
