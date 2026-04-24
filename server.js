@@ -34,6 +34,201 @@ function normalizeText(text = "") {
     .trim();
 }
 
+function normalizeSpaces(text = "") {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function cleanHuman(text = "") {
+  return String(text ?? "")
+    .replace(/[“”"]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function countChars(text = "") {
+  return normalizeSpaces(String(text || "")).length;
+}
+
+function countQuestions(text = "") {
+  const t = String(text || "");
+  const abiertas = (t.match(/¿/g) || []).length;
+  const cerradas = (t.match(/\?/g) || []).length;
+  return Math.max(abiertas, cerradas);
+}
+
+function compact(text = "", maxChars = 1200) {
+  const clean = String(text ?? "").trim();
+  if (!clean) return "";
+  return clean.length <= maxChars ? clean : clean.slice(-maxChars);
+}
+
+function dedupeStrings(items = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of items) {
+    const clean = normalizeSpaces(String(item || ""));
+    const key = normalizeText(clean);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+
+  return out;
+}
+
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function roundMoney(n = 0) {
+  return Number(safeNumber(n, 0).toFixed(6));
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function formatDateISO(date = new Date()) {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function firstDayOfMonthUTC(date = new Date()) {
+  return formatDateISO(
+    new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
+  );
+}
+
+function isValidISODate(text = "") {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(text || ""));
+}
+
+function addDaysISO(dateISO = "", days = 0) {
+  const d = new Date(`${dateISO}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setUTCDate(d.getUTCDate() + days);
+  return formatDateISO(d);
+}
+
+function compareISODate(a = "", b = "") {
+  return String(a).localeCompare(String(b));
+}
+
+function buildDateRange(fromRaw = "", toRaw = "") {
+  const today = formatDateISO(new Date());
+  let from = isValidISODate(fromRaw) ? fromRaw : firstDayOfMonthUTC(new Date());
+  let to = isValidISODate(toRaw) ? toRaw : today;
+
+  if (compareISODate(from, to) > 0) {
+    const tmp = from;
+    from = to;
+    to = tmp;
+  }
+
+  return {
+    from,
+    to,
+    startIso: `${from}T00:00:00.000Z`,
+    endExclusiveIso: `${addDaysISO(to, 1)}T00:00:00.000Z`
+  };
+}
+
+async function selectAllPages(builderFactory, pageSize = 1000) {
+  let from = 0;
+  const rows = [];
+
+  while (true) {
+    const { data, error } = await builderFactory(from, from + pageSize - 1);
+    if (error) throw error;
+
+    const chunk = Array.isArray(data) ? data : [];
+    rows.push(...chunk);
+
+    if (chunk.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return rows;
+}
+
+function createRequestId() {
+  try {
+    return randomUUID();
+  } catch (_err) {
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+function base64UrlEncode(input = "") {
+  const buffer = Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(String(input), "utf8");
+
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(input = "") {
+  const normalized = String(input)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  const padding = normalized.length % 4 === 0
+    ? ""
+    : "=".repeat(4 - (normalized.length % 4));
+
+  return Buffer.from(normalized + padding, "base64").toString("utf8");
+}
+
+function safeCompare(a = "", b = "") {
+  const aa = Buffer.from(String(a), "utf8");
+  const bb = Buffer.from(String(b), "utf8");
+
+  if (aa.length !== bb.length) return false;
+
+  try {
+    return timingSafeEqual(aa, bb);
+  } catch (_err) {
+    return false;
+  }
+}
+
+function combineUsageData(items = []) {
+  const total = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
+  };
+
+  let found = false;
+
+  for (const item of items) {
+    const usage = item?.usage || item;
+    if (!usage) continue;
+
+    total.prompt_tokens += safeNumber(usage.prompt_tokens);
+    total.completion_tokens += safeNumber(usage.completion_tokens);
+    total.total_tokens += safeNumber(usage.total_tokens);
+
+    if (
+      safeNumber(usage.prompt_tokens) ||
+      safeNumber(usage.completion_tokens) ||
+      safeNumber(usage.total_tokens)
+    ) {
+      found = true;
+    }
+  }
+
+  return found ? { usage: total } : null;
+}
+
 const PORT = readIntEnv("PORT", 3000, 1, 65535);
 
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "");
@@ -330,216 +525,17 @@ app.use((err, _req, res, next) => {
 });
 
 /* =========================================================
- * GENERIC UTILS
- * ======================================================= */
-
-function createRequestId() {
-  try {
-    return randomUUID();
-  } catch (_err) {
-    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-}
-
-function normalizeSpaces(text = "") {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
-}
-
-function cleanHuman(text = "") {
-  return String(text ?? "")
-    .replace(/[“”"]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function compact(text = "", maxChars = 1200) {
-  const clean = String(text ?? "").trim();
-  if (!clean) return "";
-  return clean.length <= maxChars ? clean : clean.slice(-maxChars);
-}
-
-function dedupeStrings(items = []) {
-  const seen = new Set();
-  const out = [];
-
-  for (const item of items) {
-    const clean = normalizeSpaces(String(item || ""));
-    const key = normalizeText(clean);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(clean);
-  }
-
-  return out;
-}
-
-function cleanLine(text = "") {
-  return cleanHuman(
-    String(text ?? "")
-      .replace(/^\s*\d+[\).\-\s:]*/, "")
-      .replace(/^\s*[•\-–—]+\s*/, "")
-  );
-}
-
-function countChars(text = "") {
-  return normalizeSpaces(String(text || "")).length;
-}
-
-function countQuestions(text = "") {
-  const t = String(text || "");
-  const abiertas = (t.match(/¿/g) || []).length;
-  const cerradas = (t.match(/\?/g) || []).length;
-  return Math.max(abiertas, cerradas);
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function safeNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function roundMoney(n = 0) {
-  return Number(safeNumber(n, 0).toFixed(6));
-}
-
-function formatDateISO(date = new Date()) {
-  const yyyy = date.getUTCFullYear();
-  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(date.getUTCDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function firstDayOfMonthUTC(date = new Date()) {
-  return formatDateISO(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)));
-}
-
-function isValidISODate(text = "") {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(text || ""));
-}
-
-function addDaysISO(dateISO = "", days = 0) {
-  const d = new Date(`${dateISO}T00:00:00.000Z`);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setUTCDate(d.getUTCDate() + days);
-  return formatDateISO(d);
-}
-
-function compareISODate(a = "", b = "") {
-  return String(a).localeCompare(String(b));
-}
-
-function buildDateRange(fromRaw = "", toRaw = "") {
-  const today = formatDateISO(new Date());
-  let from = isValidISODate(fromRaw) ? fromRaw : firstDayOfMonthUTC(new Date());
-  let to = isValidISODate(toRaw) ? toRaw : today;
-
-  if (compareISODate(from, to) > 0) {
-    const tmp = from;
-    from = to;
-    to = tmp;
-  }
-
-  return {
-    from,
-    to,
-    startIso: `${from}T00:00:00.000Z`,
-    endExclusiveIso: `${addDaysISO(to, 1)}T00:00:00.000Z`
-  };
-}
-
-async function selectAllPages(builderFactory, pageSize = 1000) {
-  let from = 0;
-  const rows = [];
-
-  while (true) {
-    const { data, error } = await builderFactory(from, from + pageSize - 1);
-
-    if (error) {
-      throw error;
-    }
-
-    const chunk = Array.isArray(data) ? data : [];
-    rows.push(...chunk);
-
-    if (chunk.length < pageSize) break;
-    from += pageSize;
-  }
-
-  return rows;
-}
-
-function base64UrlEncode(input = "") {
-  const buffer = Buffer.isBuffer(input)
-    ? input
-    : Buffer.from(String(input), "utf8");
-
-  return buffer
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function base64UrlDecode(input = "") {
-  const normalized = String(input)
-    .replace(/-/g, "+")
-    .replace(/_/g, "/");
-
-  const padding = normalized.length % 4 === 0
-    ? ""
-    : "=".repeat(4 - (normalized.length % 4));
-
-  return Buffer.from(normalized + padding, "base64").toString("utf8");
-}
-
-function safeCompare(a = "", b = "") {
-  const aa = Buffer.from(String(a), "utf8");
-  const bb = Buffer.from(String(b), "utf8");
-
-  if (aa.length !== bb.length) return false;
-
-  try {
-    return timingSafeEqual(aa, bb);
-  } catch (_err) {
-    return false;
-  }
-}
-
-function combineUsageData(items = []) {
-  const total = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0
-  };
-
-  let found = false;
-
-  for (const item of items) {
-    const usage = item?.usage || item;
-    if (!usage) continue;
-
-    total.prompt_tokens += safeNumber(usage.prompt_tokens);
-    total.completion_tokens += safeNumber(usage.completion_tokens);
-    total.total_tokens += safeNumber(usage.total_tokens);
-
-    if (
-      safeNumber(usage.prompt_tokens) ||
-      safeNumber(usage.completion_tokens) ||
-      safeNumber(usage.total_tokens)
-    ) {
-      found = true;
-    }
-  }
-
-  return found ? { usage: total } : null;
-}
-
-/* =========================================================
  * OPERATOR AUTH
  * ======================================================= */
+
+function formatOperatorName(name = "") {
+  return normalizeSpaces(name)
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function readOperatorCache(name = "") {
   const key = normalizeText(formatOperatorName(name));
@@ -569,15 +565,6 @@ function deleteOperatorCache(name = "") {
   const key = normalizeText(formatOperatorName(name));
   if (!key) return;
   operatorAuthCache.delete(key);
-}
-
-function formatOperatorName(name = "") {
-  return normalizeSpaces(name)
-    .toLowerCase()
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 async function validateOperatorAccess(operador = "", clave = "") {
@@ -989,7 +976,7 @@ function getSharedInFlight(map, key, factory) {
       }
     });
 
-  map.set(key, promise);
+    map.set(key, promise);
 
   return {
     shared: false,
@@ -1098,7 +1085,7 @@ async function callOpenAI({
  * SUGGESTIONS ENGINE
  * ======================================================= */
 
-const STOPWORDS = new Set([
+const STOPWORDS_SUGGESTIONS = new Set([
   "a", "al", "algo", "alguien", "alla", "allá", "and", "ante", "antes", "asi",
   "así", "aqui", "aquí", "be", "but", "by", "como", "con", "cual", "cuales",
   "cuáles", "de", "del", "do", "donde", "dónde", "el", "ella", "ellas", "ellos",
@@ -1133,6 +1120,7 @@ const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|café|cena|drink|
 const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
 const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|cómo estás|que tal|qué tal)\b/i;
 const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ah[ií] en lo de)\b/i;
+const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|cariño|beb[eé])\b/gi;
 
 const RISK_CATALOG = {
   contacto_externo: {
@@ -1445,13 +1433,13 @@ function detectTone(caso = {}) {
   return "natural, cálido y útil";
 }
 
-function extractKeywords(text = "") {
+function extractKeywordSignals(text = "") {
   const counts = new Map();
 
   for (const word of normalizeText(text).split(/\s+/)) {
     if (!word) continue;
     if (word.length < 4) continue;
-    if (STOPWORDS.has(word)) continue;
+    if (STOPWORDS_SUGGESTIONS.has(word)) continue;
     if (BANNED_TOPIC_WORDS.has(word)) continue;
     if (!/^[a-z0-9]+$/i.test(word)) continue;
     counts.set(word, (counts.get(word) || 0) + 1);
@@ -1474,6 +1462,10 @@ function keywordOverlap(text = "", keywords = []) {
   }
 
   return total;
+}
+
+function countEndearments(text = "") {
+  return (String(text || "").match(OVER_AFFECTION_REGEX) || []).length;
 }
 
 function getSuggestionMemoryKey(caso = {}) {
@@ -1620,7 +1612,7 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
 
   let score = 0;
 
-  score += scoreLength(length, spec) * 0.32;
+  score += scoreLength(length, spec) * 0.30;
   score += countQuestions(s) <= 1 ? 0.08 : -0.15;
 
   const overlapClient = keywordOverlap(s, caso.clientKeywords || []);
@@ -1685,8 +1677,15 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   }
 
   if (
+    caso.affectionLoadHigh &&
+    countEndearments(s) >= 2
+  ) {
+    score -= 0.08;
+  }
+
+  if (
     caso.mode === "RESPUESTA_CHAT" &&
-    (caso.lastClientIsQuestion || false) &&
+    caso.lastClientIsQuestion &&
     overlapClient === 0
   ) {
     score -= 0.08;
@@ -1796,6 +1795,14 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     notes.push("- Falta bajar presión y validar el ritmo.");
   }
 
+  if (
+    caso.affectionLoadHigh &&
+    candidates.length &&
+    candidates.some((item) => countEndearments(item.text) >= 2)
+  ) {
+    notes.push("- Reduce la sobrecarga de apelativos afectivos repetidos.");
+  }
+
   if (!notes.length) {
     notes.push("- Hazlas más específicas, más útiles y menos genéricas.");
   }
@@ -1825,6 +1832,7 @@ function buildSystemPrompt(caso = {}) {
     "- conservar el hilo que el operador ya viene construyendo",
     "- sonar humano, concreto y útil",
     "- usar hechos reales del chat antes que frases genéricas",
+    "- si la conversación ya está muy cargada de apelativos afectivos, bajar un poco la intensidad",
     "",
     "REGLAS OBLIGATORIAS",
     "- si no existe mensaje nuevo de la clienta, no escribas como si ya hubiera contestado",
@@ -2088,7 +2096,7 @@ function fallbackReengagementSuggestions(caso = {}) {
   return [
     "Hola. Paso por aquí con una pregunta simple y real: ¿qué suele hacer que una conversación te parezca interesante desde el principio?",
     "Hola. En vez de dejar un mensaje más del montón, prefiero preguntarte algo concreto: ¿qué te hace seguir una charla por aquí?",
-    "Hola. Reaparezco con una fácil para no sonar copiado: ¿eres más de gente tranquila o de quien entra con un poco más de chispa?"
+    "Hola. Reaparezco con una fácil para no sonar copiado: ¿eres más de gente tranquila o de quien entra con más chispa?"
   ];
 }
 
@@ -2164,15 +2172,17 @@ function buildCase(input = {}) {
     .slice(-4)
     .map((x) => x.text);
 
-  const operatorKeywords = extractKeywords(operatorRecent.join(" "));
-  const clientKeywords = extractKeywords(clientePlano || clientRecent.join(" "));
-  const draftKeywords = extractKeywords(textoPlano);
-  const detailKeywords = detallePerfil?.value ? extractKeywords(detallePerfil.value) : [];
+  const operatorKeywords = extractKeywordSignals(operatorRecent.join(" "));
+  const clientKeywords = extractKeywordSignals(clientePlano || clientRecent.join(" "));
+  const draftKeywords = extractKeywordSignals(textoPlano);
+  const detailKeywords = detallePerfil?.value ? extractKeywordSignals(detallePerfil.value) : [];
   const activeThemes = dedupeStrings([
     ...clientKeywords.slice(0, 4),
     ...operatorKeywords.slice(0, 4),
     ...draftKeywords.slice(0, 4)
   ]).slice(0, 8);
+
+  const affectionLoadHigh = countEndearments(operatorRecent.join(" ")) >= 4;
 
   const baseCase = {
     operador,
@@ -2194,6 +2204,7 @@ function buildCase(input = {}) {
     draftKeywords,
     detailKeywords,
     activeThemes,
+    affectionLoadHigh,
     lastClientIsQuestion: /\?/.test(clientePlano || "")
   };
 
@@ -2285,7 +2296,7 @@ async function generateSuggestionsCore(input = {}) {
       pool.push(...mapOptionsToCandidates(repairPass.options, "openai_2", caso));
     }
   } catch (_err) {
-    // Si OpenAI falla, seguimos con fallback útil.
+    // fallback sigue
   }
 
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
@@ -3075,7 +3086,7 @@ function parseOperatorFilter(raw = "") {
 function getHealthPayload() {
   return {
     ok: true,
-    service: "server pro unico",
+    service: "server unico completo",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: {
       configured: adminConfigured(),
