@@ -463,6 +463,7 @@ const runtimeStats = {
     inflightHits: 0,
     secondPasses: 0,
     fallbackOnly: 0,
+    forcedFill: 0,
     lastMs: 0
   },
   translations: {
@@ -1121,8 +1122,9 @@ const BANNED_TOPIC_WORDS = new Set([
   "online"
 ]);
 
-const INTERNAL_LABEL_REGEX = /\b(NOMBRE_CLIENTA|PAIS_CLIENTA|FECHA_NACIMIENTO|ESTADO_CIVIL|INTERESES_EN_COMUN|INTERESTED_IN|INTERESES_CLIENTA|LOOKING_FOR|ABOUT_ME|DATOS_CLIENTA|PROFILE_ANCHORS|RAW_PROFILE|no disponible|ninguno)\b/i;
+const INTERNAL_LABEL_REGEX = /\b(NOMBRE_CLIENTA|PAIS_CLIENTA|FECHA_NACIMIENTO|ESTADO_CIVIL|INTERESES_EN_COMUN|INTERESTED_IN|INTERESES_CLIENTA|LOOKING_FOR|ABOUT_ME|ABOUT_TEXT|DATOS_CLIENTA|PROFILE_ANCHORS|RAW_PROFILE|no disponible|ninguno)\b/i;
 const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|como te decia|frase vacia|mejor dicho|te respondi mejor)\b/i;
+const FALSE_FAMILIARITY_REGEX = /\b(nuestras conversaciones|lo que hablamos|como me dijiste|me acorde de ti|me qued[eé] pensando en ti|hace tiempo|otra vez por aqui|retomar lo nuestro|seguir donde lo dejamos)\b/i;
 const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|numero|phone)\b/i;
 const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|cena|drink|dinner|direccion|hotel|llamame|llamarte|call me)\b/i;
 const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
@@ -1235,6 +1237,7 @@ function isBadProfileValue(value = "") {
     "intereses_clienta",
     "looking_for",
     "about_me",
+    "about_text",
     "datos_clienta",
     "profile_anchors",
     "raw_profile",
@@ -1248,8 +1251,7 @@ function isBadProfileValue(value = "") {
     "manage media"
   ];
 
-  if (labels.includes(n)) return true;
-  return false;
+  return labels.includes(n);
 }
 
 function sanitizeProfileValue(value = "", maxLen = 80) {
@@ -1305,6 +1307,7 @@ function parseProfile(perfil = "") {
     interesesClienta: dedupeStrings([...interestedIn, ...interesesClienta]),
     lookingFor,
     aboutMe,
+    aboutText: sanitizeProfileValue(getProfileLine(raw, "ABOUT_TEXT"), 900),
     datosClienta,
     profileAnchors: sanitizeProfileValue(getProfileLine(raw, "PROFILE_ANCHORS"), 300),
     rawProfile: sanitizeProfileValue(getProfileLine(raw, "RAW_PROFILE"), 1200)
@@ -1319,6 +1322,7 @@ function parseProfile(perfil = "") {
     ...profile.interesesClienta,
     ...profile.lookingFor,
     ...profile.aboutMe,
+    profile.aboutText,
     ...profile.datosClienta
   ]).filter(Boolean);
 
@@ -1335,6 +1339,7 @@ function hasUsableProfile(profile = {}) {
     profile.interesesClienta?.length ||
     profile.lookingFor?.length ||
     profile.aboutMe?.length ||
+    profile.aboutText ||
     profile.datosClienta?.length
   );
 }
@@ -1352,12 +1357,13 @@ function pickProfileDetail(perfil = {}, text = "") {
   const joined = normalizeText(text);
 
   const pool = [
+    perfil.aboutText ? { type: "about_text", value: perfil.aboutText, priority: 120 } : null,
     ...(perfil.aboutMe || []).map((value) => ({ type: "about_me", value, priority: 100 })),
     ...(perfil.interesesClienta || []).map((value) => ({ type: "interes_clienta", value, priority: 90 })),
     ...(perfil.lookingFor || []).map((value) => ({ type: "looking_for", value, priority: 80 })),
     ...(perfil.interesesEnComun || []).map((value) => ({ type: "interes_comun", value, priority: 70 })),
     ...(perfil.datosClienta || []).map((value) => ({ type: "dato_clienta", value, priority: 60 }))
-  ].filter((x) => x.value && !isBadProfileValue(x.value));
+  ].filter((x) => x && x.value && !isBadProfileValue(x.value));
 
   for (const item of pool) {
     const key = normalizeText(item.value);
@@ -1397,7 +1403,20 @@ function getLastDialogRole(contextLines = []) {
 }
 
 function detectMode({ textoPlano = "", clientePlano = "", contextLines = [], chatSignals = {} }) {
+  const clientCount = contextLines.filter((x) => x.role === "clienta").length;
+  const operatorCount = contextLines.filter((x) => x.role === "operador").length;
   const lastDialogRole = getLastDialogRole(contextLines);
+
+  if (clientCount === 0 && operatorCount > 0) {
+    return "APERTURA_SIN_RESPUESTA";
+  }
+
+  if (
+    (chatSignals.total_clienta_visible || 0) === 0 &&
+    (chatSignals.total_operador_visible || 0) > 0
+  ) {
+    return "APERTURA_SIN_RESPUESTA";
+  }
 
   if (
     (chatSignals.ultimo_role_visible === "clienta" && chatSignals.hay_clienta_visible) ||
@@ -1501,6 +1520,7 @@ function detectIntent(caso = {}) {
   }
 
   if (caso.mode === "APERTURA_FRIA") return "ENGANCHAR";
+  if (caso.mode === "APERTURA_SIN_RESPUESTA") return "ABRIR_CON_PERFIL";
   if (caso.mode === "REAPERTURA_SUAVE") return "REENGANCHAR";
 
   return "MANTENER_CONVERSACION";
@@ -1516,6 +1536,8 @@ function detectObjective(caso = {}) {
       return "Bajar intensidad, validar el ritmo y evitar que la conversacion se caiga";
     case "DAR_CONFIANZA":
       return "Reducir desconfianza con una respuesta clara, humana y nada defensiva";
+    case "ABRIR_CON_PERFIL":
+      return "Abrir conversacion desde datos reales del perfil sin fingir confianza previa";
     case "ENGANCHAR":
       return "Abrir con curiosidad concreta usando perfil o contexto real";
     case "REENGANCHAR":
@@ -1541,6 +1563,7 @@ function detectTone(caso = {}) {
   }
 
   if (caso.mode === "APERTURA_FRIA") return "ligero, curioso y humano";
+  if (caso.mode === "APERTURA_SIN_RESPUESTA") return "natural, respetuoso y basado en perfil";
   if (caso.mode === "REAPERTURA_SUAVE") return "suave, relajado y sin reclamo";
   return "natural, calido y util";
 }
@@ -1620,7 +1643,8 @@ function getSuggestionMemoryKey(caso = {}) {
     normalizeText(caso.textoPlano || "").slice(0, 220),
     normalizeText(caso.clientePlano || "").slice(0, 180),
     normalizeText(caso.contextoPlano || "").slice(-260),
-    normalizeText(caso.perfil?.profileAnchors || "").slice(0, 220)
+    normalizeText(caso.perfil?.profileAnchors || "").slice(0, 220),
+    normalizeText(caso.perfil?.aboutText || "").slice(0, 220)
   ].join("||");
 }
 
@@ -1743,6 +1767,10 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
   if (META_REGEX.test(n)) return true;
   if (talksAboutClientInThirdPerson(s, caso)) return true;
 
+  if (caso.mode === "APERTURA_SIN_RESPUESTA" && FALSE_FAMILIARITY_REGEX.test(n)) {
+    return true;
+  }
+
   if (caso.mode !== "APERTURA_FRIA" && EMPTY_GENERIC_START_REGEX.test(n) && countChars(s) < 130) {
     return true;
   }
@@ -1778,8 +1806,12 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   }
 
   if (caso.profileAvailable) {
-    score += overlapProfile > 0 ? 0.20 : -0.10;
+    score += overlapProfile > 0 ? 0.22 : -0.10;
     score += addressesClientDirectly(s, caso) ? 0.08 : -0.05;
+  }
+
+  if (caso.mode === "APERTURA_SIN_RESPUESTA") {
+    score += FALSE_FAMILIARITY_REGEX.test(n) ? -0.40 : 0.08;
   }
 
   if (overlapThemes > 0) score += 0.07;
@@ -1937,6 +1969,14 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
   }
 
   if (
+    caso.mode === "APERTURA_SIN_RESPUESTA" &&
+    candidates.length &&
+    candidates.some((item) => FALSE_FAMILIARITY_REGEX.test(normalizeText(item.text)))
+  ) {
+    notes.push("- No finjas confianza previa. No digas 'nuestras conversaciones', 'me acorde de ti' ni 'lo que hablamos'.");
+  }
+
+  if (
     caso.mode === "RESPUESTA_CHAT" &&
     candidates.length &&
     candidates.every((item) => keywordOverlap(item.text, caso.clientKeywords || []) === 0)
@@ -1979,7 +2019,7 @@ function buildSystemPrompt(caso = {}) {
     "- el borrador del operador es una intencion mal escrita que debes convertir en un mensaje listo para enviar",
     `- escribe directamente a ${name}, no hables sobre ella en tercera persona`,
     "- prohibido escribir frases tipo: 'La historia de Gabriela...', 'Gabriela parece...', 'La vida de Gabriela...'",
-    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
+    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, ABOUT_TEXT, RAW_PROFILE o PROFILE_ANCHORS",
     "- si hay nombre disponible, puedes iniciar con el nombre de forma natural",
     "",
     `Objetivo principal: ${caso.objective}`,
@@ -1987,10 +2027,17 @@ function buildSystemPrompt(caso = {}) {
     `Modo: ${caso.mode}`,
     `Riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
     "",
+    "SI EL MODO ES APERTURA_SIN_RESPUESTA",
+    "- significa que hay mensajes previos del operador pero la clienta no ha contestado",
+    "- no finjas que ya hubo conversacion real",
+    "- prohibido decir: nuestras conversaciones, lo que hablamos, me acorde de ti, como me dijiste, seguimos donde quedamos",
+    "- usa el perfil como ancla principal",
+    "",
     "USO DEL PERFIL",
+    "- si hay ABOUT_TEXT, ese texto personal tiene prioridad alta",
     "- si hay datos reales de perfil, usalos como fuente principal cuando el chat esta vacio, viejo o con poco dialogo",
     "- cada opcion debe apoyarse en 1 o 2 datos reales del perfil si existen",
-    "- prioriza personalidad visible, intereses, lo que busca y pais",
+    "- prioriza ABOUT_TEXT, personalidad visible, intereses, lo que busca y pais",
     "- usa estado civil solo si la intencion habla de amor, confianza, pasado, nueva etapa o conexion emocional",
     "- no inventes viudez, divorcio, hijos, ciudad, pais ni intenciones",
     "- si el perfil dice Married, no lo conviertas en Divorced o Widowed",
@@ -2009,7 +2056,7 @@ function buildSystemPrompt(caso = {}) {
     "PRIORIDADES",
     "- responder primero a lo ultimo de la clienta cuando exista mensaje real",
     "- si no hay mensaje nuevo de la clienta, usar perfil como ancla principal",
-    "- conservar el hilo que el operador ya viene construyendo",
+    "- conservar el hilo que el operador ya viene construyendo sin inventar respuesta de ella",
     "- sonar humano, concreto y util",
     "- usar hechos reales del chat o perfil antes que frases genericas",
     "- dejar una salida facil para que la clienta responda",
@@ -2060,6 +2107,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       `- intencion detectada: ${caso.intent}`,
       `- objetivo: ${caso.objective}`,
       `- tono: ${caso.tone}`,
+      `- modo: ${caso.mode}`,
       `- riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
       `- guia de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversacion natural y util"}`
     ].join("\n"),
@@ -2101,7 +2149,8 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       `- estado civil: ${caso.perfil?.estadoCivil || ""}`,
       `- intereses: ${(caso.perfil?.interesesClienta || []).join(" | ")}`,
       `- busca: ${(caso.perfil?.lookingFor || []).join(" | ")}`,
-      `- personalidad visible: ${(caso.perfil?.aboutMe || []).join(" | ")}`
+      `- personalidad visible: ${(caso.perfil?.aboutMe || []).join(" | ")}`,
+      `- texto personal: ${caso.perfil?.aboutText || ""}`
     ].join("\n"),
     [
       "KEYWORDS",
@@ -2138,14 +2187,16 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     "1. que quiere lograr el operador",
     "2. que datos reales del perfil conviene usar",
     "3. que parte del borrador debe eliminarse por generica, repetitiva o riesgosa",
-    "4. como hablarle directamente a la clienta sin hablar sobre ella en tercera persona"
+    "4. como hablarle directamente a la clienta sin hablar sobre ella en tercera persona",
+    "5. si no hay respuesta de la clienta, no finjas familiaridad previa"
   ].join("\n"));
 
   blocks.push([
     "IMPORTANTE",
     "- habla directamente con la clienta",
     "- no digas 'La historia de Gabriela' ni 'Gabriela parece'",
-    "- no uses etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
+    "- no uses etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, ABOUT_TEXT, RAW_PROFILE o PROFILE_ANCHORS",
+    "- si hay ABOUT_TEXT, usalo como dato emocional de alta prioridad",
     "- si hay perfil, usa perfil real como base",
     "- no copies el borrador si esta pobre",
     "- no inventes datos",
@@ -2163,6 +2214,7 @@ function pickTemperature(caso = {}, isRepair = false) {
   let t = 0.76;
 
   if (caso.mode === "APERTURA_FRIA") t = 0.82;
+  if (caso.mode === "APERTURA_SIN_RESPUESTA") t = 0.76;
   if (caso.mode === "REAPERTURA_SUAVE") t = 0.78;
   if (caso.mode === "RESPUESTA_CHAT") t = 0.70;
 
@@ -2194,20 +2246,56 @@ function pickTemperature(caso = {}, isRepair = false) {
 function buildProfileBasedFallbacks(caso = {}) {
   const name = namePrefix(caso);
   const profile = caso.perfil || {};
+  const aboutText = profile.aboutText || "";
   const about = profile.aboutMe || [];
   const interests = profile.interesesClienta || [];
   const looking = profile.lookingFor || [];
   const country = profile.paisClienta || "";
 
-  const aboutText = about.slice(0, 3).join(", ");
+  const aboutTextShort = aboutText.length > 180 ? `${aboutText.slice(0, 180).trim()}...` : aboutText;
+  const aboutTextTiny = aboutText.length > 95 ? `${aboutText.slice(0, 95).trim()}...` : aboutText;
+  const aboutTextMedium = aboutText.length > 135 ? `${aboutText.slice(0, 135).trim()}...` : aboutText;
+
+  const aboutTextLower = normalizeText(aboutText);
+  const hasNewChapter = /\b(new chapter|nueva etapa|starting a new chapter|separated|divorcing|divorcio|amistades|friendships|cool friendships)\b/.test(aboutTextLower);
+
+  const aboutTextAngle = hasNewChapter
+    ? "una nueva etapa y amistades tranquilas"
+    : "algo honesto sobre la etapa que estas viviendo";
+
+  const aboutTextCore = hasNewChapter
+    ? "Me gusto porque suena a que buscas algo sin presion, pero con una energia real y tranquila."
+    : "Me gusto porque se siente mas humano que una descripcion perfecta y deja ver algo real de ti.";
+
+  const aboutTextQuestion = hasNewChapter
+    ? "Que tipo de amistad te hace sentir comoda ahora?"
+    : "Que parte de esa etapa te gustaria vivir con mas calma?";
+
+  const aboutTextLong = hasNewChapter
+    ? "No lo leo como algo triste, sino como una etapa donde una conversacion simple, honesta y sin presion puede sentirse bastante bien."
+    : "No lo tomo como una frase cualquiera, sino como una pista de que hay una historia real detras y una forma mas consciente de ver las cosas.";
+
+  const aboutTextClosing = hasNewChapter
+    ? "Me dio curiosidad saber que clase de persona te transmite paz en este momento de tu vida."
+    : "Me dio curiosidad saber que tipo de conversacion te hace sentir realmente comoda.";
+
+  if (aboutText) {
+    return [
+      `${name}lei en tu perfil que estas viviendo ${aboutTextAngle}. ${aboutTextCore} ${aboutTextQuestion}`,
+      `${name}me llamo la atencion lo que escribiste: ${aboutTextTiny}. Se siente directo y honesto, no como una frase vacia. ${aboutTextQuestion}`,
+      `${name}lei esta parte de tu perfil: ${aboutTextMedium}. ${aboutTextLong} ${aboutTextClosing}`
+    ];
+  }
+
+  const aboutTextList = about.slice(0, 3).join(", ");
   const interestText = interests.slice(0, 2).join(" y ");
   const lookingText = looking.slice(0, 2).join(", ");
 
   if (about.length && interests.length) {
     return [
-      `${name}vi que te describes como ${aboutText} y que te interesa ${interestText}. Eso me dio curiosidad, porque suena a alguien que valora una conversacion real y tranquila.`,
-      `${name}me llamo la atencion que entre tus intereses este ${interestText}, y tambien que te describas como ${aboutText}. Me gusta cuando un perfil deja ver un poco de personalidad, no solo una foto bonita.`,
-      `${name}vi varias cosas en tu perfil que me dieron curiosidad: ${aboutText}, y tambien tu interes por ${interestText}. No quiero sonar como un mensaje copiado, pero si me hizo pensar que quizas tienes una forma bonita y bastante consciente de vivir las cosas.`
+      `${name}vi que te describes como ${aboutTextList} y que te interesa ${interestText}. Eso me dio curiosidad, porque suena a alguien que valora una conversacion real y tranquila.`,
+      `${name}me llamo la atencion que entre tus intereses este ${interestText}, y tambien que te describas como ${aboutTextList}. Me gusta cuando un perfil deja ver un poco de personalidad, no solo una foto bonita.`,
+      `${name}vi varias cosas en tu perfil que me dieron curiosidad: ${aboutTextList}, y tambien tu interes por ${interestText}. No quiero sonar como un mensaje copiado, pero si me hizo pensar que quizas tienes una forma bonita y bastante consciente de vivir las cosas.`
     ];
   }
 
@@ -2221,9 +2309,9 @@ function buildProfileBasedFallbacks(caso = {}) {
 
   if (about.length) {
     return [
-      `${name}vi que te describes como ${aboutText}. Eso me llamo la atencion porque no todo el mundo muestra esa parte de si mismo desde el perfil.`,
-      `${name}me gusto ver que te describes como ${aboutText}. Me dio curiosidad saber si esa forma de ser es algo que siempre has tenido o algo que la vida te fue ensenando.`,
-      `${name}hay algo de tu perfil que me parecio bonito: ${aboutText}. No quiero convertirlo en algo demasiado serio, pero si me hizo pensar que detras de esas palabras debe haber una forma interesante de mirar la vida.`
+      `${name}vi que te describes como ${aboutTextList}. Eso me llamo la atencion porque no todo el mundo muestra esa parte de si mismo desde el perfil.`,
+      `${name}me gusto ver que te describes como ${aboutTextList}. Me dio curiosidad saber si esa forma de ser es algo que siempre has tenido o algo que la vida te fue ensenando.`,
+      `${name}hay algo de tu perfil que me parecio bonito: ${aboutTextList}. No quiero convertirlo en algo demasiado serio, pero si me hizo pensar que detras de esas palabras debe haber una forma interesante de mirar la vida.`
     ];
   }
 
@@ -2328,9 +2416,58 @@ function fallbackSuggestions(caso = {}) {
   if (risk.length) return risk;
 
   if (caso.mode === "RESPUESTA_CHAT") return fallbackReplySuggestions(caso);
+  if (caso.mode === "APERTURA_SIN_RESPUESTA") return fallbackOpeningSuggestions(caso);
   if (caso.mode === "REAPERTURA_SUAVE") return fallbackReengagementSuggestions(caso);
 
   return fallbackOpeningSuggestions(caso);
+}
+
+function emergencySuggestions(caso = {}) {
+  const name = namePrefix(caso);
+  return [
+    `${name}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y me gustaria saber que tipo de conversacion te hace sentir comoda por aqui.`,
+    `${name}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una pregunta que de verdad abra un poco la puerta.`,
+    `${name}me dio curiosidad saber un poco mas de ti sin sonar como un mensaje copiado. Me interesa mas una conversacion tranquila y natural que una entrada demasiado perfecta.`
+  ];
+}
+
+function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
+  const final = [];
+
+  const pushClean = (text = "") => {
+    const clean = cleanSuggestion(text);
+    if (!clean) return;
+    if (INTERNAL_LABEL_REGEX.test(clean)) return;
+    if (DISALLOWED_CONTACT_REGEX.test(normalizeText(clean))) return;
+    if (DISALLOWED_MEET_REGEX.test(normalizeText(clean))) return;
+    if (FALSE_FAMILIARITY_REGEX.test(normalizeText(clean)) && caso.mode === "APERTURA_SIN_RESPUESTA") return;
+    if (final.some((x) => looksTooSimilar(x, clean))) return;
+    final.push(clean);
+  };
+
+  for (const item of selected || []) {
+    pushClean(typeof item === "string" ? item : item.text);
+  }
+
+  for (const item of fallbackSuggestions(caso)) {
+    if (final.length >= 3) break;
+    pushClean(item);
+  }
+
+  for (const item of emergencySuggestions(caso)) {
+    if (final.length >= 3) break;
+    pushClean(item);
+  }
+
+  while (final.length < 3) {
+    final.push(emergencySuggestions(caso)[final.length] || emergencySuggestions(caso)[0]);
+  }
+
+  if (final.length > 3) {
+    return final.slice(0, 3);
+  }
+
+  return final;
 }
 
 function buildCase(input = {}) {
@@ -2372,7 +2509,8 @@ function buildCase(input = {}) {
       clientePlano,
       contextoPlano,
       perfil.profileAnchors,
-      perfil.rawProfile
+      perfil.rawProfile,
+      perfil.aboutText
     ].filter(Boolean).join("\n")
   );
 
@@ -2450,7 +2588,7 @@ function buildInFlightSuggestionKey(input = {}) {
     normalizeText(input.texto || "").slice(0, 260),
     normalizeText(input.cliente || "").slice(0, 220),
     normalizeText(input.contexto || "").slice(-320),
-    normalizeText(input.perfil || "").slice(0, 420),
+    normalizeText(input.perfil || "").slice(0, 520),
     normalizeText(JSON.stringify(input.chat_signals || {})).slice(0, 200)
   ].join("||");
 }
@@ -2521,24 +2659,14 @@ async function generateSuggestionsCore(input = {}) {
   }
 
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
+  pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
 
-  let selected = selectFinalCandidates(pool);
+  const selected = selectFinalCandidates(pool);
+  const final = ensureExactlyThreeSuggestions(selected, caso);
 
-  if (selected.length < 3) {
-    const fallbackPool = mapOptionsToCandidates(
-      fallbackSuggestions(caso),
-      "fallback",
-      caso
-    );
-
-    for (const item of fallbackPool) {
-      if (selected.some((x) => looksTooSimilar(x.text, item.text))) continue;
-      selected.push(item);
-      if (selected.length >= 3) break;
-    }
+  if (final.length < 3 || selected.length < 3) {
+    runtimeStats.suggestions.forcedFill += 1;
   }
-
-  const final = selected.slice(0, 3).map((item) => item.text);
 
   writeRecentSuggestions(caso.memoryKey, final);
 
@@ -2546,7 +2674,7 @@ async function generateSuggestionsCore(input = {}) {
     sugerencias: final,
     usageData: combineUsageData(usages),
     secondPassUsed,
-    usedFallbackOnly: selected.length ? selected.every((x) => x.source === "fallback") : true
+    usedFallbackOnly: selected.length ? selected.every((x) => x.source === "fallback" || x.source === "emergency") : true
   };
 }
 
@@ -3314,7 +3442,7 @@ function parseOperatorFilter(raw = "") {
 function getHealthPayload() {
   return {
     ok: true,
-    service: "server unico completo profile-aware v2",
+    service: "server unico completo profile-aware v3",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: {
       configured: adminConfigured(),
@@ -3336,7 +3464,9 @@ function getHealthPayload() {
       max_tokens: SUGGESTION_MAX_TOKENS,
       target_lengths: TARGET_SUGGESTION_SPECS,
       profile_aware: true,
-      internal_label_filter: true
+      about_text_priority: true,
+      apertura_sin_respuesta: true,
+      force_three_options: true
     },
     queues: {
       operator_suggestions: {
@@ -3770,8 +3900,16 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
     return res.json({
       ok: true,
       sugerencias: Array.isArray(resultado?.sugerencias)
-        ? resultado.sugerencias
-        : []
+        ? resultado.sugerencias.slice(0, 3)
+        : ensureExactlyThreeSuggestions([], buildCase({
+            operador,
+            texto,
+            contexto,
+            cliente,
+            perfil,
+            chat_signals,
+            page_type
+          }))
     });
   } catch (err) {
     registerConsumptionAsync({
@@ -3786,11 +3924,28 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
     runtimeStats.suggestions.error += 1;
     runtimeStats.suggestions.lastMs = Date.now() - startedAt;
 
-    return res.json({
-      ok: false,
-      sugerencias: [],
-      error: err.message || "Error interno"
-    });
+    try {
+      const caso = buildCase({
+        operador,
+        texto: req.body?.texto || "",
+        contexto: req.body?.contexto || "",
+        cliente: req.body?.cliente || "",
+        perfil: req.body?.perfil || "",
+        chat_signals: req.body?.chat_signals || {},
+        page_type: req.body?.page_type || "chat"
+      });
+
+      return res.json({
+        ok: true,
+        sugerencias: ensureExactlyThreeSuggestions([], caso)
+      });
+    } catch (_fallbackErr) {
+      return res.json({
+        ok: false,
+        sugerencias: [],
+        error: err.message || "Error interno"
+      });
+    }
   }
 });
 
@@ -3880,7 +4035,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server unico completo profile-aware v2 activo en puerto ${PORT}`);
+  console.log(`Server unico completo profile-aware v3 activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
   console.log(`SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
   console.log(`Rangos IA => 1:${TARGET_SUGGESTION_SPECS[0].min}-${TARGET_SUGGESTION_SPECS[0].max}, 2:${TARGET_SUGGESTION_SPECS[1].min}-${TARGET_SUGGESTION_SPECS[1].max}, 3:${TARGET_SUGGESTION_SPECS[2].min}-${TARGET_SUGGESTION_SPECS[2].max}`);
