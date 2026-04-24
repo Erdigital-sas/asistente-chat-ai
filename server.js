@@ -6,7 +6,7 @@ const { createClient } = require("@supabase/supabase-js");
 const { randomUUID, timingSafeEqual, createHmac } = require("crypto");
 
 /* =========================================================
- * ENV / CONFIG
+ * CONFIG / ENV
  * ======================================================= */
 
 function readIntEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -45,6 +45,15 @@ function cleanHuman(text = "") {
     .trim();
 }
 
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function roundMoney(n = 0) {
+  return Number(safeNumber(n, 0).toFixed(6));
+}
+
 function countChars(text = "") {
   return normalizeSpaces(String(text || "")).length;
 }
@@ -54,12 +63,6 @@ function countQuestions(text = "") {
   const abiertas = (t.match(/¿/g) || []).length;
   const cerradas = (t.match(/\?/g) || []).length;
   return Math.max(abiertas, cerradas);
-}
-
-function compact(text = "", maxChars = 1200) {
-  const clean = String(text ?? "").trim();
-  if (!clean) return "";
-  return clean.length <= maxChars ? clean : clean.slice(-maxChars);
 }
 
 function dedupeStrings(items = []) {
@@ -75,19 +78,6 @@ function dedupeStrings(items = []) {
   }
 
   return out;
-}
-
-function safeNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function roundMoney(n = 0) {
-  return Number(safeNumber(n, 0).toFixed(6));
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
 }
 
 function formatDateISO(date = new Date()) {
@@ -120,13 +110,14 @@ function compareISODate(a = "", b = "") {
 
 function buildDateRange(fromRaw = "", toRaw = "") {
   const today = formatDateISO(new Date());
+
   let from = isValidISODate(fromRaw) ? fromRaw : firstDayOfMonthUTC(new Date());
   let to = isValidISODate(toRaw) ? toRaw : today;
 
   if (compareISODate(from, to) > 0) {
-    const tmp = from;
+    const temp = from;
     from = to;
-    to = tmp;
+    to = temp;
   }
 
   return {
@@ -137,29 +128,24 @@ function buildDateRange(fromRaw = "", toRaw = "") {
   };
 }
 
-async function selectAllPages(builderFactory, pageSize = 1000) {
-  let from = 0;
-  const rows = [];
-
-  while (true) {
-    const { data, error } = await builderFactory(from, from + pageSize - 1);
-    if (error) throw error;
-
-    const chunk = Array.isArray(data) ? data : [];
-    rows.push(...chunk);
-
-    if (chunk.length < pageSize) break;
-    from += pageSize;
-  }
-
-  return rows;
-}
-
 function createRequestId() {
   try {
     return randomUUID();
   } catch (_err) {
     return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+function safeCompare(a = "", b = "") {
+  const aa = Buffer.from(String(a), "utf8");
+  const bb = Buffer.from(String(b), "utf8");
+
+  if (aa.length !== bb.length) return false;
+
+  try {
+    return timingSafeEqual(aa, bb);
+  } catch (_err) {
+    return false;
   }
 }
 
@@ -187,17 +173,22 @@ function base64UrlDecode(input = "") {
   return Buffer.from(normalized + padding, "base64").toString("utf8");
 }
 
-function safeCompare(a = "", b = "") {
-  const aa = Buffer.from(String(a), "utf8");
-  const bb = Buffer.from(String(b), "utf8");
+async function selectAllPages(builderFactory, pageSize = 1000) {
+  let from = 0;
+  const rows = [];
 
-  if (aa.length !== bb.length) return false;
+  while (true) {
+    const { data, error } = await builderFactory(from, from + pageSize - 1);
+    if (error) throw error;
 
-  try {
-    return timingSafeEqual(aa, bb);
-  } catch (_err) {
-    return false;
+    const chunk = Array.isArray(data) ? data : [];
+    rows.push(...chunk);
+
+    if (chunk.length < pageSize) break;
+    from += pageSize;
   }
+
+  return rows;
 }
 
 function combineUsageData(items = []) {
@@ -250,27 +241,27 @@ const OPENAI_MODEL_TRANSLATE = String(
 
 const OPENAI_TIMEOUT_SUGGESTIONS_MS = readIntEnv(
   "OPENAI_TIMEOUT_SUGGESTIONS_MS",
-  17000,
+  22000,
   8000,
-  45000
+  60000
 );
 
 const OPENAI_TIMEOUT_TRANSLATE_MS = readIntEnv(
   "OPENAI_TIMEOUT_TRANSLATE_MS",
   10000,
   4000,
-  25000
+  30000
 );
 
 const SUGGESTION_MAX_TOKENS = readIntEnv(
   "SUGGESTION_MAX_TOKENS",
   580,
-  180,
+  300,
   1200
 );
 
-const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 8, 4, 15);
-const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 55, 20, 180);
+const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 10, 4, 18);
+const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 80, 20, 180);
 
 const OPERATOR_SHARED_KEY = String(process.env.OPERATOR_SHARED_KEY || "2026");
 
@@ -334,30 +325,30 @@ const TRANSLATION_OPENAI_CONCURRENCY = readIntEnv(
 
 const SUGGESTION_OPENAI_QUEUE_LIMIT = readIntEnv(
   "SUGGESTION_OPENAI_QUEUE_LIMIT",
-  60,
+  80,
   1,
-  300
+  500
 );
 
 const TRANSLATION_OPENAI_QUEUE_LIMIT = readIntEnv(
   "TRANSLATION_OPENAI_QUEUE_LIMIT",
-  30,
+  40,
   1,
-  200
+  300
 );
 
 const SUGGESTION_OPENAI_QUEUE_WAIT_MS = readIntEnv(
   "SUGGESTION_OPENAI_QUEUE_WAIT_MS",
-  12000,
+  15000,
   1000,
-  30000
+  45000
 );
 
 const TRANSLATION_OPENAI_QUEUE_WAIT_MS = readIntEnv(
   "TRANSLATION_OPENAI_QUEUE_WAIT_MS",
-  6000,
+  8000,
   1000,
-  20000
+  25000
 );
 
 const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = readIntEnv(
@@ -369,9 +360,9 @@ const PER_OPERATOR_SUGGESTION_QUEUE_LIMIT = readIntEnv(
 
 const PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS = readIntEnv(
   "PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS",
-  12000,
+  15000,
   1000,
-  30000
+  45000
 );
 
 const DEFAULT_MODEL_PRICING = {
@@ -394,18 +385,21 @@ const SUGGESTION_INPUT_COST_PER_1M = readFloatEnv(
   0,
   100000
 );
+
 const SUGGESTION_OUTPUT_COST_PER_1M = readFloatEnv(
   "SUGGESTION_OUTPUT_COST_PER_1M",
   pricingSuggestionDefault.output,
   0,
   100000
 );
+
 const TRANSLATE_INPUT_COST_PER_1M = readFloatEnv(
   "TRANSLATE_INPUT_COST_PER_1M",
   pricingTranslateDefault.input,
   0,
   100000
 );
+
 const TRANSLATE_OUTPUT_COST_PER_1M = readFloatEnv(
   "TRANSLATE_OUTPUT_COST_PER_1M",
   pricingTranslateDefault.output,
@@ -414,9 +408,9 @@ const TRANSLATE_OUTPUT_COST_PER_1M = readFloatEnv(
 );
 
 const TARGET_SUGGESTION_SPECS = [
-  { min: 90, max: 170, ideal: 125 },
-  { min: 100, max: 190, ideal: 140 },
-  { min: 120, max: 230, ideal: 170 }
+  { min: 150, max: 200, ideal: 175 },
+  { min: 200, max: 300, ideal: 245 },
+  { min: 250, max: 400, ideal: 320 }
 ];
 
 const SUGGESTION_MEMORY_TTL_MS = 20 * 60 * 1000;
@@ -774,7 +768,7 @@ function authorizeAdmin(req, res, next) {
 }
 
 /* =========================================================
- * OPENAI LIMITERS / QUEUES
+ * QUEUES / LIMITERS
  * ======================================================= */
 
 class ConcurrencyLimiter {
@@ -976,7 +970,7 @@ function getSharedInFlight(map, key, factory) {
       }
     });
 
-    map.set(key, promise);
+  map.set(key, promise);
 
   return {
     shared: false,
@@ -999,6 +993,10 @@ function countOperatorSuggestionsQueued() {
   }
   return total;
 }
+
+/* =========================================================
+ * OPENAI
+ * ======================================================= */
 
 async function callOpenAI({
   lane = "sugerencias",
@@ -1082,21 +1080,21 @@ async function callOpenAI({
 }
 
 /* =========================================================
- * SUGGESTIONS ENGINE
+ * SUGGESTION ENGINE
  * ======================================================= */
 
 const STOPWORDS_SUGGESTIONS = new Set([
-  "a", "al", "algo", "alguien", "alla", "allá", "and", "ante", "antes", "asi",
-  "así", "aqui", "aquí", "be", "but", "by", "como", "con", "cual", "cuales",
-  "cuáles", "de", "del", "do", "donde", "dónde", "el", "ella", "ellas", "ellos",
-  "en", "eres", "es", "esa", "esas", "ese", "eso", "esos", "esta", "está",
-  "estas", "este", "esto", "estos", "for", "from", "gracias", "ha", "hay",
-  "he", "hola", "how", "i", "is", "it", "la", "las", "lo", "los", "me", "mi",
-  "mis", "mucho", "muy", "my", "no", "nos", "o", "of", "on", "or", "para",
-  "pero", "por", "porque", "que", "qué", "quien", "quién", "se", "si", "sí",
-  "sin", "so", "su", "sus", "te", "that", "the", "this", "to", "tu", "tus",
-  "un", "una", "uno", "unos", "unas", "was", "we", "what", "where", "which",
-  "who", "why", "y", "ya", "yo", "you", "your"
+  "a", "al", "algo", "alguien", "alla", "and", "ante", "antes", "asi",
+  "aqui", "be", "but", "by", "como", "con", "cual", "cuales", "de", "del",
+  "do", "donde", "el", "ella", "ellas", "ellos", "en", "eres", "es", "esa",
+  "esas", "ese", "eso", "esos", "esta", "estas", "este", "esto", "estos",
+  "for", "from", "gracias", "ha", "hay", "he", "hola", "how", "i", "is",
+  "it", "la", "las", "lo", "los", "me", "mi", "mis", "mucho", "muy", "my",
+  "no", "nos", "o", "of", "on", "or", "para", "pero", "por", "porque",
+  "que", "quien", "se", "si", "sin", "so", "su", "sus", "te", "that",
+  "the", "this", "to", "tu", "tus", "un", "una", "uno", "unos", "unas",
+  "was", "we", "what", "where", "which", "who", "why", "y", "ya", "yo",
+  "you", "your"
 ]);
 
 const BANNED_TOPIC_WORDS = new Set([
@@ -1114,13 +1112,13 @@ const BANNED_TOPIC_WORDS = new Set([
   "online"
 ]);
 
-const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|tu energía|como te decia|como te decía|frase vacia|frase vacía|mejor dicho|te respondí mejor)\b/i;
-const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|teléfono|numero|número|phone)\b/i;
-const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|café|cena|drink|dinner|direccion|dirección|hotel|llamame|llámame|llamarte|call me)\b/i;
+const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|como te decia|frase vacia|mejor dicho|te respondi mejor)\b/i;
+const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|numero|phone)\b/i;
+const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|cena|drink|dinner|direccion|hotel|llamame|llamarte|call me)\b/i;
 const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
-const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|cómo estás|que tal|qué tal)\b/i;
-const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ah[ií] en lo de)\b/i;
-const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|cariño|beb[eé])\b/gi;
+const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|que tal)\b/i;
+const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ahi en lo de)\b/i;
+const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|carino|bebe)\b/gi;
 
 const RISK_CATALOG = {
   contacto_externo: {
@@ -1133,19 +1131,19 @@ const RISK_CATALOG = {
     key: "pregunta_pago_plataforma",
     label: "Duda de pago o plataforma",
     severity: 92,
-    guidance: "No inventes políticas ni cobros. Responde con prudencia y sin vender humo."
+    guidance: "No inventes politicas ni cobros. Responde con prudencia y sin vender humo."
   },
   redes_externas: {
     key: "redes_externas",
     label: "Redes externas detectadas",
     severity: 90,
-    guidance: "No confirmes identidades externas ni saques la conversación fuera."
+    guidance: "No confirmes identidades externas ni saques la conversacion fuera."
   },
   abandono_ritmo_contacto: {
     key: "abandono_ritmo_contacto",
     label: "Abandono por ritmo o contacto",
     severity: 95,
-    guidance: "Baja presión, valida el ritmo y evita que la conversación se pierda."
+    guidance: "Baja presion, valida el ritmo y evita que la conversacion se pierda."
   },
   desconfianza_realidad: {
     key: "desconfianza_realidad",
@@ -1178,12 +1176,14 @@ function parseContextLines(context = "") {
           text: normalizeSpaces(line.replace(/^CLIENTA:\s*/i, ""))
         };
       }
+
       if (/^OPERADOR:/i.test(line)) {
         return {
           role: "operador",
           text: normalizeSpaces(line.replace(/^OPERADOR:\s*/i, ""))
         };
       }
+
       return { role: "contexto", text: line };
     });
 }
@@ -1302,7 +1302,7 @@ function detectMode({ textoPlano = "", clientePlano = "", contextLines = [], cha
   }
 
   if (
-    /\b(sigues ahi|sigues ahí|no respondes|desapareciste|me dejaste en visto|retomar|retomo)\b/.test(
+    /\b(sigues ahi|no respondes|desapareciste|me dejaste en visto|retomar|retomo)\b/.test(
       normalizeText(textoPlano)
     )
   ) {
@@ -1326,26 +1326,26 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
     risks.push(risk);
   };
 
-  const hasContactWords = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|facebook|tiktok|twitter|numero|número|telefono|teléfono|phone|mail|email|correo)\b/.test(text);
-  const hasOffAppWords = /\b(fuera de la app|por otra app|otra app|outside the app|text me|call me|add me|escribeme|escríbeme|pasame|pásame|pasa tu|dame tu|te dejo mi|my number|mi numero|mi número|mi telefono|mi teléfono)\b/.test(text);
+  const hasContactWords = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|facebook|tiktok|twitter|numero|telefono|phone|mail|email|correo)\b/.test(text);
+  const hasOffAppWords = /\b(fuera de la app|por otra app|otra app|outside the app|text me|call me|add me|escribeme|pasame|pasa tu|dame tu|te dejo mi|my number|mi numero|mi telefono)\b/.test(text);
   if (hasContactWords || hasOffAppWords) {
     pushRisk(RISK_CATALOG.contacto_externo);
   }
 
-  const hasPaymentWords = /\b(gratis|gratuito|free|premium|suscripcion|suscripción|subscription|tokens|coins|credits|billing|pago|pagar|pay|cuesta|cobra|cobran)\b/.test(text);
+  const hasPaymentWords = /\b(gratis|gratuito|free|premium|suscripcion|subscription|tokens|coins|credits|billing|pago|pagar|pay|cuesta|cobra|cobran)\b/.test(text);
   const hasPlatformWords = /\b(plataforma|platform|app|cuenta|account|usuario|user)\b/.test(text);
   if (hasPaymentWords && hasPlatformWords) {
     pushRisk(RISK_CATALOG.pregunta_pago_plataforma);
   }
 
   const hasSocialWords = /\b(instagram|insta|facebook|tiktok|snapchat|snap|twitter|redes sociales|social media)\b/.test(text);
-  const hasFoundWords = /\b(encontre|encontré|vi|found|i found|te vi|saw|tu perfil|your profile|outside|afuera)\b/.test(text);
+  const hasFoundWords = /\b(encontre|vi|found|i found|te vi|saw|tu perfil|your profile|outside|afuera)\b/.test(text);
   if (hasSocialWords && hasFoundWords) {
     pushRisk(RISK_CATALOG.redes_externas);
   }
 
-  const hasRhythmWords = /\b(no puedo seguir el ritmo|no puedo mantener el ritmo|cant keep up|cannot keep up|too fast|demasiado rapido|demasiado rápido|mucha intensidad|me abruma|me supera|no tengo tiempo|sin tiempo|busy|ocupad[oa]|hablamos luego|talk later)\b/.test(text);
-  const hasLeaveContactWords = /\b(te dejo mi|mi numero|mi número|mi telefono|mi teléfono|whatsapp|telegram|email|correo)\b/.test(text);
+  const hasRhythmWords = /\b(no puedo seguir el ritmo|no puedo mantener el ritmo|cant keep up|cannot keep up|too fast|demasiado rapido|mucha intensidad|me abruma|me supera|no tengo tiempo|sin tiempo|busy|ocupad[oa]|hablamos luego|talk later)\b/.test(text);
+  const hasLeaveContactWords = /\b(te dejo mi|mi numero|mi telefono|whatsapp|telegram|email|correo)\b/.test(text);
   if (hasRhythmWords || (hasLeaveContactWords && /\b(no puedo|sin tiempo|ocupad[oa]|busy|ritmo)\b/.test(text))) {
     pushRisk(RISK_CATALOG.abandono_ritmo_contacto);
   }
@@ -1362,7 +1362,7 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
       key: "none",
       label: "Sin riesgo especial",
       severity: 0,
-      guidance: "Mantener una conversación natural y útil dentro del chat."
+      guidance: "Mantener una conversacion natural y util dentro del chat."
     },
     all: risks
   };
@@ -1397,19 +1397,19 @@ function detectIntent(caso = {}) {
 function detectObjective(caso = {}) {
   switch (caso.intent) {
     case "ACLARAR_Y_REDIRECCIONAR":
-      return "Aclarar sin inventar políticas ni pagos y mantener viva la conversación dentro del chat";
+      return "Aclarar sin inventar politicas ni pagos y mantener viva la conversacion dentro del chat";
     case "CONTENER_Y_MANTENER_AQUI":
-      return "Redirigir con naturalidad para seguir aquí sin sonar cortante";
+      return "Redirigir con naturalidad para seguir aqui sin sonar cortante";
     case "RETENER_SIN_PRESION":
-      return "Bajar intensidad, validar el ritmo y evitar que la conversación se caiga";
+      return "Bajar intensidad, validar el ritmo y evitar que la conversacion se caiga";
     case "DAR_CONFIANZA":
       return "Reducir desconfianza con una respuesta clara, humana y nada defensiva";
     case "ENGANCHAR":
-      return "Abrir con curiosidad concreta y fácil de responder";
+      return "Abrir con curiosidad concreta y facil de responder";
     case "REENGANCHAR":
-      return "Reabrir sin reclamo y con una razón real para seguir";
+      return "Reabrir sin reclamo y con una razon real para seguir";
     default:
-      return "Responder lo último de ella y avanzar con un gancho claro";
+      return "Responder lo ultimo de ella y avanzar con un gancho claro";
   }
 }
 
@@ -1419,9 +1419,9 @@ function detectTone(caso = {}) {
       return "claro, prudente y natural";
     case "contacto_externo":
     case "redes_externas":
-      return "cálido, firme y relajado";
+      return "calido, firme y relajado";
     case "abandono_ritmo_contacto":
-      return "tranquilo, empático y sin presión";
+      return "tranquilo, empatico y sin presion";
     case "desconfianza_realidad":
       return "claro, sereno y humano";
     default:
@@ -1430,7 +1430,7 @@ function detectTone(caso = {}) {
 
   if (caso.mode === "APERTURA_FRIA") return "ligero, curioso y humano";
   if (caso.mode === "REAPERTURA_SUAVE") return "suave, relajado y sin reclamo";
-  return "natural, cálido y útil";
+  return "natural, calido y util";
 }
 
 function extractKeywordSignals(text = "") {
@@ -1547,11 +1547,11 @@ function extractOptions(raw = "") {
 }
 
 function scoreLength(length = 0, spec = {}) {
-  if (length < MIN_RESPONSE_LENGTH) return 0;
-
   const min = Number(spec.min || MIN_RESPONSE_LENGTH);
   const max = Number(spec.max || min + 100);
   const ideal = Number(spec.ideal || Math.round((min + max) / 2));
+
+  if (length < MIN_RESPONSE_LENGTH) return 0;
 
   if (length >= min && length <= max) {
     const span = Math.max(1, Math.max(ideal - min, max - ideal));
@@ -1561,11 +1561,11 @@ function scoreLength(length = 0, spec = {}) {
 
   if (length < min) {
     const gap = min - length;
-    return Math.max(0, Math.min(1, 0.65 - (gap / Math.max(1, min))));
+    return Math.max(0, Math.min(1, 0.50 - (gap / Math.max(1, min))));
   }
 
   const gap = length - max;
-  return Math.max(0, Math.min(1, 0.75 - (gap / Math.max(1, max))));
+  return Math.max(0, Math.min(1, 0.65 - (gap / Math.max(1, max))));
 }
 
 function looksTooSimilar(a = "", b = "") {
@@ -1595,7 +1595,7 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
   if (DISALLOWED_MEET_REGEX.test(n)) return true;
   if (META_REGEX.test(n)) return true;
 
-  if (caso.mode !== "APERTURA_FRIA" && EMPTY_GENERIC_START_REGEX.test(n) && countChars(s) < 85) {
+  if (caso.mode !== "APERTURA_FRIA" && EMPTY_GENERIC_START_REGEX.test(n) && countChars(s) < 130) {
     return true;
   }
 
@@ -1612,7 +1612,7 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
 
   let score = 0;
 
-  score += scoreLength(length, spec) * 0.30;
+  score += scoreLength(length, spec) * 0.35;
   score += countQuestions(s) <= 1 ? 0.08 : -0.15;
 
   const overlapClient = keywordOverlap(s, caso.clientKeywords || []);
@@ -1622,42 +1622,29 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   const overlapThemes = keywordOverlap(s, caso.activeThemes || []);
 
   if (caso.mode === "RESPUESTA_CHAT") {
-    score += overlapClient > 0 ? 0.20 : -0.12;
+    score += overlapClient > 0 ? 0.18 : -0.12;
     score += overlapOperator > 0 ? 0.08 : 0;
   } else {
     score += (overlapDraft > 0 || overlapDetail > 0 || overlapOperator > 0) ? 0.14 : 0;
   }
 
-  if (overlapThemes > 0) {
-    score += 0.10;
-  }
+  if (overlapThemes > 0) score += 0.10;
+  if (caso.detallePerfil?.value && overlapDetail > 0) score += 0.08;
 
-  if (caso.detallePerfil?.value && overlapDetail > 0) {
-    score += 0.08;
-  }
-
-  if (EMPTY_MIRROR_REGEX.test(n)) {
-    score -= 0.18;
-  }
-
-  if (ONE_WORD_MIRROR_REGEX.test(n)) {
-    score -= 0.20;
-  }
-
-  if (EMPTY_GENERIC_START_REGEX.test(n) && caso.mode !== "APERTURA_FRIA") {
-    score -= 0.10;
-  }
+  if (EMPTY_MIRROR_REGEX.test(n)) score -= 0.18;
+  if (ONE_WORD_MIRROR_REGEX.test(n)) score -= 0.20;
+  if (EMPTY_GENERIC_START_REGEX.test(n) && caso.mode !== "APERTURA_FRIA") score -= 0.10;
 
   if (
     ["contacto_externo", "redes_externas"].includes(caso.risk?.primary?.key) &&
-    /\b(aqui|aquí|por aqui|por aquí|por este chat|por el chat)\b/.test(n)
+    /\b(aqui|por aqui|por este chat|por el chat)\b/.test(n)
   ) {
     score += 0.12;
   }
 
   if (
     caso.risk?.primary?.key === "abandono_ritmo_contacto" &&
-    /\b(con calma|sin presion|sin presión|a tu ritmo|tranqui)\b/.test(n)
+    /\b(con calma|sin presion|a tu ritmo|tranqui)\b/.test(n)
   ) {
     score += 0.12;
   }
@@ -1676,18 +1663,11 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
     score += 0.10;
   }
 
-  if (
-    caso.affectionLoadHigh &&
-    countEndearments(s) >= 2
-  ) {
+  if (caso.affectionLoadHigh && countEndearments(s) >= 2) {
     score -= 0.08;
   }
 
-  if (
-    caso.mode === "RESPUESTA_CHAT" &&
-    caso.lastClientIsQuestion &&
-    overlapClient === 0
-  ) {
+  if (caso.mode === "RESPUESTA_CHAT" && caso.lastClientIsQuestion && overlapClient === 0) {
     score -= 0.08;
   }
 
@@ -1702,6 +1682,7 @@ function mapOptionsToCandidates(options = [], source = "", caso = {}) {
         text: clean,
         source,
         length: countChars(clean),
+        sourceIndex: index,
         score: scoreSuggestion(clean, caso, index)
       };
     })
@@ -1717,33 +1698,66 @@ function selectFinalCandidates(pool = []) {
 
   const selected = [];
 
-  for (const item of ranked) {
-    if (selected.some((x) => looksTooSimilar(x.text, item.text))) continue;
-    selected.push(item);
-    if (selected.length >= 3) break;
+  for (let slot = 0; slot < TARGET_SUGGESTION_SPECS.length; slot += 1) {
+    const spec = TARGET_SUGGESTION_SPECS[slot];
+
+    let candidate = ranked.find((item) => {
+      if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
+      return item.length >= spec.min && item.length <= spec.max;
+    });
+
+    if (!candidate) {
+      candidate = ranked.find((item) => {
+        if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
+        return item.length >= Math.round(spec.min * 0.75) && item.length <= Math.round(spec.max * 1.2);
+      });
+    }
+
+    if (!candidate) {
+      candidate = ranked.find((item) => {
+        return !selected.some((x) => looksTooSimilar(x.text, item.text));
+      });
+    }
+
+    if (candidate) {
+      selected.push(candidate);
+    }
   }
 
-  return selected.sort((a, b) => a.length - b.length || b.score - a.score);
+  return selected.slice(0, 3);
 }
 
 function isWeakResult(candidates = [], selected = []) {
   if (selected.length < 3) return true;
+
   const avg = selected.reduce((sum, item) => sum + item.score, 0) / selected.length;
-  if (avg < 0.60) return true;
-  return selected.some((item) => item.score < 0.48) || !candidates.length;
+  if (avg < 0.58) return true;
+
+  for (let i = 0; i < selected.length; i += 1) {
+    const spec = TARGET_SUGGESTION_SPECS[i];
+    const item = selected[i];
+    if (!item) return true;
+
+    if (item.length < Math.round(spec.min * 0.75)) return true;
+    if (i === 2 && item.length < 230) return true;
+  }
+
+  return false;
 }
 
 function buildWeaknessFeedback(candidates = [], caso = {}) {
   const notes = [];
 
-  if (!candidates.length) notes.push("- No salieron opciones utilizables.");
+  if (!candidates.length) {
+    notes.push("- No salieron opciones utilizables.");
+  }
 
   const avgLength = candidates.length
     ? candidates.reduce((sum, item) => sum + item.length, 0) / candidates.length
     : 0;
 
-  if (avgLength && avgLength < TARGET_SUGGESTION_SPECS[0].min) {
-    notes.push("- Están demasiado cortas.");
+  if (avgLength && avgLength < 180) {
+    notes.push("- Las opciones estan demasiado cortas.");
   }
 
   if (
@@ -1751,14 +1765,14 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     candidates.length &&
     candidates.every((item) => keywordOverlap(item.text, caso.clientKeywords || []) === 0)
   ) {
-    notes.push("- Falta alusión real a lo último de la clienta.");
+    notes.push("- Falta alusion real a lo ultimo de la clienta.");
   }
 
   if (
     candidates.length &&
     candidates.some((item) => ONE_WORD_MIRROR_REGEX.test(normalizeText(item.text)))
   ) {
-    notes.push("- Evita fórmulas tipo 'eso que dijiste sobre X' o 'ahí en lo de X'.");
+    notes.push("- Evita formulas tipo 'eso que dijiste sobre X' o 'ahi en lo de X'.");
   }
 
   if (
@@ -1767,7 +1781,7 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     candidates.every((item) => keywordOverlap(item.text, caso.operatorKeywords || []) === 0) &&
     caso.mode !== "RESPUESTA_CHAT"
   ) {
-    notes.push("- Conserva mejor el hilo que el operador ya venía construyendo.");
+    notes.push("- Conserva mejor el hilo que el operador ya venia construyendo.");
   }
 
   if (
@@ -1779,33 +1793,11 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     notes.push("- Puedes usar un detalle del perfil si realmente suma.");
   }
 
-  if (
-    caso.risk?.primary?.key === "contacto_externo" &&
-    candidates.length &&
-    candidates.every((item) => !/\b(aqui|aquí|por aqui|por aquí|por este chat|por el chat)\b/i.test(normalizeText(item.text)))
-  ) {
-    notes.push("- Redirige con más naturalidad a seguir aquí.");
-  }
-
-  if (
-    caso.risk?.primary?.key === "abandono_ritmo_contacto" &&
-    candidates.length &&
-    candidates.every((item) => !/\b(con calma|sin presion|sin presión|a tu ritmo|tranqui)\b/i.test(normalizeText(item.text)))
-  ) {
-    notes.push("- Falta bajar presión y validar el ritmo.");
-  }
-
-  if (
-    caso.affectionLoadHigh &&
-    candidates.length &&
-    candidates.some((item) => countEndearments(item.text) >= 2)
-  ) {
-    notes.push("- Reduce la sobrecarga de apelativos afectivos repetidos.");
-  }
-
   if (!notes.length) {
-    notes.push("- Hazlas más específicas, más útiles y menos genéricas.");
+    notes.push("- Hazlas mas especificas, mas utiles y menos genericas.");
   }
+
+  notes.push("- Recuerda: opcion 1 de 150 a 200 caracteres, opcion 2 de 200 a 300, opcion 3 de 250 a 400.");
 
   return notes.join("\n");
 }
@@ -1819,46 +1811,60 @@ function buildSpecText() {
 function buildSystemPrompt(caso = {}) {
   return [
     "Eres el motor de sugerencias de una herramienta interna de chat.",
-    "Debes devolver exactamente 3 opciones finales en español, listas para enviar.",
-    "Tu trabajo es ayudar al operador a responder mejor usando el hilo real de la conversación.",
+    "Debes devolver exactamente 3 opciones finales en espanol, listas para enviar.",
+    "Tu trabajo es transformar el borrador del operador en respuestas mas utiles, naturales y con mejor enganche.",
     "",
     `Objetivo principal: ${caso.objective}`,
     `Tono: ${caso.tone}`,
     `Modo: ${caso.mode}`,
     `Riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
     "",
+    "NUCLEO DE TRANSFORMACION",
+    "- interpreta la intencion del operador antes de escribir",
+    "- no copies frases debiles del operador",
+    "- si el operador escribe algo generico, conserva la intencion y vuelve el mensaje especifico",
+    "- si el operador intenta sonar interesado, hazlo mas natural y menos necesitado",
+    "- si el operador intenta reenganchar, evita suplica, culpa o ansiedad",
+    "- si el operador intenta coquetear, hazlo sutil, conversacional y no repetitivo",
+    "- si hay riesgo, sal de la situacion sin cortar el vinculo ni perder la conversacion",
+    "",
     "PRIORIDADES",
-    "- responder primero a lo último de la clienta cuando exista mensaje real",
+    "- responder primero a lo ultimo de la clienta cuando exista mensaje real",
     "- conservar el hilo que el operador ya viene construyendo",
-    "- sonar humano, concreto y útil",
-    "- usar hechos reales del chat antes que frases genéricas",
-    "- si la conversación ya está muy cargada de apelativos afectivos, bajar un poco la intensidad",
+    "- sonar humano, concreto y util",
+    "- usar hechos reales del chat antes que frases genericas",
+    "- dejar una salida facil para que la clienta responda",
     "",
     "REGLAS OBLIGATORIAS",
     "- si no existe mensaje nuevo de la clienta, no escribas como si ya hubiera contestado",
-    "- cada opción debe ser distinta de verdad",
-    "- usa 1 o 2 frases por opción",
-    "- máximo 1 pregunta por opción",
+    "- cada opcion debe ser distinta de verdad",
+    "- maximo 1 pregunta por opcion",
     "- sin emojis",
     "- sin comillas",
     "- sin nombres inventados",
     "- sin ciudades inventadas",
-    "- no inventes políticas, pagos, tarifas, soporte ni condiciones de la plataforma",
+    "- no inventes politicas, pagos, tarifas, soporte ni condiciones de la plataforma",
     "- no pidas ni aceptes contacto externo",
     "- no invites a salir de la app",
     "- no propongas encuentros, direcciones ni llamadas",
-    "- evita presión, culpa o manipulación",
-    "- evita frases espejo o vacías",
-    "- evita fórmulas como 'eso que dijiste sobre X' si X es solo una palabra suelta",
-    "- usa como máximo un detalle de perfil si ayuda de verdad",
-    "- si el borrador está flojo, reházalo por completo",
+    "- evita presion, culpa o manipulacion",
+    "- evita frases espejo o vacias",
+    "- evita formulas como 'eso que dijiste sobre X' si X es solo una palabra suelta",
+    "- usa como maximo un detalle de perfil si ayuda de verdad",
+    "- si el borrador esta flojo, rehacelo por completo",
     "",
-    "VARIACIÓN DESEADA",
-    "1. directa y fácil de enviar",
-    "2. cálida y alusiva",
-    "3. más trabajada y con mejor gancho, sin sonar pesada",
+    "VARIACION DESEADA",
+    "1. Directa: 150 a 200 caracteres. Clara, natural y facil de enviar.",
+    "2. Atractiva: 200 a 300 caracteres. Mejor alusion al contexto y una respuesta facil de continuar.",
+    "3. Desarrollada: 250 a 400 caracteres. Mayor profundidad emocional, mejor lectura del contexto y un gancho mas fuerte, sin sonar intensa ni pesada.",
     "",
-    "LARGO ORIENTATIVO",
+    "IMPORTANTE SOBRE LONGITUD",
+    "- respeta el rango de caracteres de cada opcion",
+    "- no hagas opciones demasiado cortas",
+    "- la tercera opcion nunca debe ser breve",
+    "- si falta contexto, desarrolla desde la intencion del operador y el perfil disponible",
+    "",
+    "LARGO EXACTO ESPERADO",
     buildSpecText(),
     "",
     "Devuelve solo:",
@@ -1873,11 +1879,11 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     [
       "RESUMEN DEL CASO",
       `- tipo de contacto: ${caso.tipoContacto}`,
-      `- intención detectada: ${caso.intent}`,
+      `- intencion detectada: ${caso.intent}`,
       `- objetivo: ${caso.objective}`,
       `- tono: ${caso.tone}`,
       `- riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
-      `- guía de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversación natural y útil"}`
+      `- guia de riesgo: ${caso.risk?.primary?.guidance || "Mantener conversacion natural y util"}`
     ].join("\n"),
     [
       "BORRADOR DEL OPERADOR",
@@ -1886,7 +1892,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       '"""'
     ].join("\n"),
     [
-      "ÚLTIMO MENSAJE REAL DE LA CLIENTA",
+      "ULTIMO MENSAJE REAL DE LA CLIENTA",
       '"""',
       caso.clientePlano || "Sin mensaje claro de la clienta",
       '"""'
@@ -1894,7 +1900,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     [
       "CONTEXTO RECIENTE",
       '"""',
-      caso.contextoPlano || "Sin contexto útil",
+      caso.contextoPlano || "Sin contexto util",
       '"""'
     ].join("\n"),
     [
@@ -1917,10 +1923,10 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     ].join("\n"),
     [
       "PERFIL RESUMIDO",
-      `- intereses en común: ${(caso.perfil?.interesesEnComun || []).join(" | ") || "ninguno"}`,
+      `- intereses en comun: ${(caso.perfil?.interesesEnComun || []).join(" | ") || "ninguno"}`,
       `- intereses de la clienta: ${(caso.perfil?.interesesClienta || []).join(" | ") || "ninguno"}`,
       `- datos de la clienta: ${(caso.perfil?.datosClienta || []).join(" | ") || "ninguno"}`,
-      `- ubicación útil: ${caso.perfil?.ubicacionClienta || "ninguna"}`,
+      `- ubicacion util: ${caso.perfil?.ubicacionClienta || "ninguna"}`,
       `- detalle prioritario: ${caso.detallePerfil?.value || "ninguno"}`
     ].join("\n"),
     [
@@ -1946,12 +1952,24 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
   }
 
   blocks.push([
+    "INTERPRETACION DEL BORRADOR",
+    "Antes de generar, decide mentalmente:",
+    "1. que quiere lograr el operador",
+    "2. que parte del borrador conviene conservar",
+    "3. que parte debe eliminarse por generica, repetitiva o riesgosa",
+    "4. como convertir la intencion del operador en una respuesta mas atractiva"
+  ].join("\n"));
+
+  blocks.push([
     "IMPORTANTE",
-    "- haz opciones con alusión real, no plantillas",
-    "- no copies el borrador si está pobre",
-    "- deja una salida fácil para que la otra persona responda",
-    "- mantén todo dentro de la plataforma",
-    "- no construyas las 3 opciones alrededor de una sola keyword débil"
+    "- haz opciones con alusion real, no plantillas",
+    "- no copies el borrador si esta pobre",
+    "- deja una salida facil para que la otra persona responda",
+    "- manten todo dentro de la plataforma",
+    "- no construyas las 3 opciones alrededor de una sola keyword debil",
+    "- opcion 1: 150-200 caracteres",
+    "- opcion 2: 200-300 caracteres",
+    "- opcion 3: 250-400 caracteres"
   ].join("\n"));
 
   return blocks.join("\n\n").trim();
@@ -1960,8 +1978,8 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
 function pickTemperature(caso = {}, isRepair = false) {
   let t = 0.78;
 
-  if (caso.mode === "APERTURA_FRIA") t = 0.86;
-  if (caso.mode === "REAPERTURA_SUAVE") t = 0.82;
+  if (caso.mode === "APERTURA_FRIA") t = 0.84;
+  if (caso.mode === "REAPERTURA_SUAVE") t = 0.80;
   if (caso.mode === "RESPUESTA_CHAT") t = 0.72;
 
   switch (caso.risk?.primary?.key) {
@@ -1983,47 +2001,47 @@ function pickTemperature(caso = {}, isRepair = false) {
   }
 
   if (isRepair) {
-    return Math.max(0.58, Math.min(0.9, t - 0.08));
+    return Math.max(0.58, Math.min(0.88, t - 0.08));
   }
 
-  return Math.max(0.58, Math.min(0.9, t));
+  return Math.max(0.58, Math.min(0.88, t));
 }
 
 function fallbackRiskSuggestions(caso = {}) {
   switch (caso.risk?.primary?.key) {
     case "contacto_externo":
       return [
-        "Prefiero que la charla siga por aquí y sin correr. Ya que estamos, dime qué fue lo que de verdad te dio curiosidad para escribirme.",
-        "Podemos llevarlo tranquilo por este chat. Me interesa más que la conversación fluya bien aquí que saltar de una app a otra.",
-        "Antes de mover nada fuera de aquí prefiero ver si de verdad la charla tiene sentido. Cuéntame qué tipo de conversación sí te engancha cuando alguien te interesa."
+        "Prefiero que la charla siga por aqui y sin correr. Me interesa mas entender que fue lo que de verdad te dio curiosidad para escribirme.",
+        "Podemos llevarlo tranquilo por este chat. Para mi tiene mas sentido ver si la conversacion fluye bien aqui antes que saltar de una app a otra.",
+        "Antes de mover nada fuera de aqui prefiero ver si de verdad la charla tiene sentido. Si te parece, cuentame que tipo de conversacion si te engancha cuando alguien te interesa, porque ahi se nota mucho mas que con un simple contacto."
       ];
 
     case "pregunta_pago_plataforma":
       return [
-        "Sobre cómo lo maneja la plataforma prefiero no inventarte nada. Lo que sí me importa es que por aquí la charla se sienta real. ¿Qué fue lo que te hizo preguntar eso?",
-        "No quiero darte una respuesta dudosa sobre pagos o cuentas, así que prefiero ir a lo claro. Si quieres, seguimos por aquí y me dices qué te estaba generando esa duda.",
-        "Con temas de plataforma prefiero no vender humo ni suponer cosas que no sé. Mejor dime qué fue exactamente lo que te hizo dudar y te respondo desde algo más real."
+        "Sobre como lo maneja la plataforma prefiero no inventarte nada. Lo que si me importa es que por aqui la charla se sienta real.",
+        "No quiero darte una respuesta dudosa sobre pagos o cuentas, asi que prefiero ir a lo claro. Sigamos por aqui y dime que fue lo que te genero esa duda.",
+        "Con temas de plataforma prefiero no vender humo ni suponer cosas que no se. Mejor dime que fue exactamente lo que te hizo dudar y lo hablamos desde algo mas real, sin perder el hilo de lo que estabamos construyendo."
       ];
 
     case "redes_externas":
       return [
-        "Aunque hayas visto algo fuera, prefiero que lo llevemos por aquí y sin mezclar cosas. Ya que estás, dime qué fue lo que realmente te llamó la atención.",
-        "Yo mantendría la charla por este chat para que sea más simple y natural. Cuéntame si lo que te dio curiosidad fue algo del perfil o la manera de hablar.",
-        "Antes de cruzar nada con otras redes prefiero que aquí la conversación se sienta clara y real. ¿Qué parte de todo eso fue la que te hizo volver?"
+        "Aunque hayas visto algo fuera, prefiero que lo llevemos por aqui y sin mezclar cosas. Dime que fue lo que realmente te llamo la atencion.",
+        "Yo mantendria la charla por este chat para que sea mas simple y natural. Me interesa saber si lo que te dio curiosidad fue el perfil o la manera de hablar.",
+        "Antes de cruzar nada con otras redes prefiero que aqui la conversacion se sienta clara y real. Si algo te dio curiosidad, mejor cuentamelo por aqui y vemos si de verdad hay una conexion que valga la pena seguir."
       ];
 
     case "abandono_ritmo_contacto":
       return [
-        "Tranqui, no hace falta llevar esto con prisa ni estar pendiente todo el tiempo. Podemos hablar con calma por aquí y ver si la charla se da natural.",
-        "Si el ritmo te pesa, mejor bajarlo y seguir sin presión. A veces funciona mucho más una conversación tranquila que estar encima.",
-        "No necesito que respondas rápido ni que esto se vuelva una obligación. Me basta con que cuando entres aquí la charla se sienta cómoda y con ganas de seguir."
+        "Tranqui, no hace falta llevar esto con prisa ni estar pendiente todo el tiempo. Podemos hablar con calma y ver si la charla se da natural.",
+        "Si el ritmo te pesa, mejor bajarlo y seguir sin presion. A veces funciona mucho mas una conversacion tranquila que estar encima.",
+        "No necesito que respondas rapido ni que esto se vuelva una obligacion. Me basta con que cuando entres aqui la charla se sienta comoda, real y con ganas de seguir, sin que ninguno de los dos sienta presion."
       ];
 
     case "desconfianza_realidad":
       return [
-        "Te respondo simple y claro: prefiero que esto suene natural antes que perfecto. Si algo te genera duda, dímelo directo y lo hablamos aquí.",
-        "No me interesa sonar armado ni vender una imagen rara. Prefiero una conversación clara y normal, de esas que se sostienen solas.",
-        "Si te hace ruido algo, mejor decirlo de frente y seguir desde ahí. Yo valoro más una charla clara que una respuesta demasiado ensayada."
+        "Te respondo simple y claro: prefiero que esto suene natural antes que perfecto. Si algo te genera duda, dimelo directo y lo hablamos.",
+        "No me interesa sonar armado ni vender una imagen rara. Prefiero una conversacion clara y normal, de esas que se sostienen solas.",
+        "Si algo te hace ruido, mejor decirlo de frente y seguir desde ahi. Para mi tiene mas valor una charla clara y honesta que una respuesta demasiado ensayada, asi que podemos hablarlo sin volverlo pesado."
       ];
 
     default:
@@ -2035,50 +2053,42 @@ function fallbackReplySuggestions(caso = {}) {
   const cliente = normalizeText(caso.clientePlano || "");
   const detail = cleanHuman(caso.detallePerfil?.value || "");
 
-  if (/\b(about yourself|sobre ti|cuentame de ti|cuéntame de ti|tell me about yourself)\b/.test(cliente)) {
+  if (/\b(about yourself|sobre ti|cuentame de ti|tell me about yourself)\b/.test(cliente)) {
     return [
-      "Soy más de conversaciones que se sientan reales que de vender una imagen perfecta. Me interesa más conectar bien que sonar impresionante. ¿Tú en qué te fijas primero cuando alguien te escribe?",
+      "Soy mas de conversaciones que se sientan reales que de vender una imagen perfecta. Me interesa mas conectar bien que sonar impresionante.",
       "Prefiero una charla que fluya de verdad antes que aparentar demasiado. Me gusta cuando del otro lado hay curiosidad real y no solo frases hechas.",
-      "No soy muy de inflarme ni de posar. Me va más una conversación natural, con algo de criterio y con ganas de seguir, que ya dice bastante de alguien."
+      "No soy muy de inflarme ni de posar. Me va mas una conversacion natural, con algo de criterio y con ganas de seguir, porque ahi se nota mucho mas como es alguien que en una descripcion perfecta."
     ];
   }
 
-  if (/\b(how are you|como estas|cómo estás|que tal|qué tal|how was your day|como va tu dia|cómo va tu día|how is your day)\b/.test(cliente)) {
+  if (/\b(how are you|como estas|que tal|how was your day|como va tu dia|how is your day)\b/.test(cliente)) {
     return [
-      "Todo bien por aquí. Prefiero una charla que salga natural antes que llenar esto de frases vacías. ¿Tu día viene tranquilo o te agarré en medio de algo?",
-      "Bien por aquí, con ganas de una conversación que se sienta real y no de compromiso. ¿Tu día vino más relajado o más movido?",
-      "Bastante bien, gracias. Soy más de conversaciones con algo de dirección que de respuestas por salir del paso. ¿Tú vienes con día tranquilo o con la cabeza a mil?"
-    ];
-  }
-
-  if (/\b(de donde eres|donde vives|where are you from|where do you live)\b/.test(cliente) && caso.perfil?.ubicacionClienta) {
-    return [
-      `Estoy por ${caso.perfil.ubicacionClienta}, aunque me importa más cómo fluye la charla que la ubicación exacta. ¿Tú eres más de conversaciones tranquilas o con más chispa?`,
-      `Ando por ${caso.perfil.ubicacionClienta}. Igual, para mí pesa más la energía de la conversación que el punto exacto del mapa.`,
-      `Por ${caso.perfil.ubicacionClienta}. Aun así, lo que más me engancha siempre es que la conversación tenga algo real y no se sienta automática.`
+      "Todo bien por aqui. Prefiero una charla que salga natural antes que llenar esto de frases vacias. Tu dia viene tranquilo o mas movido?",
+      "Bien por aqui, con ganas de una conversacion que se sienta real y no de compromiso. Me interesa mas saber como vienes tu hoy.",
+      "Bastante bien, gracias. Soy mas de conversaciones con algo de direccion que de respuestas por salir del paso. Si tu dia viene tranquilo, podemos aprovecharlo para hablar con mas calma."
     ];
   }
 
   if ((caso.activeThemes || []).length) {
     return [
-      "Lo que acabas de contar me dejó con curiosidad. Quiero responderte bien sin volver esto pesado. ¿Te salió por experiencia o por intuición?",
-      "Ahí sí noté algo con más fondo. Me interesa entender si lo ves así desde hace tiempo o si hubo algo que te hizo pensarlo así.",
-      "Eso que acabas de contar tiene más miga de la que parece. Me dan ganas de seguir por ahí porque ya suena a una conversación más real que la típica."
+      "Lo que acabas de contar me dejo con curiosidad. Quiero responderte bien sin volver esto pesado. Te salio por experiencia o por intuicion?",
+      "Ahi si note algo con mas fondo. Me interesa entender si lo ves asi desde hace tiempo o si hubo algo que te hizo pensarlo de esa manera.",
+      "Eso que acabas de contar tiene mas miga de la que parece. Me dan ganas de seguir por ahi porque ya suena a una conversacion mas real que la tipica, de esas donde uno puede conocer mejor como piensa la otra persona."
     ];
   }
 
   if (detail) {
     return [
-      `Me gustó leerte. Antes que llevar esto a frases copiadas, prefiero ir con algo más real. Vi ${detail} y me dio curiosidad saber qué es lo que más va contigo de eso.`,
-      `Lo que dijiste me dejó con ganas de seguir por una línea natural. Vi ${detail} y siento que ahí hay un punto mejor para hablar que con cualquier saludo vacío.`,
-      `Prefiero una conversación que tenga dirección. Vi ${detail} y me pareció mejor entrar por algo concreto que por un mensaje del montón.`
+      `Me gusto leerte. Vi ${detail} y me parecio mejor ir por algo concreto que caer en una frase copiada. Que parte de eso va mas contigo?`,
+      `Lo que dijiste me dejo con ganas de seguir por una linea natural. Vi ${detail} y siento que ahi hay un punto mejor para hablar.`,
+      `Prefiero una conversacion que tenga direccion. Vi ${detail} y me parecio mejor entrar por algo concreto que por un mensaje del monton, porque asi es mas facil descubrir si realmente hay algo interesante para seguir.`
     ];
   }
 
   return [
-    "Me gustó leerte. Quiero que esto vaya por una línea natural, no por frases hechas. ¿Eso que dices te sale más por intuición o por experiencia?",
-    "Suena a que ahí hay una idea real detrás. Me dio curiosidad saber si lo ves así desde hace tiempo o si te pasó algo que te hizo pensarlo así.",
-    "Lo que dices tiene un punto interesante. Me gustaría saber si lo sientes así por carácter o porque ya te tocó vivir algo parecido."
+    "Me gusto leerte. Quiero que esto vaya por una linea natural, no por frases hechas. Eso que dices te sale mas por intuicion o por experiencia?",
+    "Suena a que ahi hay una idea real detras. Me dio curiosidad saber si lo ves asi desde hace tiempo o si te paso algo que te hizo pensarlo.",
+    "Lo que dices tiene un punto interesante. Me gustaria saber si lo sientes asi por caracter o porque ya te toco vivir algo parecido, porque ahi es donde una conversacion empieza a sentirse menos tipica."
   ];
 }
 
@@ -2087,16 +2097,16 @@ function fallbackReengagementSuggestions(caso = {}) {
 
   if (detail) {
     return [
-      `Hola. Paso por aquí con algo más claro: vi ${detail} y me pareció mejor empezar por algo real que dejar otro saludo vacío. ¿Qué parte de eso va más contigo?`,
-      `Hola. En vez de repetir una entrada floja, prefiero preguntarte algo concreto: vi ${detail} y me dio curiosidad saber qué es lo que más te engancha de eso.`,
-      `Hola. Reaparezco con una simple para no sonar copiado: vi ${detail} y me parece mejor tirar por ahí que seguir con un mensaje de trámite.`
+      `Hola. Vi ${detail} y me parecio mejor empezar por algo real que dejar otro saludo vacio. Que parte de eso va mas contigo?`,
+      `Hola. En vez de repetir una entrada floja, prefiero preguntarte algo concreto: vi ${detail} y me dio curiosidad saber que te engancha de eso.`,
+      `Hola. Reaparezco con algo mas claro porque no queria dejar un mensaje del monton. Vi ${detail} y me parecio un mejor punto para conocerte que seguir con una frase generica sin direccion.`
     ];
   }
 
   return [
-    "Hola. Paso por aquí con una pregunta simple y real: ¿qué suele hacer que una conversación te parezca interesante desde el principio?",
-    "Hola. En vez de dejar un mensaje más del montón, prefiero preguntarte algo concreto: ¿qué te hace seguir una charla por aquí?",
-    "Hola. Reaparezco con una fácil para no sonar copiado: ¿eres más de gente tranquila o de quien entra con más chispa?"
+    "Hola. Paso por aqui con una pregunta simple y real: que suele hacer que una conversacion te parezca interesante desde el principio?",
+    "Hola. En vez de dejar un mensaje mas del monton, prefiero preguntarte algo concreto: que te hace seguir una charla por aqui?",
+    "Hola. Reaparezco con una facil para no sonar copiado: eres mas de conversaciones tranquilas o de gente que entra con un poco mas de chispa y logra sacarte una respuesta real?"
   ];
 }
 
@@ -2105,16 +2115,16 @@ function fallbackOpeningSuggestions(caso = {}) {
 
   if (detail) {
     return [
-      `Hola. Vi ${detail} y me pareció mejor entrar por algo concreto que por una frase vacía. ¿Qué es lo que más te engancha de eso?`,
-      `Hola. De todo el perfil, ${detail} fue lo que más me dio curiosidad. Quise empezar por ahí porque se siente más real que un saludo copiado.`,
-      `Hola. Prefiero abrir con algo que sí tenga dirección: vi ${detail} y me quedé con la duda de si eso va más contigo por gusto, por energía o por costumbre.`
+      `Hola. Vi ${detail} y me parecio mejor entrar por algo concreto que por una frase vacia. Que es lo que mas te engancha de eso?`,
+      `Hola. De todo el perfil, ${detail} fue lo que mas me dio curiosidad. Quise empezar por ahi porque se siente mas real que un saludo copiado.`,
+      `Hola. Prefiero abrir con algo que si tenga direccion: vi ${detail} y me quede con la duda de si eso va mas contigo por gusto, por energia o porque simplemente es una parte importante de tu forma de ser.`
     ];
   }
 
   return [
-    "Hola. Prefiero empezar con algo simple y real: ¿qué tipo de conversación sí te dan ganas de seguir cuando alguien te escribe por aquí?",
-    "Hola. No quise abrir con una frase vacía, así que voy con una sencilla: ¿qué suele llamar tu atención cuando alguien te empieza a hablar?",
-    "Hola. Antes que sonar igual que todos, prefiero preguntarte algo directo: ¿eres más de charlas tranquilas o de gente que entra con más chispa?"
+    "Hola. Prefiero empezar con algo simple y real: que tipo de conversacion si te dan ganas de seguir cuando alguien te escribe por aqui?",
+    "Hola. No quise abrir con una frase vacia, asi que voy con una sencilla: que suele llamar tu atencion cuando alguien te empieza a hablar?",
+    "Hola. Antes que sonar igual que todos, prefiero preguntarte algo directo: eres mas de charlas tranquilas o de gente que entra con mas chispa y logra que la conversacion se sienta diferente?"
   ];
 }
 
@@ -2164,12 +2174,12 @@ function buildCase(input = {}) {
 
   const operatorRecent = rawContextLines
     .filter((x) => x.role === "operador")
-    .slice(-4)
+    .slice(-5)
     .map((x) => x.text);
 
   const clientRecent = rawContextLines
     .filter((x) => x.role === "clienta")
-    .slice(-4)
+    .slice(-5)
     .map((x) => x.text);
 
   const operatorKeywords = extractKeywordSignals(operatorRecent.join(" "));
@@ -2296,7 +2306,7 @@ async function generateSuggestionsCore(input = {}) {
       pool.push(...mapOptionsToCandidates(repairPass.options, "openai_2", caso));
     }
   } catch (_err) {
-    // fallback sigue
+    // Si OpenAI falla, se usa fallback seguro.
   }
 
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
@@ -2318,6 +2328,7 @@ async function generateSuggestionsCore(input = {}) {
   }
 
   const final = selected.slice(0, 3).map((item) => item.text);
+
   writeRecentSuggestions(caso.memoryKey, final);
 
   return {
@@ -2364,6 +2375,7 @@ function readTranslationCache(key = "") {
 
   translationCache.delete(key);
   translationCache.set(key, entry);
+
   return entry.value || "";
 }
 
@@ -2392,25 +2404,25 @@ async function translateTextCore(text = "") {
     messages: [
       {
         role: "system",
-        content: `
-Traduce al ingles natural de chat como una persona real escribiria.
-
-REGLAS
-No usar comillas
-No usar simbolos raros
-No sonar perfecto
-Debe sonar natural y humano
-Devuelve solo una version final
-`.trim()
+        content: [
+          "Traduce al ingles natural de chat como una persona real escribiria.",
+          "Reglas:",
+          "- no uses comillas",
+          "- no uses simbolos raros",
+          "- no suenes perfecto ni robotico",
+          "- conserva intencion y tono",
+          "- devuelve solo una version final"
+        ].join("\n")
       },
       { role: "user", content: String(text ?? "") }
     ],
     temperature: 0.25,
-    maxTokens: 160,
+    maxTokens: 180,
     timeoutMs: OPENAI_TIMEOUT_TRANSLATE_MS
   });
 
   const translated = cleanHuman(data?.choices?.[0]?.message?.content || "");
+
   if (!translated) {
     throw new Error("No se pudo traducir");
   }
@@ -2433,7 +2445,11 @@ async function translateText(text = "") {
   }
 
   const result = await sharedJob.promise;
-  return { ...result, shared: sharedJob.shared };
+
+  return {
+    ...result,
+    shared: sharedJob.shared
+  };
 }
 
 /* =========================================================
@@ -2508,7 +2524,7 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
 }
 
 /* =========================================================
- * CONSUMPTION / COSTS
+ * CONSUMPTION / COST
  * ======================================================= */
 
 async function registerConsumption({
@@ -2553,10 +2569,6 @@ function registerConsumptionAsync(payload) {
   });
 }
 
-/* =========================================================
- * ANALYTICS
- * ======================================================= */
-
 function getCostsByType(tipo = "") {
   const t = String(tipo || "").toUpperCase();
 
@@ -2591,6 +2603,10 @@ function calculateEstimatedCost({ tipo = "", prompt_tokens = 0, completion_token
 
   return roundMoney(inputCost + outputCost);
 }
+
+/* =========================================================
+ * DASHBOARD / ANALYTICS
+ * ======================================================= */
 
 async function loadConsumptionRange(range, operadoresFiltrados = []) {
   return selectAllPages((from, to) => {
@@ -2856,7 +2872,7 @@ function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, op
 }
 
 /* =========================================================
- * ADMIN / OPERATORS
+ * ADMIN OPERATORS
  * ======================================================= */
 
 function validateAdminOperatorName(name = "") {
@@ -3105,7 +3121,8 @@ function getHealthPayload() {
       traduccion: OPENAI_MODEL_TRANSLATE
     },
     suggestion_config: {
-      max_tokens: SUGGESTION_MAX_TOKENS
+      max_tokens: SUGGESTION_MAX_TOKENS,
+      target_lengths: TARGET_SUGGESTION_SPECS
     },
     queues: {
       operator_suggestions: {
@@ -3137,7 +3154,7 @@ function getAdminJsPath() {
   return path.join(__dirname, "admin.js");
 }
 
-function sendAdminHtml(req, res) {
+function sendAdminHtml(_req, res) {
   const filePath = getAdminHtmlPath();
 
   if (fs.existsSync(filePath)) {
@@ -3160,15 +3177,15 @@ function sendAdminHtml(req, res) {
 <body>
   <div class="box">
     <h1>Admin disponible</h1>
-    <p>El backend ya expone <code>/admin-api/*</code>, pero no encontró el archivo <code>admin.html</code> en Railway.</p>
-    <p>Sube de nuevo tus archivos <code>admin.html</code> y <code>admin.js</code> para recuperar el panel visual completo.</p>
+    <p>El backend ya expone <code>/admin-api/*</code>, pero no encontro el archivo <code>admin.html</code> en Railway.</p>
+    <p>Sube tus archivos <code>admin.html</code> y <code>admin.js</code> para recuperar el panel visual completo.</p>
   </div>
 </body>
 </html>
   `);
 }
 
-function sendAdminJs(req, res) {
+function sendAdminJs(_req, res) {
   const filePath = getAdminJsPath();
 
   if (fs.existsSync(filePath)) {
@@ -3611,7 +3628,10 @@ app.post("/traducir", authorizeOperator, async (req, res) => {
     runtimeStats.translations.ok += 1;
     runtimeStats.translations.lastMs = Date.now() - startedAt;
 
-    return res.json({ ok: true, traducido: result.traducido });
+    return res.json({
+      ok: true,
+      traducido: result.traducido
+    });
   } catch (err) {
     registerConsumptionAsync({
       operador,
@@ -3625,22 +3645,29 @@ app.post("/traducir", authorizeOperator, async (req, res) => {
     runtimeStats.translations.error += 1;
     runtimeStats.translations.lastMs = Date.now() - startedAt;
 
-    return res.json({ ok: false, error: err.message || "Error interno" });
+    return res.json({
+      ok: false,
+      error: err.message || "Error interno"
+    });
   }
 });
 
 /* =========================================================
- * FALLBACKS / ERRORS
+ * FALLBACK / ERRORS
  * ======================================================= */
 
 app.use((err, _req, res, _next) => {
   console.error("Error no controlado:", err);
   if (res.headersSent) return;
-  return res.status(500).json({ ok: false, error: "Error interno" });
+  return res.status(500).json({
+    ok: false,
+    error: "Error interno"
+  });
 });
 
 app.listen(PORT, () => {
   console.log(`Server unico completo activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
   console.log(`SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
+  console.log(`Rangos IA => 1:${TARGET_SUGGESTION_SPECS[0].min}-${TARGET_SUGGESTION_SPECS[0].max}, 2:${TARGET_SUGGESTION_SPECS[1].min}-${TARGET_SUGGESTION_SPECS[1].max}, 3:${TARGET_SUGGESTION_SPECS[2].min}-${TARGET_SUGGESTION_SPECS[2].max}`);
 });
