@@ -6,7 +6,7 @@ const { createClient } = require("@supabase/supabase-js");
 const { randomUUID, timingSafeEqual, createHmac } = require("crypto");
 
 /* =========================================================
- * CONFIG / ENV
+ * HELPERS
  * ======================================================= */
 
 function readIntEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -70,7 +70,7 @@ function dedupeStrings(items = []) {
   const out = [];
 
   for (const item of items) {
-    const clean = normalizeSpaces(String(item || ""));
+    const clean = cleanHuman(item);
     const key = normalizeText(clean);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -173,6 +173,10 @@ function base64UrlDecode(input = "") {
   return Buffer.from(normalized + padding, "base64").toString("utf8");
 }
 
+function escapeRegExp(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function selectAllPages(builderFactory, pageSize = 1000) {
   let from = 0;
   const rows = [];
@@ -220,9 +224,9 @@ function combineUsageData(items = []) {
   return found ? { usage: total } : null;
 }
 
-function escapeRegExp(text = "") {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+/* =========================================================
+ * ENV
+ * ======================================================= */
 
 const PORT = readIntEnv("PORT", 3000, 1, 65535);
 
@@ -629,6 +633,7 @@ function signAdminToken(payloadB64 = "") {
 
 function createAdminToken(usuario = ADMIN_USER) {
   const now = Date.now();
+
   const payload = {
     sub: usuario || ADMIN_USER,
     role: "admin",
@@ -1116,6 +1121,7 @@ const BANNED_TOPIC_WORDS = new Set([
   "online"
 ]);
 
+const INTERNAL_LABEL_REGEX = /\b(NOMBRE_CLIENTA|PAIS_CLIENTA|FECHA_NACIMIENTO|ESTADO_CIVIL|INTERESES_EN_COMUN|INTERESTED_IN|INTERESES_CLIENTA|LOOKING_FOR|ABOUT_ME|DATOS_CLIENTA|PROFILE_ANCHORS|RAW_PROFILE|no disponible|ninguno)\b/i;
 const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|como te decia|frase vacia|mejor dicho|te respondi mejor)\b/i;
 const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|numero|phone)\b/i;
 const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|cena|drink|dinner|direccion|hotel|llamame|llamarte|call me)\b/i;
@@ -1123,7 +1129,6 @@ const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por de
 const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|que tal)\b/i;
 const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ahi en lo de)\b/i;
 const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|carino|bebe)\b/gi;
-
 const THIRD_PERSON_GENERIC_REGEX = /\b(la historia de|la vida de|el perfil de|los datos de|la forma de ser de|la personalidad de)\b/i;
 
 const RISK_CATALOG = {
@@ -1212,14 +1217,73 @@ function getProfileLine(raw = "", label = "") {
   return match ? normalizeSpaces(match[1] || "") : "";
 }
 
+function isBadProfileValue(value = "") {
+  const clean = normalizeSpaces(value);
+  const n = normalizeText(clean);
+
+  if (!clean) return true;
+  if (["no disponible", "ninguno", "none", "null", "undefined", "n/a"].includes(n)) return true;
+  if (n === "me") return true;
+
+  const labels = [
+    "nombre_clienta",
+    "pais_clienta",
+    "fecha_nacimiento",
+    "estado_civil",
+    "intereses_en_comun",
+    "interested_in",
+    "intereses_clienta",
+    "looking_for",
+    "about_me",
+    "datos_clienta",
+    "profile_anchors",
+    "raw_profile",
+    "about me",
+    "bio",
+    "interested in",
+    "looking for",
+    "my content",
+    "newsfeed",
+    "icebreakers",
+    "manage media"
+  ];
+
+  if (labels.includes(n)) return true;
+  return false;
+}
+
+function sanitizeProfileValue(value = "", maxLen = 80) {
+  const clean = normalizeSpaces(value)
+    .replace(/^[-•]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (isBadProfileValue(clean)) return "";
+  if (clean.length > maxLen) return clean.slice(0, maxLen).trim();
+
+  return clean;
+}
+
 function splitProfileValues(text = "") {
   return dedupeStrings(
     String(text || "")
       .split("|")
-      .map((x) => normalizeSpaces(x))
+      .map((x) => sanitizeProfileValue(x, 90))
       .filter(Boolean)
-      .filter((x) => normalizeText(x) !== "ninguno")
   );
+}
+
+function sanitizeClientName(name = "") {
+  const clean = sanitizeProfileValue(name, 40);
+  const n = normalizeText(clean);
+
+  if (!clean) return "";
+  if (n === "me") return "";
+  if (n.startsWith("about ")) return "";
+  if (/\d/.test(clean)) return "";
+  if (clean.length < 2 || clean.length > 40) return "";
+
+  return clean;
 }
 
 function parseProfile(perfil = "") {
@@ -1233,17 +1297,17 @@ function parseProfile(perfil = "") {
   const datosClienta = splitProfileValues(getProfileLine(raw, "DATOS_CLIENTA"));
 
   const profile = {
-    nombreClienta: getProfileLine(raw, "NOMBRE_CLIENTA"),
-    paisClienta: getProfileLine(raw, "PAIS_CLIENTA") || getProfileLine(raw, "UBICACION_CLIENTA"),
-    fechaNacimiento: getProfileLine(raw, "FECHA_NACIMIENTO"),
-    estadoCivil: getProfileLine(raw, "ESTADO_CIVIL"),
+    nombreClienta: sanitizeClientName(getProfileLine(raw, "NOMBRE_CLIENTA")),
+    paisClienta: sanitizeProfileValue(getProfileLine(raw, "PAIS_CLIENTA") || getProfileLine(raw, "UBICACION_CLIENTA"), 60),
+    fechaNacimiento: sanitizeProfileValue(getProfileLine(raw, "FECHA_NACIMIENTO"), 40),
+    estadoCivil: sanitizeProfileValue(getProfileLine(raw, "ESTADO_CIVIL"), 40),
     interesesEnComun,
     interesesClienta: dedupeStrings([...interestedIn, ...interesesClienta]),
     lookingFor,
     aboutMe,
     datosClienta,
-    profileAnchors: getProfileLine(raw, "PROFILE_ANCHORS"),
-    rawProfile: getProfileLine(raw, "RAW_PROFILE") || raw.slice(0, 1800)
+    profileAnchors: sanitizeProfileValue(getProfileLine(raw, "PROFILE_ANCHORS"), 300),
+    rawProfile: sanitizeProfileValue(getProfileLine(raw, "RAW_PROFILE"), 1200)
   };
 
   profile.allProfileFacts = dedupeStrings([
@@ -1293,7 +1357,7 @@ function pickProfileDetail(perfil = {}, text = "") {
     ...(perfil.lookingFor || []).map((value) => ({ type: "looking_for", value, priority: 80 })),
     ...(perfil.interesesEnComun || []).map((value) => ({ type: "interes_comun", value, priority: 70 })),
     ...(perfil.datosClienta || []).map((value) => ({ type: "dato_clienta", value, priority: 60 }))
-  ];
+  ].filter((x) => x.value && !isBadProfileValue(x.value));
 
   for (const item of pool) {
     const key = normalizeText(item.value);
@@ -1673,6 +1737,7 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
   if (!s) return true;
   if (countChars(s) < MIN_RESPONSE_LENGTH) return true;
   if (countQuestions(s) > 1) return true;
+  if (INTERNAL_LABEL_REGEX.test(s)) return true;
   if (DISALLOWED_CONTACT_REGEX.test(n)) return true;
   if (DISALLOWED_MEET_REGEX.test(n)) return true;
   if (META_REGEX.test(n)) return true;
@@ -1859,6 +1924,13 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
 
   if (
     candidates.length &&
+    candidates.some((item) => INTERNAL_LABEL_REGEX.test(item.text))
+  ) {
+    notes.push("- No uses etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME o PROFILE_ANCHORS.");
+  }
+
+  if (
+    candidates.length &&
     candidates.some((item) => talksAboutClientInThirdPerson(item.text, caso))
   ) {
     notes.push("- No hables sobre la clienta en tercera persona. Habla directamente con ella.");
@@ -1907,6 +1979,7 @@ function buildSystemPrompt(caso = {}) {
     "- el borrador del operador es una intencion mal escrita que debes convertir en un mensaje listo para enviar",
     `- escribe directamente a ${name}, no hables sobre ella en tercera persona`,
     "- prohibido escribir frases tipo: 'La historia de Gabriela...', 'Gabriela parece...', 'La vida de Gabriela...'",
+    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
     "- si hay nombre disponible, puedes iniciar con el nombre de forma natural",
     "",
     `Objetivo principal: ${caso.objective}`,
@@ -1915,12 +1988,13 @@ function buildSystemPrompt(caso = {}) {
     `Riesgo primario: ${caso.risk?.primary?.label || "Sin riesgo especial"}`,
     "",
     "USO DEL PERFIL",
-    "- si hay datos de perfil, usalos como fuente principal cuando el chat esta vacio, viejo o con poco dialogo",
+    "- si hay datos reales de perfil, usalos como fuente principal cuando el chat esta vacio, viejo o con poco dialogo",
     "- cada opcion debe apoyarse en 1 o 2 datos reales del perfil si existen",
-    "- prioriza About Me, Interested In, Looking For y pais",
+    "- prioriza personalidad visible, intereses, lo que busca y pais",
     "- usa estado civil solo si la intencion habla de amor, confianza, pasado, nueva etapa o conexion emocional",
     "- no inventes viudez, divorcio, hijos, ciudad, pais ni intenciones",
-    "- si el perfil dice Divorced, no lo cambies a Widowed",
+    "- si el perfil dice Married, no lo conviertas en Divorced o Widowed",
+    "- si el perfil dice Divorced, no lo conviertas en Widowed",
     "- no uses todos los datos juntos; elige los mas naturales",
     "",
     "NUCLEO DE TRANSFORMACION",
@@ -2020,15 +2094,14 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
         : "Sin mensajes recientes de la clienta"
     ].join("\n"),
     [
-      "PERFIL ESTRUCTURADO",
-      `- nombre: ${caso.perfil?.nombreClienta || "no disponible"}`,
-      `- pais: ${caso.perfil?.paisClienta || "no disponible"}`,
-      `- fecha nacimiento: ${caso.perfil?.fechaNacimiento || "no disponible"}`,
-      `- estado civil: ${caso.perfil?.estadoCivil || "no disponible"}`,
-      `- intereses: ${(caso.perfil?.interesesClienta || []).join(" | ") || "no disponible"}`,
-      `- looking for: ${(caso.perfil?.lookingFor || []).join(" | ") || "no disponible"}`,
-      `- about me: ${(caso.perfil?.aboutMe || []).join(" | ") || "no disponible"}`,
-      `- anchors: ${caso.perfil?.profileAnchors || "no disponible"}`
+      "PERFIL REAL DISPONIBLE",
+      `- nombre: ${caso.perfil?.nombreClienta || ""}`,
+      `- pais: ${caso.perfil?.paisClienta || ""}`,
+      `- fecha nacimiento: ${caso.perfil?.fechaNacimiento || ""}`,
+      `- estado civil: ${caso.perfil?.estadoCivil || ""}`,
+      `- intereses: ${(caso.perfil?.interesesClienta || []).join(" | ")}`,
+      `- busca: ${(caso.perfil?.lookingFor || []).join(" | ")}`,
+      `- personalidad visible: ${(caso.perfil?.aboutMe || []).join(" | ")}`
     ].join("\n"),
     [
       "KEYWORDS",
@@ -2072,6 +2145,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     "IMPORTANTE",
     "- habla directamente con la clienta",
     "- no digas 'La historia de Gabriela' ni 'Gabriela parece'",
+    "- no uses etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
     "- si hay perfil, usa perfil real como base",
     "- no copies el borrador si esta pobre",
     "- no inventes datos",
@@ -2124,7 +2198,6 @@ function buildProfileBasedFallbacks(caso = {}) {
   const interests = profile.interesesClienta || [];
   const looking = profile.lookingFor || [];
   const country = profile.paisClienta || "";
-  const civil = profile.estadoCivil || "";
 
   const aboutText = about.slice(0, 3).join(", ");
   const interestText = interests.slice(0, 2).join(" y ");
@@ -2162,11 +2235,11 @@ function buildProfileBasedFallbacks(caso = {}) {
     ];
   }
 
-  if (country || civil) {
+  if (country) {
     return [
-      `${name}vi algunos detalles de tu perfil y me dieron curiosidad. No quiero entrar de forma pesada, pero si me gustaria conocerte desde algo mas real que un saludo comun.`,
-      `${name}me llamo la atencion tu perfil porque deja ver un poco de tu etapa y de lo que podria importarte. Me gustaria saber que tipo de conversacion te hace sentir mas comoda aqui.`,
-      `${name}vi tu perfil y preferi escribirte desde algo mas real que una frase generica. A veces un pequeno detalle basta para saber si vale la pena intentar una conversacion con mas calma.`
+      `${name}vi que estas en ${country} y me dio curiosidad saber un poco mas de ti. Prefiero empezar por algo real que por una frase generica.`,
+      `${name}me llamo la atencion tu perfil y el detalle de ${country}. A veces un dato simple abre una conversacion mas natural que un saludo del monton.`,
+      `${name}vi tu perfil y preferi escribirte desde algo mas real que una frase generica. Me dio curiosidad saber que tipo de conversacion te hace sentir mas comoda aqui.`
     ];
   }
 
@@ -2276,6 +2349,7 @@ function buildCase(input = {}) {
   const textoPlano = cleanSuggestion(String(input.texto || "").slice(0, 700));
   const perfil = parseProfile(input.perfil || "");
   const chatSignals = normalizeChatSignals(input.chat_signals || {});
+
   const mode = detectMode({
     textoPlano,
     clientePlano,
@@ -2290,9 +2364,16 @@ function buildCase(input = {}) {
   });
 
   const tipoContacto = inferContactType(chatSignals, rawContextLines);
+
   const detallePerfil = pickProfileDetail(
     perfil,
-    [textoPlano, clientePlano, contextoPlano, perfil.profileAnchors, perfil.rawProfile].filter(Boolean).join("\n")
+    [
+      textoPlano,
+      clientePlano,
+      contextoPlano,
+      perfil.profileAnchors,
+      perfil.rawProfile
+    ].filter(Boolean).join("\n")
   );
 
   const operatorRecent = rawContextLines
@@ -2422,6 +2503,7 @@ async function generateSuggestionsCore(input = {}) {
       runtimeStats.suggestions.secondPasses += 1;
 
       const feedback = buildWeaknessFeedback(firstCandidates, caso);
+
       const repairPass = await callSuggestionModel(
         caso,
         recent,
@@ -2666,6 +2748,7 @@ async function registerConsumption({
 }) {
   try {
     const usage = data?.usage || {};
+
     const payload = {
       operador: operador || "anon",
       extension_id: normalizeSpaces(extension_id) || "sin_extension",
@@ -3231,7 +3314,7 @@ function parseOperatorFilter(raw = "") {
 function getHealthPayload() {
   return {
     ok: true,
-    service: "server unico completo profile-aware",
+    service: "server unico completo profile-aware v2",
     uptime_seconds: Math.floor((Date.now() - runtimeStats.startedAt) / 1000),
     admin: {
       configured: adminConfigured(),
@@ -3252,7 +3335,8 @@ function getHealthPayload() {
     suggestion_config: {
       max_tokens: SUGGESTION_MAX_TOKENS,
       target_lengths: TARGET_SUGGESTION_SPECS,
-      profile_aware: true
+      profile_aware: true,
+      internal_label_filter: true
     },
     queues: {
       operator_suggestions: {
@@ -3796,7 +3880,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server unico completo profile-aware activo en puerto ${PORT}`);
+  console.log(`Server unico completo profile-aware v2 activo en puerto ${PORT}`);
   console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
   console.log(`SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
   console.log(`Rangos IA => 1:${TARGET_SUGGESTION_SPECS[0].min}-${TARGET_SUGGESTION_SPECS[0].max}, 2:${TARGET_SUGGESTION_SPECS[1].min}-${TARGET_SUGGESTION_SPECS[1].max}, 3:${TARGET_SUGGESTION_SPECS[2].min}-${TARGET_SUGGESTION_SPECS[2].max}`);
