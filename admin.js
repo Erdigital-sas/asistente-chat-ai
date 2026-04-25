@@ -14,7 +14,11 @@ const state = {
   dashboard: {
     generated_at: "",
     range: { from: "", to: "" },
-    summary: {},
+    summary: {
+      messages_sent_total: 0,
+      messages_sent_100_plus: 0,
+      messages_sent_under_100: 0
+    },
     operator_stats: [],
     warning_top: [],
     series: [],
@@ -125,6 +129,23 @@ function showFlash(texto = "", tipo = "info") {
   }, 2800);
 }
 
+function emptyDashboardState() {
+  return {
+    generated_at: "",
+    range: { from: "", to: "" },
+    summary: {
+      messages_sent_total: 0,
+      messages_sent_100_plus: 0,
+      messages_sent_under_100: 0
+    },
+    operator_stats: [],
+    warning_top: [],
+    series: [],
+    operator_filter: [],
+    pricing: {}
+  };
+}
+
 function setSession(token = "", user = "", sharedKey = "") {
   state.token = token || "";
   state.user = user || "";
@@ -153,16 +174,7 @@ function clearSession() {
     activos: 0,
     inactivos: 0
   };
-  state.dashboard = {
-    generated_at: "",
-    range: { from: "", to: "" },
-    summary: {},
-    operator_stats: [],
-    warning_top: [],
-    series: [],
-    operator_filter: [],
-    pricing: {}
-  };
+  state.dashboard = emptyDashboardState();
   state.analyticsSelectedOperators = [];
   state.analyticsOperatorSearchOpen = false;
 
@@ -521,7 +533,7 @@ function setAnalyticsEmptyState(message = "Sin datos") {
   const operatorsBody = $("analytics-operators-body");
 
   if (seriesBody) {
-    seriesBody.innerHTML = `<tr><td colspan="7" class="empty">${escapeHtml(message)}</td></tr>`;
+    seriesBody.innerHTML = `<tr><td colspan="10" class="empty">${escapeHtml(message)}</td></tr>`;
   }
 
   if (warningBody) {
@@ -529,9 +541,12 @@ function setAnalyticsEmptyState(message = "Sin datos") {
   }
 
   if (operatorsBody) {
-    operatorsBody.innerHTML = `<tr><td colspan="10" class="empty">${escapeHtml(message)}</td></tr>`;
+    operatorsBody.innerHTML = `<tr><td colspan="13" class="empty">${escapeHtml(message)}</td></tr>`;
   }
 
+  if (existeEl("kpi-messages-sent-total")) $("kpi-messages-sent-total").textContent = "-";
+  if (existeEl("kpi-messages-sent-100-plus")) $("kpi-messages-sent-100-plus").textContent = "-";
+  if (existeEl("kpi-messages-sent-under-100")) $("kpi-messages-sent-under-100").textContent = "-";
   if (existeEl("kpi-total-requests")) $("kpi-total-requests").textContent = "-";
   if (existeEl("kpi-ia-requests")) $("kpi-ia-requests").textContent = "-";
   if (existeEl("kpi-trad-requests")) $("kpi-trad-requests").textContent = "-";
@@ -580,6 +595,18 @@ function renderPricingInfo() {
 function renderKpis() {
   const summary = state.dashboard?.summary || {};
 
+  if (existeEl("kpi-messages-sent-total")) {
+    $("kpi-messages-sent-total").textContent = formatNumber(summary.messages_sent_total || 0);
+  }
+
+  if (existeEl("kpi-messages-sent-100-plus")) {
+    $("kpi-messages-sent-100-plus").textContent = formatNumber(summary.messages_sent_100_plus || 0);
+  }
+
+  if (existeEl("kpi-messages-sent-under-100")) {
+    $("kpi-messages-sent-under-100").textContent = formatNumber(summary.messages_sent_under_100 || 0);
+  }
+
   if (existeEl("kpi-total-requests")) {
     $("kpi-total-requests").textContent = formatNumber(summary.total_requests || 0);
   }
@@ -609,6 +636,9 @@ function agruparSeries(series = [], mode = "day") {
   if (mode !== "month") {
     return series.map((row) => ({
       periodo: row.fecha || "-",
+      messages_sent_total: Number(row.messages_sent_total || 0),
+      messages_sent_100_plus: Number(row.messages_sent_100_plus || 0),
+      messages_sent_under_100: Number(row.messages_sent_under_100 || 0),
       requests_total: Number(row.requests_total || 0),
       ia_requests: Number(row.ia_requests || 0),
       trad_requests: Number(row.trad_requests || 0),
@@ -627,6 +657,9 @@ function agruparSeries(series = [], mode = "day") {
     if (!map.has(periodo)) {
       map.set(periodo, {
         periodo,
+        messages_sent_total: 0,
+        messages_sent_100_plus: 0,
+        messages_sent_under_100: 0,
         requests_total: 0,
         ia_requests: 0,
         trad_requests: 0,
@@ -637,6 +670,9 @@ function agruparSeries(series = [], mode = "day") {
     }
 
     const item = map.get(periodo);
+    item.messages_sent_total += Number(row.messages_sent_total || 0);
+    item.messages_sent_100_plus += Number(row.messages_sent_100_plus || 0);
+    item.messages_sent_under_100 += Number(row.messages_sent_under_100 || 0);
     item.requests_total += Number(row.requests_total || 0);
     item.ia_requests += Number(row.ia_requests || 0);
     item.trad_requests += Number(row.trad_requests || 0);
@@ -657,13 +693,16 @@ function renderSeriesTable() {
   const rows = agruparSeries(series, mode);
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">No hay datos para ese rango o filtro.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="empty">No hay datos para ese rango o filtro.</td></tr>`;
     return;
   }
 
   body.innerHTML = rows.map((row) => `
     <tr>
       <td>${escapeHtml(row.periodo || "-")}</td>
+      <td>${formatNumber(row.messages_sent_total || 0)}</td>
+      <td>${formatNumber(row.messages_sent_100_plus || 0)}</td>
+      <td>${formatNumber(row.messages_sent_under_100 || 0)}</td>
       <td>${formatNumber(row.requests_total || 0)}</td>
       <td>${formatNumber(row.ia_requests || 0)}</td>
       <td>${formatNumber(row.trad_requests || 0)}</td>
@@ -702,13 +741,16 @@ function renderOperatorAnalyticsTable() {
   const rows = Array.isArray(state.dashboard?.operator_stats) ? state.dashboard.operator_stats : [];
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="10" class="empty">No hay consumo para ese rango o filtro.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="13" class="empty">No hay consumo para ese rango o filtro.</td></tr>`;
     return;
   }
 
   body.innerHTML = rows.map((row) => `
     <tr>
       <td><b>${escapeHtml(row.operador || "")}</b></td>
+      <td>${formatNumber(row.messages_sent_total || 0)}</td>
+      <td>${formatNumber(row.messages_sent_100_plus || 0)}</td>
+      <td>${formatNumber(row.messages_sent_under_100 || 0)}</td>
       <td>${formatNumber(row.requests_total || 0)}</td>
       <td>${formatNumber(row.ia_requests || 0)}</td>
       <td>${formatNumber(row.trad_requests || 0)}</td>
@@ -743,16 +785,7 @@ async function loadDashboard() {
   }
 
   const data = await api(`/admin-api/dashboard?${params.toString()}`);
-  state.dashboard = data || {
-    generated_at: "",
-    range: { from: "", to: "" },
-    summary: {},
-    operator_stats: [],
-    warning_top: [],
-    series: [],
-    operator_filter: [],
-    pricing: {}
-  };
+  state.dashboard = data || emptyDashboardState();
 
   renderDashboard();
 }
