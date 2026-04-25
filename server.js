@@ -3086,7 +3086,286 @@ async function saveWarningSummary({ operador = "", extension_id = "", fecha = ""
   return { rowsUpserted: payload.length };
 }
 
-/* ===== CONTINUA EN PARTE 4/4 ===== */
+/* =========================================================
+ * MESSAGES SENT
+ * ======================================================= */
+
+function cleanMessagesSentCounts(raw = {}) {
+  const total = Math.max(
+    0,
+    Math.min(9999999, Number.parseInt(raw.messages_sent_total, 10) || 0)
+  );
+
+  const plus100 = Math.max(
+    0,
+    Math.min(9999999, Number.parseInt(raw.messages_sent_100_plus, 10) || 0)
+  );
+
+  const under100 = Math.max(
+    0,
+    Math.min(9999999, Number.parseInt(raw.messages_sent_under_100, 10) || 0)
+  );
+
+  return {
+    messages_sent_total: total,
+    messages_sent_100_plus: plus100,
+    messages_sent_under_100: under100
+  };
+}
+
+async function saveMessagesSentSummary({
+  operador = "",
+  extension_id = "",
+  fecha = "",
+  counts = {}
+}) {
+  const operadorFinal = formatOperatorName(operador || "");
+  const fechaFinal = isValidISODate(fecha) ? fecha : formatDateISO(new Date());
+  const clean = cleanMessagesSentCounts(counts);
+
+  const pendingTotal =
+    clean.messages_sent_total +
+    clean.messages_sent_100_plus +
+    clean.messages_sent_under_100;
+
+  if (!operadorFinal) {
+    throw new Error("Operador invalido para messages sent");
+  }
+
+  if (pendingTotal <= 0) {
+    return {
+      rowsUpserted: 0,
+      mode: "empty"
+    };
+  }
+
+  const { error: rpcError } = await supabase.rpc("increment_message_resumen_diario", {
+    p_operador: operadorFinal,
+    p_extension_id: normalizeSpaces(extension_id) || "",
+    p_fecha: fechaFinal,
+    p_messages_sent_total: clean.messages_sent_total,
+    p_messages_sent_100_plus: clean.messages_sent_100_plus,
+    p_messages_sent_under_100: clean.messages_sent_under_100
+  });
+
+  if (!rpcError) {
+    return {
+      rowsUpserted: 1,
+      mode: "rpc"
+    };
+  }
+
+  const { data: existing, error: readError } = await supabase
+    .from("message_resumen_diario")
+    .select("messages_sent_total,messages_sent_100_plus,messages_sent_under_100")
+    .eq("operador", operadorFinal)
+    .eq("fecha", fechaFinal)
+    .maybeSingle();
+
+  if (readError) {
+    throw new Error(readError.message || "No se pudo leer message_resumen_diario");
+  }
+
+  const payload = {
+    operador: operadorFinal,
+    extension_id: normalizeSpaces(extension_id) || "",
+    fecha: fechaFinal,
+    messages_sent_total:
+      Number(existing?.messages_sent_total || 0) + clean.messages_sent_total,
+    messages_sent_100_plus:
+      Number(existing?.messages_sent_100_plus || 0) + clean.messages_sent_100_plus,
+    messages_sent_under_100:
+      Number(existing?.messages_sent_under_100 || 0) + clean.messages_sent_under_100,
+    updated_at: new Date().toISOString()
+  };
+
+  const { error } = await supabase
+    .from("message_resumen_diario")
+    .upsert([payload], {
+      onConflict: "operador,fecha"
+    });
+
+  if (error) {
+    throw new Error(error.message || "No se pudo guardar messages sent");
+  }
+
+  return {
+    rowsUpserted: 1,
+    mode: "upsert"
+  };
+}
+
+async function loadMessagesSentRange(range, operadoresFiltrados = []) {
+  return selectAllPages((from, to) => {
+    let query = supabase
+      .from("message_resumen_diario")
+      .select("operador,extension_id,fecha,messages_sent_total,messages_sent_100_plus,messages_sent_under_100,created_at,updated_at")
+      .gte("fecha", range.from)
+      .lte("fecha", range.to)
+      .order("fecha", { ascending: false })
+      .range(from, to);
+
+    if (operadoresFiltrados.length) {
+      query = query.in("operador", operadoresFiltrados);
+    }
+
+    return query;
+  });
+}
+
+function ensureMessagesSentFields(target = {}) {
+  if (target.messages_sent_total === undefined) {
+    target.messages_sent_total = 0;
+  }
+
+  if (target.messages_sent_100_plus === undefined) {
+    target.messages_sent_100_plus = 0;
+  }
+
+  if (target.messages_sent_under_100 === undefined) {
+    target.messages_sent_under_100 = 0;
+  }
+
+  return target;
+}
+
+function createOperatorMessageStat(operador = "") {
+  return {
+    operador,
+    requests_total: 0,
+    ok_requests: 0,
+    error_requests: 0,
+    ia_requests: 0,
+    ia_enganche_requests: 0,
+    ia_contexto_requests: 0,
+    ia_mail_requests: 0,
+    trad_requests: 0,
+    cache_hits: 0,
+    shared_hits: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0,
+    messages_sent_total: 0,
+    messages_sent_100_plus: 0,
+    messages_sent_under_100: 0,
+    last_activity: ""
+  };
+}
+
+function createSerieMessageStat(fecha = "") {
+  return {
+    fecha,
+    requests_total: 0,
+    ia_requests: 0,
+    trad_requests: 0,
+    total_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    estimated_cost_total: 0,
+    warnings_total: 0,
+    messages_sent_total: 0,
+    messages_sent_100_plus: 0,
+    messages_sent_under_100: 0
+  };
+}
+
+function applyMessagesSentToDashboard(dashboard = {}, messageRows = []) {
+  if (!dashboard.summary) dashboard.summary = {};
+
+  ensureMessagesSentFields(dashboard.summary);
+
+  const operatorMap = new Map();
+
+  for (const op of dashboard.operator_stats || []) {
+    ensureMessagesSentFields(op);
+    operatorMap.set(formatOperatorName(op.operador || "Anon") || "Anon", op);
+  }
+
+  const seriesMap = new Map();
+
+  for (const serie of dashboard.series || []) {
+    ensureMessagesSentFields(serie);
+    seriesMap.set(String(serie.fecha || ""), serie);
+  }
+
+  for (const row of messageRows || []) {
+    const operador = formatOperatorName(row.operador || "Anon") || "Anon";
+    const fecha = String(row.fecha || "");
+    const total = Number(row.messages_sent_total || 0);
+    const plus100 = Number(row.messages_sent_100_plus || 0);
+    const under100 = Number(row.messages_sent_under_100 || 0);
+    const lastActivity = String(row.updated_at || row.created_at || "");
+
+    dashboard.summary.messages_sent_total += total;
+    dashboard.summary.messages_sent_100_plus += plus100;
+    dashboard.summary.messages_sent_under_100 += under100;
+
+    if (!operatorMap.has(operador)) {
+      operatorMap.set(operador, createOperatorMessageStat(operador));
+    }
+
+    const op = operatorMap.get(operador);
+
+    ensureMessagesSentFields(op);
+
+    op.messages_sent_total += total;
+    op.messages_sent_100_plus += plus100;
+    op.messages_sent_under_100 += under100;
+
+    if (lastActivity && (!op.last_activity || lastActivity > op.last_activity)) {
+      op.last_activity = lastActivity;
+    }
+
+    if (fecha) {
+      if (!seriesMap.has(fecha)) {
+        seriesMap.set(fecha, createSerieMessageStat(fecha));
+      }
+
+      const serie = seriesMap.get(fecha);
+
+      ensureMessagesSentFields(serie);
+
+      serie.messages_sent_total += total;
+      serie.messages_sent_100_plus += plus100;
+      serie.messages_sent_under_100 += under100;
+    }
+  }
+
+  dashboard.operator_stats = Array.from(operatorMap.values())
+    .map((op) => ({
+      ...op,
+      estimated_cost_total: roundMoney(op.estimated_cost_total || 0)
+    }))
+    .sort((a, b) => {
+      if (
+        Number(b.estimated_cost_total || 0) !==
+        Number(a.estimated_cost_total || 0)
+      ) {
+        return Number(b.estimated_cost_total || 0) - Number(a.estimated_cost_total || 0);
+      }
+
+      if (
+        Number(b.messages_sent_total || 0) !==
+        Number(a.messages_sent_total || 0)
+      ) {
+        return Number(b.messages_sent_total || 0) - Number(a.messages_sent_total || 0);
+      }
+
+      return String(a.operador || "").localeCompare(String(b.operador || ""));
+    });
+
+  dashboard.series = Array.from(seriesMap.values())
+    .map((serie) => ({
+      ...serie,
+      estimated_cost_total: roundMoney(serie.estimated_cost_total || 0)
+    }))
+    .sort((a, b) => String(a.fecha || "").localeCompare(String(b.fecha || "")));
+
+  return dashboard;
+}
+
 /* =========================================================
  * CONSUMPTION / COST
  * ======================================================= */
@@ -4011,22 +4290,25 @@ app.get("/admin-api/dashboard", authorizeAdmin, async (req, res) => {
 
     const operadoresFiltrados = parseOperatorFilter(req.query?.operadores || "");
 
-    const [consumoRows, warningRows] = await Promise.all([
-      loadConsumptionRange(range, operadoresFiltrados),
-      loadWarningsRange(range, operadoresFiltrados)
-    ]);
+   const [consumoRows, warningRows, messageRows] = await Promise.all([
+  loadConsumptionRange(range, operadoresFiltrados),
+  loadWarningsRange(range, operadoresFiltrados),
+  loadMessagesSentRange(range, operadoresFiltrados)
+]);
 
-    const dashboard = buildDashboardAnalytics({
-      consumoRows,
-      warningRows,
-      range,
-      operadoresFiltrados
-    });
+const dashboard = buildDashboardAnalytics({
+  consumoRows,
+  warningRows,
+  range,
+  operadoresFiltrados
+});
 
-    return res.json({
-      ok: true,
-      ...dashboard
-    });
+applyMessagesSentToDashboard(dashboard, messageRows);
+
+return res.json({
+  ok: true,
+  ...dashboard
+});
   } catch (err) {
     return res.status(500).json({
       ok: false,
@@ -4078,7 +4360,29 @@ app.post("/warning-sync", authorizeOperator, async (req, res) => {
     });
   }
 });
+app.post("/messages-sync", authorizeOperator, async (req, res) => {
+  try {
+    const { extension_id = "", fecha = "", counts = {} } = req.body || {};
 
+    const result = await saveMessagesSentSummary({
+      operador: req.operadorAutorizado,
+      extension_id,
+      fecha,
+      counts
+    });
+
+    return res.json({
+      ok: true,
+      rows_upserted: result.rowsUpserted || 0,
+      mode: result.mode || "unknown"
+    });
+  } catch (err) {
+    return res.json({
+      ok: false,
+      error: err.message || "No se pudo sincronizar messages sent"
+    });
+  }
+});
 app.post("/sugerencias", authorizeOperator, async (req, res) => {
   const startedAt = Date.now();
   const operador = req.operadorAutorizado;
