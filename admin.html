@@ -490,7 +490,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 760px;
+      min-width: 1120px;
       overflow: hidden;
     }
 
@@ -680,7 +680,7 @@
         <p>
           Desde aqui crearas, activaras, desactivaras y eliminaras los usuarios operadores
           que pueden entrar a la extension. Tambien veras estadisticas por fechas,
-          costos, tokens y warnings.
+          costos, tokens, mensajes enviados y warnings.
         </p>
       </div>
 
@@ -827,6 +827,18 @@
 
       <div class="analytics-kpis">
         <div class="kpi card">
+          <div class="label">Messages Sent Total</div>
+          <div id="kpi-messages-sent-total" class="value">-</div>
+        </div>
+        <div class="kpi card">
+          <div class="label">Messages Sent +100 characters</div>
+          <div id="kpi-messages-sent-100-plus" class="value">-</div>
+        </div>
+        <div class="kpi card">
+          <div class="label">Messages Sent -100 characters</div>
+          <div id="kpi-messages-sent-under-100" class="value">-</div>
+        </div>
+        <div class="kpi card">
           <div class="label">Requests totales</div>
           <div id="kpi-total-requests" class="value">-</div>
         </div>
@@ -864,6 +876,9 @@
               <thead>
                 <tr>
                   <th>Periodo</th>
+                  <th>Messages Sent Total</th>
+                  <th>+100 characters</th>
+                  <th>-100 characters</th>
                   <th>Requests</th>
                   <th>IA</th>
                   <th>Trad</th>
@@ -874,7 +889,7 @@
               </thead>
               <tbody id="analytics-series-body">
                 <tr>
-                  <td colspan="7" class="empty">Pendiente de cargar.</td>
+                  <td colspan="10" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
@@ -911,8 +926,8 @@
         <div class="panel-block card">
           <h3>Gasto por operador</h3>
           <p>
-            Aqui saldra el ranking completo por operador con requests, prompt tokens,
-            completion tokens, total de tokens, costo estimado y warnings.
+            Aqui saldra el ranking completo por operador con mensajes enviados, requests,
+            prompt tokens, completion tokens, total de tokens, costo estimado y warnings.
           </p>
 
           <div class="table-wrap">
@@ -920,6 +935,9 @@
               <thead>
                 <tr>
                   <th>Operador</th>
+                  <th>Messages Sent Total</th>
+                  <th>+100 characters</th>
+                  <th>-100 characters</th>
                   <th>Requests</th>
                   <th>IA</th>
                   <th>Trad</th>
@@ -933,7 +951,7 @@
               </thead>
               <tbody id="analytics-operators-body">
                 <tr>
-                  <td colspan="10" class="empty">Pendiente de cargar.</td>
+                  <td colspan="13" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
