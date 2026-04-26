@@ -52,7 +52,20 @@ function cleanHuman(text = "") {
     .replace(/\s+/g, " ")
     .trim();
 }
+function cleanProfileSnippet(text = "", maxLen = 86) {
+  const clean = cleanHuman(text)
+    .replace(/\s+([,.;!?])/g, "$1")
+    .trim();
 
+  const cut = clean.length > maxLen
+    ? clean.slice(0, maxLen).trim()
+    : clean;
+
+  return cut
+    .replace(/[.!?]+$/g, "")
+    .replace(/\.\.\.$/g, "")
+    .trim();
+}
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -2890,65 +2903,99 @@ function pickTemperature(caso = {}, isRepair = false) {
 function buildProfileBasedFallbacks(caso = {}) {
   const name = namePrefix(caso);
   const profile = caso.perfil || {};
-  const aboutText = profile.aboutText || "";
+  const variationKey = caso.variationPlan?.key || "";
+
+  const aboutText = cleanProfileSnippet(profile.aboutText || "", 86);
   const about = profile.aboutMe || [];
   const interests = profile.interesesClienta || [];
   const looking = profile.lookingFor || [];
   const country = profile.paisClienta || "";
 
-  const aboutShort = aboutText.length > 70
-    ? `${aboutText.slice(0, 70).trim()}...`
-    : aboutText;
+  const aboutList = about
+    .slice(0, 2)
+    .map((x) => cleanProfileSnippet(x, 40))
+    .filter(Boolean)
+    .join(", ");
 
-  const aboutList = about.slice(0, 2).join(", ");
-  const interestText = interests.slice(0, 2).join(" y ");
-  const lookingText = looking.slice(0, 2).join(", ");
+  const interestText = interests
+    .slice(0, 2)
+    .map((x) => cleanProfileSnippet(x, 40))
+    .filter(Boolean)
+    .join(" y ");
+
+  const lookingText = looking
+    .slice(0, 2)
+    .map((x) => cleanProfileSnippet(x, 40))
+    .filter(Boolean)
+    .join(", ");
 
   if (aboutText) {
-    return [
-      `${name}lei algo en tu perfil que me dio curiosidad: ${aboutShort}. Se siente mas real que una frase bonita puesta al azar.`,
-      `${name}tu perfil deja una sensacion tranquila, como de alguien que tiene mas historia de la que muestra al principio. Me dio curiosidad saber que parte de ti pocos notan.`
+    const byVariation = {
+      energia_social: [
+        `${name}lo que cuentas en tu perfil sobre ${aboutText} deja una energia facil de seguir. Me dio curiosidad que tipo de charla te hace sentir comoda aqui.`,
+        `${name}tu perfil no se siente como una lista cualquiera. Entre lo que disfrutas y la energia que transmites, dan ganas de descubrir que conversacion te atrapa de verdad.`
+      ],
+      detalle_inusual: [
+        `${name}me quede con un detalle de tu perfil: ${aboutText}. No lo tomaria como una simple frase, sino como una pista de como disfrutas las cosas.`,
+        `${name}hay algo concreto en tu perfil que se siente distinto. Ese detalle de ${aboutText} me dio curiosidad porque no suena puesto solo por llenar espacio.`
+      ],
+      historia_por_descubrir: [
+        `${name}tu perfil deja la sensacion de que detras de ${aboutText} hay mas historia de la que aparece primero. Eso fue lo que me dio curiosidad.`,
+        `${name}hay perfiles que muestran poco, pero dejan ganas de saber mas. El tuyo, con eso de ${aboutText}, va justo por ese lado.`
+      ],
+      contraste_suave: [
+        `${name}me dio curiosidad la mezcla que se siente en tu perfil: algo tranquilo, pero con ganas de vivir cosas. Eso no aparece en cualquier descripcion.`,
+        `${name}tu perfil tiene un contraste bonito: se siente calmado, pero no apagado. Me dio curiosidad saber que parte de ti sale primero cuando una charla fluye.`
+      ],
+      pregunta_imaginativa: [
+        `${name}si tuviera que elegir una escena por tu perfil, seria algo entre una charla tranquila y un plan espontaneo. ¿Cual de esas dos partes te representa mas?`,
+        `${name}tu perfil me dejo una pregunta curiosa: cuando conectas con alguien, te gana mas la calma de una buena charla o la chispa de algo inesperado?`
+      ]
+    };
+
+    return byVariation[variationKey] || [
+      `${name}tu perfil tiene algo concreto que me dio curiosidad: ${aboutText}. No suena a una descripcion vacia, suena a alguien con quien la charla puede tomar buen ritmo.`,
+      `${name}hay algo natural en lo que muestras en tu perfil. Me dio curiosidad porque no parece una frase armada, sino una forma sencilla de dejar ver quien eres.`
     ];
   }
 
   if (about.length && interests.length) {
     return [
-      `${name}vi que te describes como ${aboutList} y que te interesa ${interestText}. Eso me dio curiosidad porque suena a alguien con una forma bonita de vivir las cosas.`,
-      `${name}me llamo la atencion la mezcla entre como te describes y lo que te interesa. No quiero sonar generico, solo senti que ahi podia empezar una conversacion real.`
+      `${name}hay una mezcla interesante entre como te describes y lo que disfrutas. ${aboutList} con ${interestText} suena a alguien que no vive las cosas en automatico.`,
+      `${name}lo que me llamo la atencion no fue solo que te guste ${interestText}, sino la forma en que eso combina con como te muestras: ${aboutList}.`
     ];
   }
 
   if (interests.length && country) {
     return [
-      `${name}vi que estas en ${country} y que te interesa ${interestText}. Me dio curiosidad porque eso suele decir mas de una persona que una simple foto.`,
-      `${name}hay algo interesante en ver de donde eres y lo que disfrutas. Me dieron ganas de saber que tipo de conversacion te hace sentir comoda aqui.`
+      `${name}entre ${country} y eso de ${interestText}, tu perfil deja una entrada mas interesante que un saludo comun. Me dio curiosidad como vives esas cosas.`,
+      `${name}lo de ${interestText} dice mas de ti que una frase cualquiera. Sumado a ${country}, me dio curiosidad saber que tipo de historias tienes detras.`
     ];
   }
 
   if (about.length) {
     return [
-      `${name}vi que te describes como ${aboutList}. Eso me llamo la atencion porque no todo el mundo muestra algo de si mismo desde el perfil.`,
-      `${name}tu forma de describirte me dio curiosidad. No suena como una lista fria, mas bien como una pista de que tienes una manera interesante de ver las cosas.`
+      `${name}tu forma de describirte como ${aboutList} me dio curiosidad. No suena a una lista fria, sino a una pequena pista de como eres cuando alguien te conoce mejor.`,
+      `${name}hay algo en eso de ${aboutList} que se siente mas personal que una simple descripcion. Me dieron ganas de entender que hay detras de esa parte tuya.`
     ];
   }
 
   if (looking.length) {
     return [
-      `${name}vi un poco lo que buscas aqui: ${lookingText}. Me parecio interesante porque una buena conversacion tambien empieza por saber que energia espera uno encontrar.`,
-      `${name}tu perfil deja algunas pistas sobre lo que buscas. Me gusta cuando alguien no aparece solo por aparecer, sino con cierta idea de lo que quiere sentir.`
+      `${name}lo que buscas aqui, ${lookingText}, me parece una buena pista de la energia que valoras. Me dio curiosidad saber que hace que una conversacion te atrape.`,
+      `${name}tu perfil deja claro que no se trata solo de hablar por hablar. Eso de ${lookingText} suena a alguien que busca una conexion con algo mas de sentido.`
     ];
   }
 
   if (country) {
     return [
-      `${name}vi que estas en ${country} y preferi escribirte algo mas real que un saludo comun. Me dio curiosidad saber un poco mas de ti.`,
-      `${name}me llamo la atencion tu perfil y el detalle de ${country}. A veces un dato simple abre mejor una conversacion que una frase del monton.`
+      `${name}vi el detalle de ${country} y preferi no empezar con un saludo comun. A veces un dato simple abre una conversacion mas real que una frase bonita.`,
+      `${name}tu perfil me dio curiosidad desde un detalle sencillo: ${country}. Me gusta cuando una conversacion puede empezar sin sonar copiada ni forzada.`
     ];
   }
 
   return [];
 }
-
 function fallbackContextSuggestions(caso = {}) {
   const lastClient = caso.clientePlano || "";
   const draft = caso.textoPlano || "";
@@ -3352,17 +3399,46 @@ async function generateSuggestionsCore(input = {}) {
     });
   }
 
-  pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
-pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
+    const aiPool = pool.filter((item) => {
+    return item.source === "openai_1" || item.source === "openai_2";
+  });
 
-const filteredPool = pool.filter((item) => {
-  return !repeatsRecentSuggestion(item.text, recent, caso);
-});
+  const filteredAiPool = aiPool.filter((item) => {
+    return !repeatsRecentSuggestion(item.text, recent, caso);
+  });
 
-const selectablePool = filteredPool.length >= 2 ? filteredPool : pool;
+  const aiSelectablePool = filteredAiPool.length >= 2 ? filteredAiPool : aiPool;
 
-const selected = selectFinalCandidates(selectablePool, caso);
-const final = ensureExactlyTwoSuggestions(selected, caso);
+  let selected = selectFinalCandidates(aiSelectablePool, caso);
+
+  const fallbackPool = [
+    ...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso),
+    ...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso)
+  ];
+
+  if (selected.length < 2) {
+    const filteredFallbackPool = fallbackPool.filter((item) => {
+      return !repeatsRecentSuggestion(item.text, recent, caso);
+    });
+
+    const fallbackSelectablePool = filteredFallbackPool.length
+      ? filteredFallbackPool
+      : fallbackPool;
+
+    selected = selectFinalCandidates([
+      ...selected,
+      ...fallbackSelectablePool
+    ], caso);
+  }
+
+  if (!selected.length) {
+    selected = selectFinalCandidates([
+      ...aiSelectablePool,
+      ...fallbackPool
+    ], caso);
+  }
+
+  const final = ensureExactlyTwoSuggestions(selected, caso);
 
   if (final.length < 2 || selected.length < 2) {
     runtimeStats.suggestions.forcedFill += 1;
