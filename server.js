@@ -231,21 +231,63 @@ function combineUsageData(items = []) {
 const PORT = readIntEnv("PORT", 3000, 1, 65535);
 
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "");
+
 const OPENAI_URL = String(
   process.env.OPENAI_URL || "https://api.openai.com/v1/chat/completions"
 );
 
-const OPENAI_MODEL_SUGGESTIONS = String(
+const OPENAI_RESPONSES_URL = String(
+  process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses"
+);
+
+/*
+ * Modelos por función.
+ * No usamos un solo modelo para todo porque traducción/ortografía no necesitan el modelo caro.
+ */
+const OPENAI_MODEL_ENGANCHE = String(
+  process.env.OPENAI_MODEL_ENGANCHE ||
   process.env.OPENAI_MODEL_SUGGESTIONS ||
   process.env.OPENAI_MODEL ||
-  "gpt-4o-mini"
+  "gpt-5.4"
 );
+
+const OPENAI_MODEL_CONTEXT = String(
+  process.env.OPENAI_MODEL_CONTEXT ||
+  process.env.OPENAI_MODEL_SUGGESTIONS ||
+  process.env.OPENAI_MODEL ||
+  "gpt-5.4"
+);
+
+const OPENAI_MODEL_MAIL = String(
+  process.env.OPENAI_MODEL_MAIL ||
+  process.env.OPENAI_MODEL_CONTEXT ||
+  process.env.OPENAI_MODEL_SUGGESTIONS ||
+  process.env.OPENAI_MODEL ||
+  "gpt-5.4"
+);
+
+/*
+ * Compatibilidad con partes viejas del server/admin que aún lean OPENAI_MODEL_SUGGESTIONS.
+ */
+const OPENAI_MODEL_SUGGESTIONS = OPENAI_MODEL_ENGANCHE;
 
 const OPENAI_MODEL_TRANSLATE = String(
   process.env.OPENAI_MODEL_TRANSLATE ||
   process.env.OPENAI_MODEL_FAST ||
   "gpt-4o-mini"
 );
+
+const OPENAI_MODEL_ORTHOGRAPHY = String(
+  process.env.OPENAI_MODEL_ORTHOGRAPHY ||
+  process.env.OPENAI_MODEL_FAST ||
+  "gpt-4o-mini"
+);
+
+const OPENAI_REASONING_EFFORT_SUGGESTIONS = String(
+  process.env.OPENAI_REASONING_EFFORT_SUGGESTIONS || "low"
+);
+
+const CHAT_MAX_CHARS = readIntEnv("CHAT_MAX_CHARS", 300, 120, 500);
 
 const OPENAI_TIMEOUT_SUGGESTIONS_MS = readIntEnv(
   "OPENAI_TIMEOUT_SUGGESTIONS_MS",
@@ -263,18 +305,24 @@ const OPENAI_TIMEOUT_TRANSLATE_MS = readIntEnv(
 
 const SUGGESTION_MAX_TOKENS = readIntEnv(
   "SUGGESTION_MAX_TOKENS",
-  580,
-  300,
-  1400
+  1200,
+  600,
+  6000
 );
 
 const MAIL_MAX_TOKENS = readIntEnv(
   "MAIL_MAX_TOKENS",
-  900,
-  400,
-  1800
+  3500,
+  1200,
+  12000
 );
 
+const OPENAI_TIMEOUT_ORTHOGRAPHY_MS = readIntEnv(
+  "OPENAI_TIMEOUT_ORTHOGRAPHY_MS",
+  15000,
+  4000,
+  45000
+);
 /*
  * DEBUG_OPENAI:
  * 1 = muestra logs reales de OpenAI/fallback en Railway.
@@ -390,12 +438,16 @@ const PER_OPERATOR_SUGGESTION_QUEUE_WAIT_MS = readIntEnv(
 );
 
 const DEFAULT_MODEL_PRICING = {
+  "gpt-5.5": { input: 5, output: 30 },
+  "gpt-5.4": { input: 2.5, output: 15 },
+  "gpt-5.4-mini": { input: 0.75, output: 4.5 },
+
   "gpt-4o": { input: 2.5, output: 10 },
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4.1": { input: 2, output: 8 },
-  "gpt-4.1-mini": { input: 0.4, output: 1.6 }
+  "gpt-4.1-mini": { input: 0.4, output: 1.6 },
+  "gpt-4.1-nano": { input: 0.1, output: 0.4 }
 };
-
 function getDefaultPricingForModel(model = "") {
   return DEFAULT_MODEL_PRICING[normalizeText(model)] || { input: 0, output: 0 };
 }
@@ -430,19 +482,75 @@ const TRANSLATE_OUTPUT_COST_PER_1M = readFloatEnv(
   0,
   100000
 );
+const orthographyPricingDefault = getDefaultPricingForModel(OPENAI_MODEL_ORTHOGRAPHY);
 
+const ORTHOGRAPHY_INPUT_COST_PER_1M = readFloatEnv(
+  "ORTHOGRAPHY_INPUT_COST_PER_1M",
+  orthographyPricingDefault.input,
+  0,
+  100000
+);
+
+const ORTHOGRAPHY_OUTPUT_COST_PER_1M = readFloatEnv(
+  "ORTHOGRAPHY_OUTPUT_COST_PER_1M",
+  orthographyPricingDefault.output,
+  0,
+  100000
+);
 const CHAT_TARGET_SPECS = [
-  { min: 150, max: 200, ideal: 175 },
-  { min: 200, max: 300, ideal: 245 },
-  { min: 250, max: 400, ideal: 320 }
+  {
+    key: "corta",
+    label: "Corta",
+    min: 100,
+    max: 180,
+    ideal: 145
+  },
+  {
+    key: "extendida",
+    label: "Extendida",
+    min: 200,
+    max: 300,
+    ideal: 255
+  }
 ];
 
-const MAIL_TARGET_SPECS = [
-  { min: 260, max: 420, ideal: 340 },
-  { min: 380, max: 620, ideal: 500 },
-  { min: 520, max: 850, ideal: 680 }
-];
+/*
+ * Las cartas NO tienen límite de 300.
+ * Su tamaño se calcula dinámicamente según el borrador del operador.
+ */
+function getDynamicMailTargetSpecs(draftText = "") {
+  const draftLen = countChars(draftText);
 
+  if (draftLen < 180) {
+    return [
+      { key: "fiel", label: "Fiel", min: 260, max: 520, ideal: 380 },
+      { key: "mejorada", label: "Mejorada", min: 420, max: 850, ideal: 620 }
+    ];
+  }
+
+  const min1 = Math.max(180, Math.round(draftLen * 0.85));
+  const max1 = Math.max(min1 + 80, Math.round(draftLen * 1.05));
+
+  const min2 = Math.max(min1 + 60, Math.round(draftLen * 0.98));
+  const max2 = Math.max(min2 + 120, Math.round(draftLen * 1.30));
+
+  return [
+    {
+      key: "fiel",
+      label: "Fiel",
+      min: min1,
+      max: max1,
+      ideal: Math.round((min1 + max1) / 2)
+    },
+    {
+      key: "mejorada",
+      label: "Mejorada",
+      min: min2,
+      max: max2,
+      ideal: Math.round((min2 + max2) / 2)
+    }
+  ];
+}
 const SUGGESTION_MEMORY_TTL_MS = 20 * 60 * 1000;
 const SUGGESTION_MEMORY_LIMIT = 900;
 
@@ -499,6 +607,12 @@ const runtimeStats = {
     inflightHits: 0,
     lastMs: 0
   },
+orthography: {
+  total: 0,
+  ok: 0,
+  error: 0,
+  lastMs: 0
+},
   warnings: {
     total: 0,
     ok: 0,
@@ -507,13 +621,14 @@ const runtimeStats = {
     lastMs: 0
   },
   openai: {
-    total: 0,
-    ok: 0,
-    error: 0,
-    suggestionCalls: 0,
-    translationCalls: 0,
-    lastMs: 0
-  },
+  total: 0,
+  ok: 0,
+  error: 0,
+  suggestionCalls: 0,
+  translationCalls: 0,
+  orthographyCalls: 0,
+  lastMs: 0
+},
   admin: {
     loginTotal: 0,
     loginOk: 0,
@@ -1067,6 +1182,57 @@ function countOperatorSuggestionsQueued() {
  * OPENAI
  * ======================================================= */
 
+function shouldUseResponsesApi(model = "") {
+  return /^gpt-5/i.test(String(model || ""));
+}
+
+function normalizeOpenAIUsage(raw = {}) {
+  const usage = raw?.usage || raw || {};
+
+  const promptTokens = safeNumber(
+    usage.prompt_tokens ??
+    usage.input_tokens ??
+    0
+  );
+
+  const completionTokens = safeNumber(
+    usage.completion_tokens ??
+    usage.output_tokens ??
+    0
+  );
+
+  const totalTokens = safeNumber(
+    usage.total_tokens ??
+    (promptTokens + completionTokens)
+  );
+
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens
+  };
+}
+
+function extractResponsesText(data = {}) {
+  if (typeof data.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  const parts = [];
+
+  for (const item of data.output || []) {
+    for (const content of item.content || []) {
+      if (typeof content.text === "string") {
+        parts.push(content.text);
+      } else if (typeof content.output_text === "string") {
+        parts.push(content.output_text);
+      }
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
 async function callOpenAI({
   lane = "sugerencias",
   model,
@@ -1078,9 +1244,11 @@ async function callOpenAI({
   frequencyPenalty = 0,
   presencePenalty = 0
 }) {
-  const limiter = lane === "traduccion"
-    ? translationOpenAILimiter
-    : suggestionsOpenAILimiter;
+  const isFastLane = lane === "traduccion" || lane === "ortografia";
+
+const limiter = isFastLane
+  ? translationOpenAILimiter
+  : suggestionsOpenAILimiter;
 
   return limiter.run(async () => {
     const controller = new AbortController();
@@ -1088,19 +1256,88 @@ async function callOpenAI({
     const startedAt = Date.now();
 
     runtimeStats.openai.total += 1;
-    if (lane === "traduccion") runtimeStats.openai.translationCalls += 1;
-    else runtimeStats.openai.suggestionCalls += 1;
+
+if (lane === "traduccion") {
+  runtimeStats.openai.translationCalls += 1;
+} else if (lane === "ortografia") {
+  runtimeStats.openai.orthographyCalls += 1;
+} else {
+  runtimeStats.openai.suggestionCalls += 1;
+}
 
     try {
-      if (LOG_SUCCESS_SUMMARY) {
-        logInfo("OPENAI_REQUEST", {
-          lane,
+      let data;
+
+      if (shouldUseResponsesApi(model)) {
+        const systemMsg = Array.isArray(messages)
+          ? messages.find((m) => m.role === "system")?.content || ""
+          : "";
+
+        const userMsg = Array.isArray(messages)
+          ? messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n\n")
+          : "";
+
+        const body = {
           model,
-          temperature,
-          maxTokens,
-          timeoutMs,
-          messages_count: Array.isArray(messages) ? messages.length : 0
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: String(systemMsg || "")
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: String(userMsg || "")
+                }
+              ]
+            }
+          ],
+          reasoning: {
+            effort: OPENAI_REASONING_EFFORT_SUGGESTIONS
+          },
+          max_output_tokens: maxTokens
+        };
+
+        const response = await fetch(OPENAI_RESPONSES_URL, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
         });
+
+        data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data?.error?.message || data?.error || `Error HTTP ${response.status}`);
+        }
+
+        const text = extractResponsesText(data);
+        const usage = normalizeOpenAIUsage(data);
+
+        runtimeStats.openai.ok += 1;
+        runtimeStats.openai.lastMs = Date.now() - startedAt;
+
+        return {
+          ...data,
+          usage,
+          choices: [
+            {
+              message: {
+                content: text
+              }
+            }
+          ]
+        };
       }
 
       const response = await fetch(OPENAI_URL, {
@@ -1121,21 +1358,9 @@ async function callOpenAI({
         })
       });
 
-      let data;
-      try {
-        data = await response.json();
-      } catch (_err) {
-        throw new Error("La respuesta de OpenAI no vino en JSON");
-      }
+      data = await response.json();
 
       if (!response.ok) {
-        logError("OPENAI_HTTP_ERROR", {
-          lane,
-          model,
-          status: response.status,
-          error: data?.error?.message || data?.error || data
-        });
-
         if (response.status === 429) {
           throw new Error("OpenAI esta ocupado. Intenta de nuevo en unos segundos");
         }
@@ -1143,17 +1368,10 @@ async function callOpenAI({
         throw new Error(data?.error?.message || "Error consultando OpenAI");
       }
 
+      data.usage = normalizeOpenAIUsage(data);
+
       runtimeStats.openai.ok += 1;
       runtimeStats.openai.lastMs = Date.now() - startedAt;
-
-      if (LOG_SUCCESS_SUMMARY) {
-        logInfo("OPENAI_OK", {
-          lane,
-          model,
-          ms: runtimeStats.openai.lastMs,
-          usage: data?.usage || null
-        });
-      }
 
       return data;
     } catch (err) {
@@ -1168,12 +1386,14 @@ async function callOpenAI({
       });
 
       if (err.name === "AbortError") {
-        throw new Error(
-          lane === "traduccion"
-            ? "La traduccion tardo demasiado"
-            : "OpenAI tardo demasiado en responder"
-        );
-      }
+  throw new Error(
+    lane === "traduccion"
+      ? "La traduccion tardo demasiado"
+      : lane === "ortografia"
+        ? "La correccion de ortografia tardo demasiado"
+        : "OpenAI tardo demasiado en responder"
+  );
+}
 
       throw err;
     } finally {
@@ -1181,8 +1401,6 @@ async function callOpenAI({
     }
   });
 }
-
-/* ===== FIN PARTE 1/4 ===== */
 /* =========================================================
  * SUGGESTION ENGINE
  * ======================================================= */
@@ -1550,17 +1768,32 @@ function normalizeMode(inputMode = "", pageType = "chat") {
 }
 
 function getTargetSpecs(caso = {}) {
-  return caso.pageType === "mail" ? MAIL_TARGET_SPECS : CHAT_TARGET_SPECS;
-}
+  if (caso.pageType === "mail") {
+    return getDynamicMailTargetSpecs(caso.textoPlano || "");
+  }
 
+  return CHAT_TARGET_SPECS;
+}
 function getMaxTokensForCase(caso = {}) {
-  return caso.pageType === "mail" ? MAIL_MAX_TOKENS : SUGGESTION_MAX_TOKENS;
-}
+  if (caso.pageType !== "mail") {
+    return SUGGESTION_MAX_TOKENS;
+  }
 
+  const specs = getDynamicMailTargetSpecs(caso.textoPlano || "");
+  const maxChars = Math.max(...specs.map((x) => x.max));
+  const estimatedTokens = Math.ceil(maxChars / 2.7) + 900;
+
+  return Math.max(1200, Math.min(MAIL_MAX_TOKENS, estimatedTokens));
+}
 function getOutputType(caso = {}) {
   if (caso.pageType === "mail") return "IA_MAIL";
   if (caso.modoAyuda === "enganche") return "IA_ENGANCHE";
   return "IA_CONTEXTO";
+}
+function getModelForSuggestionCase(caso = {}) {
+  if (caso.pageType === "mail") return OPENAI_MODEL_MAIL;
+  if (caso.modoAyuda === "enganche") return OPENAI_MODEL_ENGANCHE;
+  return OPENAI_MODEL_CONTEXT;
 }
 
 function inferContactType(caso = {}) {
@@ -1762,13 +1995,56 @@ function looksTooSimilar(a = "", b = "") {
   return overlap / wordsB.length >= 0.8;
 }
 
+function normalizedOpening(text = "", words = 5) {
+  return normalizeText(text)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, words)
+    .join(" ");
+}
+
+function normalizedEnding(text = "", words = 6) {
+  const arr = normalizeText(text).split(/\s+/).filter(Boolean);
+  return arr.slice(Math.max(0, arr.length - words)).join(" ");
+}
+
+function extractLastQuestion(text = "") {
+  const clean = cleanHuman(text);
+  const parts = clean.split(/[.!]/).map((x) => x.trim()).filter(Boolean);
+  return parts.reverse().find((x) => x.includes("?") || x.includes("¿")) || "";
+}
+
+function sameStructure(a = "", b = "") {
+  const openA = normalizedOpening(a, 5);
+  const openB = normalizedOpening(b, 5);
+
+  if (openA && openB && openA === openB) return true;
+
+  const endA = normalizedEnding(a, 6);
+  const endB = normalizedEnding(b, 6);
+
+  if (endA && endB && endA === endB) return true;
+
+  const qA = normalizeText(extractLastQuestion(a));
+  const qB = normalizeText(extractLastQuestion(b));
+
+  if (qA && qB && looksTooSimilar(qA, qB)) return true;
+
+  return false;
+}
 function isSuggestionForbidden(suggestion = "", caso = {}) {
   const s = cleanSuggestion(suggestion);
   const n = normalizeText(s);
-  const minLength = caso.pageType === "mail" ? 160 : MIN_RESPONSE_LENGTH;
+  const length = countChars(s);
+  const minLength = caso.pageType === "mail" ? 120 : 60;
 
   if (!s) return true;
-  if (countChars(s) < minLength) return true;
+  if (length < minLength) return true;
+
+  if (caso.pageType !== "mail" && length > CHAT_MAX_CHARS) {
+    return true;
+  }
+
   if (caso.pageType !== "mail" && countQuestions(s) > 1) return true;
   if (INTERNAL_LABEL_REGEX.test(s)) return true;
   if (DISALLOWED_CONTACT_REGEX.test(n)) return true;
@@ -1782,14 +2058,13 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
     caso.modoAyuda === "contexto_correccion" &&
     caso.chatSignals?.hay_clienta_visible &&
     /^hola\b|^hey\b|^buenas\b/i.test(n) &&
-    countChars(s) < 160
+    length < 160
   ) {
     return true;
   }
 
   return false;
 }
-
 function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   if (isSuggestionForbidden(suggestion, caso)) return 0;
 
@@ -1890,19 +2165,24 @@ function selectFinalCandidates(pool = [], caso = {}) {
 
     let candidate = ranked.find((item) => {
       if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
+      if (selected.some((x) => sameStructure(x.text, item.text))) return false;
       return item.length >= spec.min && item.length <= spec.max;
     });
 
     if (!candidate) {
       candidate = ranked.find((item) => {
         if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
-        return item.length >= Math.round(spec.min * 0.72) && item.length <= Math.round(spec.max * 1.22);
+        if (selected.some((x) => sameStructure(x.text, item.text))) return false;
+        return item.length >= Math.round(spec.min * 0.72) &&
+          item.length <= Math.round(spec.max * 1.22);
       });
     }
 
     if (!candidate) {
       candidate = ranked.find((item) => {
-        return !selected.some((x) => looksTooSimilar(x.text, item.text));
+        if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
+        if (selected.some((x) => sameStructure(x.text, item.text))) return false;
+        return true;
       });
     }
 
@@ -1911,11 +2191,10 @@ function selectFinalCandidates(pool = [], caso = {}) {
     }
   }
 
-  return selected.slice(0, 3);
+  return selected.slice(0, 2);
 }
-
 function isWeakResult(candidates = [], selected = [], caso = {}) {
-  if (selected.length < 3) return true;
+  if (selected.length < 2) return true;
 
   const avg = selected.reduce((sum, item) => sum + item.score, 0) / selected.length;
 
@@ -1929,11 +2208,17 @@ function isWeakResult(candidates = [], selected = [], caso = {}) {
 
     if (!item) return true;
     if (item.length < Math.round(spec.min * 0.72)) return true;
+
+    if (caso.pageType !== "mail" && item.length > CHAT_MAX_CHARS) {
+      return true;
+    }
   }
+
+  if (looksTooSimilar(selected[0].text, selected[1].text)) return true;
+  if (sameStructure(selected[0].text, selected[1].text)) return true;
 
   return false;
 }
-
 function buildWeaknessFeedback(candidates = [], caso = {}) {
   const notes = [];
 
@@ -1945,7 +2230,7 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     ? candidates.reduce((sum, item) => sum + item.length, 0) / candidates.length
     : 0;
 
-  if (avgLength && avgLength < 180) {
+  if (avgLength && avgLength < 120 && caso.pageType !== "mail") {
     notes.push("- Las opciones estan demasiado cortas.");
   }
 
@@ -1955,7 +2240,7 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     candidates.length &&
     candidates.every((item) => keywordOverlap(item.text, caso.profileKeywords || []) === 0)
   ) {
-    notes.push("- Falta usar datos reales del perfil. Cada opcion debe apoyarse en 1 o 2 datos del perfil.");
+    notes.push("- Falta usar datos reales del perfil.");
   }
 
   if (
@@ -1990,19 +2275,18 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
     notes.push("- No finjas confianza previa. No digas 'nuestras conversaciones', 'me acorde de ti' ni 'lo que hablamos'.");
   }
 
-  if (!notes.length) {
-    notes.push("- Hazlas mas especificas, mas utiles y menos genericas.");
-  }
-
   if (caso.pageType === "mail") {
-    notes.push("- En mail, entrega versiones de carta corregidas, naturales y mas completas.");
+    notes.push("- En mail, entrega 2 versiones: una fiel/corregida y una mejorada/desarrollada.");
+    notes.push("- No resumas agresivamente una carta larga.");
   } else {
-    notes.push("- Recuerda: opcion 1 de 150 a 200 caracteres, opcion 2 de 200 a 300, opcion 3 de 250 a 400.");
+    notes.push("- Chat: opcion 1 de 100 a 180 caracteres.");
+    notes.push("- Chat: opcion 2 de 200 a 300 caracteres.");
+    notes.push("- Ninguna opcion puede superar 300 caracteres.");
+    notes.push("- La opcion 2 no puede ser la opcion 1 con mas palabras; debe usar otro angulo.");
   }
 
   return notes.join("\n");
 }
-
 function buildSpecText(caso = {}) {
   return getTargetSpecs(caso)
     .map((spec, index) => `${index + 1}. ${spec.min}-${spec.max} caracteres`)
@@ -2018,7 +2302,7 @@ function buildEngancheSystemPrompt(caso = {}) {
 
   return [
     "Eres el motor de ENGANCHE de una herramienta interna de chat.",
-    "Debes devolver exactamente 3 opciones finales en espanol, listas para enviar.",
+    "Debes devolver exactamente 2 opciones finales en espanol, listas para enviar.",
     "Tu unico trabajo es crear una entrada atractiva usando datos reales del perfil.",
     "",
     "REGLA CENTRAL",
@@ -2028,14 +2312,21 @@ function buildEngancheSystemPrompt(caso = {}) {
     `- escribe directamente a ${name}, no hables sobre ella en tercera persona`,
     "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, ABOUT_TEXT, RAW_PROFILE o PROFILE_ANCHORS",
     "",
+    "LIMITE CHAT",
+    "- opcion 1 CORTA: 100 a 180 caracteres",
+    "- opcion 2 EXTENDIDA: 200 a 300 caracteres",
+    "- ninguna opcion puede superar 300 caracteres",
+    "",
+    "DIFERENCIA ENTRE OPCIONES",
+    "- la opcion 2 NO puede ser la opcion 1 con mas palabras",
+    "- deben tener distinto inicio, distinto angulo, distinto cierre y distinta intencion emocional",
+    "- no pueden hacer la misma pregunta",
+    "- no pueden usar la misma estructura",
+    "",
     "USO DEL PERFIL",
     "- si hay ABOUT_TEXT, usalo como prioridad alta",
     "- usa maximo 1 o 2 datos reales del perfil por opcion",
-    "- puedes usar nombre, pais, intereses, looking for, about me o about text",
-    "- usa estado civil solo si suma de forma natural y no invasiva",
     "- no inventes ciudad, pais, hijos, estado civil ni intenciones",
-    "- si el perfil dice Married, no lo conviertas en Divorced o Widowed",
-    "- si el perfil dice Divorced, no lo conviertas en Widowed",
     "",
     "TONO",
     "- natural",
@@ -2052,27 +2343,16 @@ function buildEngancheSystemPrompt(caso = {}) {
     "- no propongas encuentros, llamadas ni contacto externo",
     "- no invites a salir de la app",
     "- no uses frases vacias como hola como estas",
-    "- no copies el borrador si esta flojo",
-    "",
-    "VARIACION",
-    "1. Directa: 150 a 200 caracteres.",
-    "2. Atractiva: 200 a 300 caracteres.",
-    "3. Desarrollada: 250 a 400 caracteres.",
-    "",
-    "LARGO EXACTO ESPERADO",
-    buildSpecText(caso),
     "",
     "Devuelve solo:",
     "1. ...",
-    "2. ...",
-    "3. ..."
+    "2. ..."
   ].join("\n").trim();
 }
-
 function buildContextSystemPrompt(caso = {}) {
   return [
     "Eres el motor de CONTEXTO Y CORRECCION de una herramienta interna de chat.",
-    "Debes devolver exactamente 3 opciones finales en espanol, listas para enviar.",
+    "Debes devolver exactamente 2 opciones finales en espanol, listas para enviar.",
     "Tu unico trabajo es corregir y mejorar el borrador del operador usando la conversacion real.",
     "",
     "REGLA CENTRAL",
@@ -2080,23 +2360,19 @@ function buildContextSystemPrompt(caso = {}) {
     "- usa solo el contexto del chat y el borrador del operador",
     "- si hay mensajes reales de la clienta, responde al momento actual",
     "- si ya hay conversacion activa, NO saludes como apertura",
-    "- no escribas como cliente nuevo si hay historial real",
     "- conserva la intencion del operador, pero corrige ansiedad, presion, reclamo o tono debil",
-    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
     "",
-    "SITUACIONES DE RIESGO",
-    "- si el operador presiona, reclama o suena ansioso, baja la presion",
-    "- si la clienta habla de abandonar, sitio, datos personales, cansancio o ritmo, valida y calma",
-    "- si hay contacto externo, no lo aceptes y mantente dentro del chat",
-    "- si hay desconfianza, responde claro sin ponerte defensiva",
+    "LIMITE CHAT",
+    "- opcion 1 CORTA: 100 a 180 caracteres",
+    "- opcion 2 EXTENDIDA: 200 a 300 caracteres",
+    "- ninguna opcion puede superar 300 caracteres",
     "",
-    "TONO",
-    "- natural",
-    "- emocionalmente inteligente",
-    "- sin culpa",
-    "- sin suplica",
-    "- sin manipulacion",
-    "- conversacional",
+    "DIFERENCIA ENTRE OPCIONES",
+    "- la opcion 2 NO puede ser la opcion 1 con mas palabras",
+    "- debe tener otro enfoque: mas calido, mas estrategico o mas emocional",
+    "- no pueden empezar igual",
+    "- no pueden cerrar igual",
+    "- no pueden hacer la misma pregunta",
     "",
     "REGLAS",
     "- maximo 1 pregunta por opcion",
@@ -2107,45 +2383,36 @@ function buildContextSystemPrompt(caso = {}) {
     "- no propongas encuentros, llamadas ni contacto externo",
     "- si hay ultimo mensaje de la clienta, responde primero a eso",
     "",
-    "VARIACION",
-    "1. Directa: 150 a 200 caracteres.",
-    "2. Atractiva: 200 a 300 caracteres.",
-    "3. Desarrollada: 250 a 400 caracteres.",
-    "",
-    "LARGO EXACTO ESPERADO",
-    buildSpecText(caso),
-    "",
     "Devuelve solo:",
     "1. ...",
-    "2. ...",
-    "3. ..."
+    "2. ..."
   ].join("\n").trim();
 }
-
 function buildMailSystemPrompt(caso = {}) {
+  const specs = getDynamicMailTargetSpecs(caso.textoPlano || "");
+
   return [
     "Eres el motor de CARTAS de una herramienta interna.",
-    "Debes devolver exactamente 3 versiones finales en espanol, listas para enviar como carta.",
+    "Debes devolver exactamente 2 versiones finales en espanol, listas para enviar como carta.",
     "Tu trabajo es mejorar el borrador del operador usando el contexto del mail o carta.",
     "",
     "REGLA CENTRAL",
     "- este modo es para cartas/mails, no para chat corto",
     "- corrige errores",
     "- mejora el tono",
-    "- extiende solo si aporta",
-    "- responde al hilo anterior si existe",
     "- conserva la intencion del operador",
     "- no uses perfil si no fue enviado",
     "- no inventes datos",
-    "- prohibido usar etiquetas internas como DATOS_CLIENTA, LOOKING_FOR, ABOUT_ME, RAW_PROFILE o PROFILE_ANCHORS",
+    "- no conviertas una carta larga en una respuesta corta",
     "",
-    "TONO",
-    "- natural",
-    "- cercano",
-    "- claro",
-    "- con buena redaccion",
-    "- sin sonar robotico",
-    "- sin exceso de intensidad",
+    "LONGITUD ESPERADA",
+    `1. Fiel/corregida: ${specs[0].min}-${specs[0].max} caracteres aproximados.`,
+    `2. Mejorada/desarrollada: ${specs[1].min}-${specs[1].max} caracteres aproximados.`,
+    "",
+    "DIFERENCIA ENTRE OPCIONES",
+    "- la opcion 1 conserva mas fielmente estructura e ideas del operador",
+    "- la opcion 2 tiene mejor fluidez, conexion y desarrollo",
+    "- la opcion 2 NO debe ser la opcion 1 inflada",
     "",
     "REGLAS",
     "- sin emojis",
@@ -2153,23 +2420,13 @@ function buildMailSystemPrompt(caso = {}) {
     "- no pidas contacto externo",
     "- no propongas encuentros, llamadas ni salir de la app",
     "- no inventes promesas",
-    "- no conviertas la carta en una respuesta corta de chat",
-    "",
-    "VARIACION",
-    "1. Carta breve corregida.",
-    "2. Carta mas completa y natural.",
-    "3. Carta desarrollada, con mejor hilo y mejor cierre.",
-    "",
-    "LARGO ESPERADO",
-    buildSpecText(caso),
+    "- no elimines ideas importantes del operador",
     "",
     "Devuelve solo:",
     "1. ...",
-    "2. ...",
-    "3. ..."
+    "2. ..."
   ].join("\n").trim();
 }
-
 function buildSystemPrompt(caso = {}) {
   if (caso.pageType === "mail") return buildMailSystemPrompt(caso);
   if (caso.modoAyuda === "enganche") return buildEngancheSystemPrompt(caso);
@@ -2268,7 +2525,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       "- extiende con naturalidad si hace falta",
       "- no inventes datos",
       "- no uses etiquetas internas",
-      "- entrega 3 versiones de carta"
+      "- entrega 2 versiones de carta: una fiel/corregida y una mejorada/desarrollada"
     ].join("\n"));
   } else if (caso.modoAyuda === "enganche") {
     common.push([
@@ -2278,7 +2535,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       "- si hay ABOUT_TEXT, priorizalo",
       "- habla directamente con la clienta",
       "- no uses etiquetas internas",
-      "- entrega 3 opciones de enganche"
+      "- entrega 2 opciones de enganche: una corta/directa y una extendida/diferente"
     ].join("\n"));
   } else {
     common.push([
@@ -2288,7 +2545,7 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
       "- responde al momento actual",
       "- no saludes como apertura si hay conversacion activa",
       "- baja presion si hay ansiedad o reclamo",
-      "- entrega 3 opciones corregidas"
+      "- entrega 2 opciones corregidas: una corta/directa y una extendida/diferente"
     ].join("\n"));
   }
 
@@ -2341,81 +2598,53 @@ function buildProfileBasedFallbacks(caso = {}) {
   const looking = profile.lookingFor || [];
   const country = profile.paisClienta || "";
 
-  const aboutTextTiny = aboutText.length > 95 ? `${aboutText.slice(0, 95).trim()}...` : aboutText;
-  const aboutTextMedium = aboutText.length > 135 ? `${aboutText.slice(0, 135).trim()}...` : aboutText;
+  const aboutShort = aboutText.length > 70
+    ? `${aboutText.slice(0, 70).trim()}...`
+    : aboutText;
 
-  const aboutTextLower = normalizeText(aboutText);
-  const hasNewChapter = /\b(new chapter|nueva etapa|starting a new chapter|separated|divorcing|divorcio|amistades|friendships|cool friendships)\b/.test(aboutTextLower);
-
-  const aboutTextAngle = hasNewChapter
-    ? "una nueva etapa y amistades tranquilas"
-    : "algo honesto sobre la etapa que estas viviendo";
-
-  const aboutTextCore = hasNewChapter
-    ? "Me gusto porque suena a que buscas algo sin presion, pero con una energia real y tranquila."
-    : "Me gusto porque se siente mas humano que una descripcion perfecta y deja ver algo real de ti.";
-
-  const aboutTextQuestion = hasNewChapter
-    ? "Que tipo de amistad te hace sentir comoda ahora?"
-    : "Que parte de esa etapa te gustaria vivir con mas calma?";
-
-  const aboutTextLong = hasNewChapter
-    ? "No lo leo como algo triste, sino como una etapa donde una conversacion simple, honesta y sin presion puede sentirse bastante bien."
-    : "No lo tomo como una frase cualquiera, sino como una pista de que hay una historia real detras y una forma mas consciente de ver las cosas.";
-
-  const aboutTextClosing = hasNewChapter
-    ? "Me dio curiosidad saber que clase de persona te transmite paz en este momento de tu vida."
-    : "Me dio curiosidad saber que tipo de conversacion te hace sentir realmente comoda.";
-
-  if (aboutText) {
-    return [
-      `${name}lei en tu perfil que estas viviendo ${aboutTextAngle}. ${aboutTextCore} ${aboutTextQuestion}`,
-      `${name}me llamo la atencion lo que escribiste: ${aboutTextTiny}. Se siente directo y honesto, no como una frase vacia. ${aboutTextQuestion}`,
-      `${name}lei esta parte de tu perfil: ${aboutTextMedium}. ${aboutTextLong} ${aboutTextClosing}`
-    ];
-  }
-
-  const aboutTextList = about.slice(0, 3).join(", ");
+  const aboutList = about.slice(0, 2).join(", ");
   const interestText = interests.slice(0, 2).join(" y ");
   const lookingText = looking.slice(0, 2).join(", ");
 
+  if (aboutText) {
+    return [
+      `${name}lei algo en tu perfil que me dio curiosidad: ${aboutShort}. Se siente mas real que una frase bonita puesta al azar.`,
+      `${name}tu perfil deja una sensacion tranquila, como de alguien que tiene mas historia de la que muestra al principio. Me dio curiosidad saber que parte de ti pocos notan.`
+    ];
+  }
+
   if (about.length && interests.length) {
     return [
-      `${name}vi que te describes como ${aboutTextList} y que te interesa ${interestText}. Eso me dio curiosidad, porque suena a alguien que valora una conversacion real y tranquila.`,
-      `${name}me llamo la atencion que entre tus intereses este ${interestText}, y tambien que te describas como ${aboutTextList}. Me gusta cuando un perfil deja ver un poco de personalidad, no solo una foto bonita.`,
-      `${name}vi varias cosas en tu perfil que me dieron curiosidad: ${aboutTextList}, y tambien tu interes por ${interestText}. No quiero sonar como un mensaje copiado, pero si me hizo pensar que quizas tienes una forma bonita y bastante consciente de vivir las cosas.`
+      `${name}vi que te describes como ${aboutList} y que te interesa ${interestText}. Eso me dio curiosidad porque suena a alguien con una forma bonita de vivir las cosas.`,
+      `${name}me llamo la atencion la mezcla entre como te describes y lo que te interesa. No quiero sonar generico, solo senti que ahi podia empezar una conversacion real.`
     ];
   }
 
   if (interests.length && country) {
     return [
-      `${name}vi que estas en ${country} y que te interesa ${interestText}. Eso me dio curiosidad, porque suena a que disfrutas mas las experiencias reales que las conversaciones vacias.`,
-      `${name}me llamo la atencion que estes en ${country} y que te guste ${interestText}. Hay algo bonito en las personas que disfrutan ese tipo de cosas, porque suelen tener historias mas interesantes.`,
-      `${name}vi que estas en ${country} y que entre tus intereses aparece ${interestText}. Eso me hizo imaginar que quizas valoras los lugares, los momentos y las conversaciones que dejan algo, no solo pasar el rato sin sentido.`
+      `${name}vi que estas en ${country} y que te interesa ${interestText}. Me dio curiosidad porque eso suele decir mas de una persona que una simple foto.`,
+      `${name}hay algo interesante en ver de donde eres y lo que disfrutas. Me dieron ganas de saber que tipo de conversacion te hace sentir comoda aqui.`
     ];
   }
 
   if (about.length) {
     return [
-      `${name}vi que te describes como ${aboutTextList}. Eso me llamo la atencion porque no todo el mundo muestra esa parte de si mismo desde el perfil.`,
-      `${name}me gusto ver que te describes como ${aboutTextList}. Me dio curiosidad saber si esa forma de ser es algo que siempre has tenido o algo que la vida te fue ensenando.`,
-      `${name}hay algo de tu perfil que me parecio bonito: ${aboutTextList}. No quiero convertirlo en algo demasiado serio, pero si me hizo pensar que detras de esas palabras debe haber una forma interesante de mirar la vida.`
+      `${name}vi que te describes como ${aboutList}. Eso me llamo la atencion porque no todo el mundo muestra algo de si mismo desde el perfil.`,
+      `${name}tu forma de describirte me dio curiosidad. No suena como una lista fria, mas bien como una pista de que tienes una manera interesante de ver las cosas.`
     ];
   }
 
   if (looking.length) {
     return [
-      `${name}vi un poco lo que buscas aqui: ${lookingText}. Me parecio interesante porque una buena conversacion tambien empieza por saber que tipo de energia espera uno encontrar.`,
-      `${name}me llamo la atencion lo que aparece en tu perfil sobre lo que buscas. No lo tomo como una lista fria, sino como una pista de la clase de conexion que podria hacerte sentir comoda.`,
-      `${name}vi que tu perfil deja algunas pistas sobre lo que buscas: ${lookingText}. Me gusta cuando alguien no solo aparece por aparecer, sino que parece tener una idea de la clase de persona con la que quiere hablar.`
+      `${name}vi un poco lo que buscas aqui: ${lookingText}. Me parecio interesante porque una buena conversacion tambien empieza por saber que energia espera uno encontrar.`,
+      `${name}tu perfil deja algunas pistas sobre lo que buscas. Me gusta cuando alguien no aparece solo por aparecer, sino con cierta idea de lo que quiere sentir.`
     ];
   }
 
   if (country) {
     return [
-      `${name}vi que estas en ${country} y me dio curiosidad saber un poco mas de ti. Prefiero empezar por algo real que por una frase generica.`,
-      `${name}me llamo la atencion tu perfil y el detalle de ${country}. A veces un dato simple abre una conversacion mas natural que un saludo del monton.`,
-      `${name}vi tu perfil y preferi escribirte desde algo mas real que una frase generica. Me dio curiosidad saber que tipo de conversacion te hace sentir mas comoda aqui.`
+      `${name}vi que estas en ${country} y preferi escribirte algo mas real que un saludo comun. Me dio curiosidad saber un poco mas de ti.`,
+      `${name}me llamo la atencion tu perfil y el detalle de ${country}. A veces un dato simple abre mejor una conversacion que una frase del monton.`
     ];
   }
 
@@ -2428,25 +2657,22 @@ function fallbackContextSuggestions(caso = {}) {
 
   if (caso.risk?.primary?.key === "abandono_ritmo_contacto") {
     return [
-      "No quiero que sientas que te estoy presionando. Solo me preocupó un poco lo que dijiste, y prefiero que podamos hablar con calma, sin que esto se vuelva pesado para ti.",
-      "Entiendo que quizá ahora tienes muchas cosas encima. No quiero empujarte ni hacerte sentir incómoda; solo me gustaría que sigamos hablando de una forma tranquila y sincera.",
-      "Si algo de esto te hizo sentir presionada, prefiero bajarle el ritmo. Me importa más que la conversación se sienta cómoda para ti que insistir de una forma que pueda alejarte."
+      "No quiero que sientas presion. Prefiero bajar un poco el ritmo y que esto se sienta comodo para ti, sin forzar nada.",
+      "Entiendo que tal vez ahora tienes muchas cosas encima. Podemos llevarlo con calma y seguir hablando de una forma mas tranquila."
     ];
   }
 
   if (lastClient) {
     return [
-      "Entiendo lo que dices y no quiero responderte desde la prisa. Prefiero hacerlo con calma, porque lo que me cuentas merece una respuesta más clara y más humana.",
-      "Me quedo con lo que acabas de decir, porque no suena como algo pequeño. Quiero entenderlo bien y responderte sin presionarte ni cambiar el sentido de la conversación.",
-      "Lo que dices me hace pensar que esta conversación necesita más calma que intensidad. Prefiero escucharte bien y seguir desde ahí, sin hacerte sentir que tienes que responder de una forma específica."
+      "Entiendo lo que dices, y no quiero responderte desde la prisa. Prefiero tomarlo con calma y seguir la conversacion de forma mas clara.",
+      "Me quedo con lo que acabas de decir. No quiero cambiar el sentido de la charla, solo responderte de una manera mas natural y tranquila."
     ];
   }
 
   if (draft) {
     return [
-      "Quise decirlo de una forma más clara y tranquila, sin que suene intenso ni repetitivo. Me interesa que la conversación siga natural y que no se sienta forzada.",
-      "Prefiero escribirlo mejor para que no parezca presión ni reclamo. La idea es que se entienda lo que quiero decir, pero con un tono más cómodo y cercano.",
-      "Quiero que esto suene más natural y menos impulsivo. A veces una frase más tranquila abre mejor la conversación que insistir demasiado o escribir desde la ansiedad."
+      "Quise decirlo de una forma mas clara y tranquila, sin que suene intenso ni repetitivo. Me interesa que la conversacion siga natural.",
+      "Prefiero escribirlo mejor para que no parezca presion ni reclamo. La idea es que se entienda bien, pero con un tono mas comodo."
     ];
   }
 
@@ -2458,16 +2684,14 @@ function fallbackMailSuggestions(caso = {}) {
 
   if (draft && draft.length > 40) {
     return [
-      `Quise responderte con calma porque me parece mejor escribir algo que se sienta natural y no solo una frase rápida. ${draft}`,
-      `Me gustó tomarme un momento para escribirte mejor, porque una carta permite decir las cosas con más claridad. ${draft}`,
-      `Quiero que esta carta se sienta honesta y fácil de leer, sin sonar demasiado perfecta ni vacía. ${draft}`
+      `Quise responderte con calma y mantener la idea principal de lo que queria decirte. ${draft}`,
+      `Me tome un momento para escribirlo mejor, con una forma mas clara y natural, sin cambiar la intencion de fondo. ${draft}`
     ];
   }
 
   return [
-    "Gracias por escribirme. Me gusta poder responder con calma, porque una carta permite decir las cosas de una manera más clara y cercana que un mensaje rápido.",
-    "Me dio gusto leer tu mensaje. Prefiero responderte con una carta que tenga un poco más de intención, porque así la conversación se siente más real y menos automática.",
-    "Quise tomarme un momento para responderte bien. A veces una carta sencilla, honesta y bien escrita puede decir mucho más que una respuesta rápida sin dirección."
+    "Gracias por escribirme. Me gusta poder responder con calma, porque una carta permite decir las cosas de una manera mas clara y cercana que un mensaje rapido.",
+    "Quise tomarme un momento para responderte bien. A veces una carta sencilla y honesta puede abrir mejor una conversacion que muchas frases sueltas."
   ];
 }
 
@@ -2481,29 +2705,25 @@ function fallbackRiskSuggestions(caso = {}) {
     case "contacto_externo":
       return [
         `${namePrefix(caso)}prefiero que sigamos por aqui y sin correr. Me interesa mas que la conversacion se sienta real antes que moverla fuera del chat.`,
-        `${namePrefix(caso)}podemos llevarlo tranquilo por este chat. Para mi tiene mas sentido ver si la conversacion fluye bien aqui antes que saltar de una app a otra.`,
-        `${namePrefix(caso)}antes de mover nada fuera de aqui prefiero ver si de verdad la charla tiene sentido. Me gusta mas descubrir si hay una conexion real que apurar algo que todavia estamos empezando.`
+        `${namePrefix(caso)}podemos llevarlo tranquilo por este chat. Para mi tiene mas sentido ver si la conversacion fluye aqui antes de pensar en otra cosa.`
       ];
 
     case "pregunta_pago_plataforma":
       return [
-        `${namePrefix(caso)}sobre como lo maneja la plataforma prefiero no inventarte nada. Lo que si me importa es que por aqui la charla se sienta real.`,
-        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser claro y seguir con lo que si podemos construir aqui: una conversacion real.`,
-        `${namePrefix(caso)}con temas de plataforma prefiero no suponer cosas que no se. Mejor sigamos desde algo mas humano y desde una conversacion que se sienta clara.`
+        `${namePrefix(caso)}sobre como lo maneja la plataforma prefiero no inventarte nada. Lo que si me importa es que la charla se sienta real por aqui.`,
+        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser claro y seguir desde una conversacion mas humana.`
       ];
 
     case "redes_externas":
       return [
-        `${namePrefix(caso)}aunque hayas visto algo fuera, prefiero que lo llevemos por aqui y sin mezclar cosas. Me interesa mas conocerte desde esta conversacion.`,
-        `${namePrefix(caso)}yo mantendria la charla por este chat para que sea mas simple y natural. Si algo te dio curiosidad, prefiero que lo hablemos aqui con calma.`,
-        `${namePrefix(caso)}antes de cruzar nada con otras redes prefiero que aqui la conversacion se sienta clara y real. Si hay curiosidad, podemos darle espacio sin sacar la charla de aqui.`
+        `${namePrefix(caso)}aunque hayas visto algo fuera, prefiero que lo llevemos por aqui y sin mezclar cosas. Me interesa conocerte desde esta conversacion.`,
+        `${namePrefix(caso)}yo mantendria la charla por este chat para que sea mas simple y natural. Si algo te dio curiosidad, podemos hablarlo aqui con calma.`
       ];
 
     case "desconfianza_realidad":
       return [
         `${namePrefix(caso)}te respondo simple y claro: prefiero que esto suene natural antes que perfecto. Si algo te genera duda, dimelo directo y lo hablamos.`,
-        `${namePrefix(caso)}no me interesa sonar armado ni vender una imagen rara. Prefiero una conversacion clara y normal, de esas que se sostienen solas.`,
-        `${namePrefix(caso)}si algo te hace ruido, mejor decirlo de frente y seguir desde ahi. Para mi tiene mas valor una charla clara que una respuesta demasiado ensayada.`
+        `${namePrefix(caso)}no me interesa sonar armado ni vender una imagen rara. Prefiero una conversacion clara y normal, de esas que se sostienen solas.`
       ];
 
     default:
@@ -2528,28 +2748,25 @@ function fallbackSuggestions(caso = {}) {
 function emergencySuggestions(caso = {}) {
   if (caso.pageType === "mail") {
     return [
-      "Gracias por escribirme. Quise responderte con calma, porque una carta merece sentirse clara, natural y con un poco más de intención que una respuesta rápida.",
-      "Me gustó leer tu mensaje y preferí responder de una forma más cuidada. A veces una carta sencilla puede abrir mejor una conversación que muchas frases sueltas.",
-      "Quiero que esta carta se sienta cercana y honesta, sin sonar exagerada. Me interesa que podamos seguir hablando de una manera tranquila, clara y agradable."
+      "Gracias por escribirme. Quise responderte con calma, porque una carta merece sentirse clara, natural y con un poco mas de intencion que una respuesta rapida.",
+      "Me gusto leer tu mensaje y preferi responder de una forma mas cuidada. A veces una carta sencilla puede abrir mejor una conversacion que muchas frases sueltas."
     ];
   }
 
   if (caso.modoAyuda === "enganche") {
     return [
-      `${namePrefix(caso)}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y me gustaria saber que tipo de conversacion te hace sentir comoda por aqui.`,
-      `${namePrefix(caso)}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una pregunta que de verdad abra un poco la puerta.`,
-      `${namePrefix(caso)}me dio curiosidad saber un poco mas de ti sin sonar como un mensaje copiado. Me interesa mas una conversacion tranquila y natural que una entrada demasiado perfecta.`
+      `${namePrefix(caso)}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y preferi empezar sin sonar como un mensaje copiado.`,
+      `${namePrefix(caso)}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una entrada que se sienta natural.`
     ];
   }
 
   return [
-    "No quiero que esto suene como presión ni como reclamo. Prefiero escribirlo de una forma más tranquila, para que la conversación pueda seguir sin sentirse pesada.",
-    "Quise decirlo mejor porque la intención no era incomodar. Me interesa que podamos hablar con calma y que esto se mantenga natural, sin forzar nada.",
-    "Prefiero bajar un poco el ritmo y escribirlo de manera más clara. A veces una respuesta tranquila ayuda más que insistir demasiado o sonar ansioso."
+    "No quiero que esto suene como presion ni como reclamo. Prefiero escribirlo de una forma mas tranquila para que la conversacion siga natural.",
+    "Quise decirlo mejor porque la intencion no era incomodar. Me interesa que podamos hablar con calma y sin forzar nada."
   ];
 }
 
-function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
+function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
   const final = [];
 
   const pushClean = (text = "") => {
@@ -2559,7 +2776,12 @@ function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
     if (DISALLOWED_CONTACT_REGEX.test(normalizeText(clean))) return;
     if (DISALLOWED_MEET_REGEX.test(normalizeText(clean))) return;
     if (FALSE_FAMILIARITY_REGEX.test(normalizeText(clean)) && caso.modoAyuda === "enganche") return;
+
+    if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return;
+
     if (final.some((x) => looksTooSimilar(x, clean))) return;
+    if (final.some((x) => sameStructure(x, clean))) return;
+
     final.push(clean);
   };
 
@@ -2568,24 +2790,23 @@ function ensureExactlyThreeSuggestions(selected = [], caso = {}) {
   }
 
   for (const item of fallbackSuggestions(caso)) {
-    if (final.length >= 3) break;
+    if (final.length >= 2) break;
     pushClean(item);
   }
 
   for (const item of emergencySuggestions(caso)) {
-    if (final.length >= 3) break;
+    if (final.length >= 2) break;
     pushClean(item);
   }
 
-  while (final.length < 3) {
-    const fallback = emergencySuggestions(caso)[final.length] || emergencySuggestions(caso)[0];
+  while (final.length < 2) {
+    const emergency = emergencySuggestions(caso);
+    const fallback = emergency[final.length] || emergency[0] || "Prefiero responderte de una forma clara, natural y sin presion para que la conversacion siga comoda.";
     final.push(fallback);
   }
 
-  return final.slice(0, 3);
-}
-
-/* =========================================================
+  return final.slice(0, 2);
+}/* =========================================================
  * CASE BUILDER
  * ======================================================= */
 
@@ -2719,7 +2940,7 @@ function buildInFlightSuggestionKey(input = {}) {
 async function callSuggestionModel(caso = {}, recent = [], previousOptions = [], feedback = "", isRepair = false) {
   const data = await callOpenAI({
     lane: "sugerencias",
-    model: OPENAI_MODEL_SUGGESTIONS,
+    model: getModelForSuggestionCase(caso),
     messages: [
       { role: "system", content: buildSystemPrompt(caso) },
       { role: "user", content: buildUserPrompt(caso, recent, previousOptions, feedback) }
@@ -2803,9 +3024,9 @@ async function generateSuggestionsCore(input = {}) {
   pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
 
   const selected = selectFinalCandidates(pool, caso);
-  const final = ensureExactlyThreeSuggestions(selected, caso);
+  const final = ensureExactlyTwoSuggestions(selected, caso);
 
-  if (final.length < 3 || selected.length < 3) {
+  if (final.length < 2 || selected.length < 2) {
     runtimeStats.suggestions.forcedFill += 1;
   }
 
@@ -2934,14 +3155,20 @@ function writeTranslationCache(key = "", value = "") {
 function buildTranslationSystemPrompt(language = "English") {
   return [
     `Traduce el texto al idioma ${language}.`,
-    "Debe sonar natural, humano y apropiado para chat o carta.",
-    "Reglas:",
-    "- no uses comillas",
-    "- no expliques nada",
-    "- no agregues notas",
-    "- conserva intencion y tono",
-    "- si el texto esta en el mismo idioma destino, mejoralo suavemente sin cambiar el sentido",
-    "- devuelve solo una version final"
+    "",
+    "REGLAS:",
+    "- traduce exactamente lo que dice el operador",
+    "- conserva el mismo tono, fuerza, intencion y estilo",
+    "- no suavices lenguaje fuerte, vulgar u ofensivo",
+    "- no censures",
+    "- no embellezcas",
+    "- no conviertas el texto en una version educada",
+    "- no resumas",
+    "- no agregues explicaciones",
+    "- no cambies el sentido",
+    "- si el texto ya esta en el idioma destino, devuelvelo equivalente sin suavizarlo",
+    "",
+    "Devuelve solo la traduccion."
   ].join("\n");
 }
 
@@ -2956,7 +3183,10 @@ async function translateTextCore(text = "", language = "English", languageCode =
         role: "system",
         content: buildTranslationSystemPrompt(language)
       },
-      { role: "user", content: String(text ?? "") }
+      {
+        role: "user",
+        content: String(text ?? "")
+      }
     ],
     temperature: 0.22,
     maxTokens,
@@ -2976,7 +3206,6 @@ async function translateTextCore(text = "", language = "English", languageCode =
     target_language_code: languageCode
   };
 }
-
 async function translateText(text = "", language = "English", languageCode = "en") {
   const cacheKey = getTranslationCacheKey(text, languageCode);
   const cached = readTranslationCache(cacheKey);
@@ -3226,6 +3455,10 @@ function ensureMessagesSentFields(target = {}) {
     target.messages_sent_under_100 = 0;
   }
 
+  if (target.ortografia_requests === undefined) {
+    target.ortografia_requests = 0;
+  }
+
   return target;
 }
 
@@ -3240,6 +3473,7 @@ function createOperatorMessageStat(operador = "") {
     ia_contexto_requests: 0,
     ia_mail_requests: 0,
     trad_requests: 0,
+    ortografia_requests: 0,
     cache_hits: 0,
     shared_hits: 0,
     total_tokens: 0,
@@ -3260,6 +3494,7 @@ function createSerieMessageStat(fecha = "") {
     requests_total: 0,
     ia_requests: 0,
     trad_requests: 0,
+    ortografia_requests: 0,
     total_tokens: 0,
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -3270,7 +3505,6 @@ function createSerieMessageStat(fecha = "") {
     messages_sent_under_100: 0
   };
 }
-
 function applyMessagesSentToDashboard(dashboard = {}, messageRows = []) {
   if (!dashboard.summary) dashboard.summary = {};
 
@@ -3432,13 +3666,20 @@ function getCostsByType(tipo = "") {
     };
   }
 
+  if (t.startsWith("ORTO")) {
+    return {
+      input: ORTHOGRAPHY_INPUT_COST_PER_1M,
+      output: ORTHOGRAPHY_OUTPUT_COST_PER_1M,
+      lane: "ORTO"
+    };
+  }
+
   return {
     input: 0,
     output: 0,
     lane: "OTRO"
   };
 }
-
 function calculateEstimatedCost({ tipo = "", prompt_tokens = 0, completion_tokens = 0 }) {
   const costs = getCostsByType(tipo);
 
@@ -3498,6 +3739,7 @@ function createDashboardSummary() {
     ia_contexto_requests: 0,
     ia_mail_requests: 0,
     trad_requests: 0,
+    ortografia_requests: 0,
     cache_hits: 0,
     shared_hits: 0,
     total_tokens: 0,
@@ -3521,6 +3763,7 @@ function createOperatorStat(operador = "") {
     ia_contexto_requests: 0,
     ia_mail_requests: 0,
     trad_requests: 0,
+    ortografia_requests: 0,
     cache_hits: 0,
     shared_hits: 0,
     total_tokens: 0,
@@ -3531,13 +3774,13 @@ function createOperatorStat(operador = "") {
     last_activity: ""
   };
 }
-
 function createSerieDia(fecha = "") {
   return {
     fecha,
     requests_total: 0,
     ia_requests: 0,
     trad_requests: 0,
+    ortografia_requests: 0,
     total_tokens: 0,
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -3554,6 +3797,7 @@ function applyTipoCounters(target, tipo = "") {
   if (t.startsWith("IA_CONTEXTO")) target.ia_contexto_requests += 1;
   if (t.startsWith("IA_MAIL")) target.ia_mail_requests += 1;
   if (t.startsWith("TRAD")) target.trad_requests += 1;
+  if (t.startsWith("ORTO")) target.ortografia_requests += 1;
   if (t.endsWith("_CACHE")) target.cache_hits += 1;
   if (t.endsWith("_SHARED")) target.shared_hits += 1;
 }
@@ -3617,6 +3861,7 @@ function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, op
     serie.requests_total += 1;
     if (tipo.startsWith("IA")) serie.ia_requests += 1;
     if (tipo.startsWith("TRAD")) serie.trad_requests += 1;
+    if (tipo.startsWith("ORTO")) serie.ortografia_requests += 1;
     serie.total_tokens += totalTokens;
     serie.prompt_tokens += promptTokens;
     serie.completion_tokens += completionTokens;
@@ -3717,13 +3962,22 @@ function buildDashboardAnalytics({ consumoRows = [], warningRows = [], range, op
     series,
     operator_filter: operadoresFiltrados,
     pricing: {
-      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
-      translate_model: OPENAI_MODEL_TRANSLATE,
-      suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
-      suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
-      translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
-      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
-    }
+  enganche_model: OPENAI_MODEL_ENGANCHE,
+  context_model: OPENAI_MODEL_CONTEXT,
+  mail_model: OPENAI_MODEL_MAIL,
+  suggestions_model: OPENAI_MODEL_ENGANCHE,
+  translate_model: OPENAI_MODEL_TRANSLATE,
+  orthography_model: OPENAI_MODEL_ORTHOGRAPHY,
+
+  suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
+  suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+
+  translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
+  translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M,
+
+  orthography_input_cost_per_1m: ORTHOGRAPHY_INPUT_COST_PER_1M,
+  orthography_output_cost_per_1m: ORTHOGRAPHY_OUTPUT_COST_PER_1M
+},
   };
 }
 
@@ -3965,25 +4219,41 @@ function getHealthPayload() {
       token_ttl_hours: ADMIN_TOKEN_TTL_HOURS
     },
     pricing: {
-      suggestions_model: OPENAI_MODEL_SUGGESTIONS,
+      enganche_model: OPENAI_MODEL_ENGANCHE,
+      context_model: OPENAI_MODEL_CONTEXT,
+      mail_model: OPENAI_MODEL_MAIL,
+      suggestions_model: OPENAI_MODEL_ENGANCHE,
       translate_model: OPENAI_MODEL_TRANSLATE,
+      orthography_model: OPENAI_MODEL_ORTHOGRAPHY,
+
       suggestion_input_cost_per_1m: SUGGESTION_INPUT_COST_PER_1M,
       suggestion_output_cost_per_1m: SUGGESTION_OUTPUT_COST_PER_1M,
+
       translate_input_cost_per_1m: TRANSLATE_INPUT_COST_PER_1M,
-      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M
+      translate_output_cost_per_1m: TRANSLATE_OUTPUT_COST_PER_1M,
+
+      orthography_input_cost_per_1m: ORTHOGRAPHY_INPUT_COST_PER_1M,
+      orthography_output_cost_per_1m: ORTHOGRAPHY_OUTPUT_COST_PER_1M
     },
     models: {
-      sugerencias: OPENAI_MODEL_SUGGESTIONS,
-      traduccion: OPENAI_MODEL_TRANSLATE
+      sugerencias: OPENAI_MODEL_ENGANCHE,
+      enganche: OPENAI_MODEL_ENGANCHE,
+      contexto: OPENAI_MODEL_CONTEXT,
+      mail: OPENAI_MODEL_MAIL,
+      traduccion: OPENAI_MODEL_TRANSLATE,
+      translate: OPENAI_MODEL_TRANSLATE,
+      ortografia: OPENAI_MODEL_ORTHOGRAPHY
     },
     suggestion_config: {
       chat_max_tokens: SUGGESTION_MAX_TOKENS,
       mail_max_tokens: MAIL_MAX_TOKENS,
+      chat_max_chars: CHAT_MAX_CHARS,
       chat_target_lengths: CHAT_TARGET_SPECS,
-      mail_target_lengths: MAIL_TARGET_SPECS,
+      mail_target_lengths_sample: getDynamicMailTargetSpecs(""),
       split_buttons: true,
       dynamic_translation_language: true,
-      force_three_options: true,
+      force_two_options: true,
+      force_three_options: false,
       debug_openai: DEBUG_OPENAI,
       log_fallbacks: LOG_FALLBACKS,
       log_success_summary: LOG_SUCCESS_SUMMARY
@@ -4009,7 +4279,6 @@ function getHealthPayload() {
     stats: runtimeStats
   };
 }
-
 function getAdminHtmlPath() {
   return path.join(__dirname, "admin.html");
 }
@@ -4402,13 +4671,19 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
       target_language_code = "en"
     } = req.body || {};
 
-    if (!String(texto || "").trim()) {
-      return res.json({
-        ok: false,
-        sugerencias: [],
-        error: "Texto vacio"
-      });
-    }
+    const hasAnyInput =
+  String(texto || "").trim() ||
+  String(contexto || "").trim() ||
+  String(cliente || "").trim() ||
+  String(perfil || "").trim();
+
+if (!hasAnyInput) {
+  return res.json({
+    ok: false,
+    sugerencias: [],
+    error: "Sin datos suficientes para generar sugerencias"
+  });
+}
 
     const resultado = await generateSuggestions({
       operador,
@@ -4469,8 +4744,8 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
     return res.json({
       ok: true,
       sugerencias: Array.isArray(resultado?.sugerencias)
-        ? resultado.sugerencias.slice(0, 3)
-        : ensureExactlyThreeSuggestions([], buildCase({
+  ? resultado.sugerencias.slice(0, 2)
+  : ensureExactlyTwoSuggestions([], buildCase({
             operador,
             texto,
             contexto,
@@ -4525,7 +4800,7 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
 
       return res.json({
         ok: true,
-        sugerencias: ensureExactlyThreeSuggestions([], caso),
+        sugerencias: ensureExactlyTwoSuggestions([], caso),
         meta: {
           tipo: "IA_ERROR_FALLBACK",
           used_fallback_only: true,
@@ -4541,7 +4816,100 @@ app.post("/sugerencias", authorizeOperator, async (req, res) => {
     }
   }
 });
+app.post("/ortografia", authorizeOperator, async (req, res) => {
+  const startedAt = Date.now();
+  const operador = req.operadorAutorizado;
 
+  runtimeStats.orthography.total += 1;
+
+  try {
+    const { texto = "", extension_id = "" } = req.body || {};
+    const text = String(texto || "");
+
+    if (!text.trim()) {
+      runtimeStats.orthography.error += 1;
+      runtimeStats.orthography.lastMs = Date.now() - startedAt;
+
+      return res.json({
+        ok: false,
+        error: "Texto vacio"
+      });
+    }
+
+    const data = await callOpenAI({
+      lane: "ortografia",
+      model: OPENAI_MODEL_ORTHOGRAPHY,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Eres un corrector de ortografia basica para una herramienta interna.",
+            "",
+            "REGLAS:",
+            "- corrige errores claros de escritura",
+            "- manten el mismo tono del operador",
+            "- manten la misma intencion",
+            "- no hagas el texto elegante",
+            "- no formalices",
+            "- no resumas",
+            "- no extiendas",
+            "- no censures",
+            "- no suavices lenguaje fuerte, vulgar u ofensivo",
+            "- no cambies palabras por sinonimos si no hace falta",
+            "- no agregues acentos innecesarios si el texto se entiende",
+            "",
+            "Devuelve solo el texto corregido."
+          ].join("\n")
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ],
+      temperature: 0,
+      maxTokens: Math.max(160, Math.min(1200, Math.ceil(text.length / 2.5) + 120)),
+      timeoutMs: OPENAI_TIMEOUT_ORTHOGRAPHY_MS
+    });
+
+    const corregido = cleanHuman(data?.choices?.[0]?.message?.content || "");
+
+    runtimeStats.orthography.ok += 1;
+    runtimeStats.orthography.lastMs = Date.now() - startedAt;
+
+    registerConsumptionAsync({
+      operador,
+      extension_id,
+      data,
+      tipo: "ORTOGRAFIA",
+      mensaje_operador: text,
+      request_ok: true
+    });
+
+    return res.json({
+      ok: true,
+      texto: corregido,
+      corregido,
+      ms: Date.now() - startedAt
+    });
+  } catch (err) {
+    runtimeStats.orthography.error += 1;
+    runtimeStats.orthography.lastMs = Date.now() - startedAt;
+
+    registerConsumptionAsync({
+      operador,
+      extension_id: req.body?.extension_id || "",
+      data: null,
+      tipo: "ORTOGRAFIA_ERROR",
+      mensaje_operador: req.body?.texto || "",
+      request_ok: false
+    });
+
+    return res.json({
+      ok: false,
+      error: err.message || "No se pudo corregir ortografia"
+    });
+  }
+});
 app.post("/traducir", authorizeOperator, async (req, res) => {
   const startedAt = Date.now();
   const operador = req.operadorAutorizado;
@@ -4629,12 +4997,13 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Server split IA debug activo en puerto ${PORT}`);
-  console.log(`Modelos => sugerencias: ${OPENAI_MODEL_SUGGESTIONS} | traduccion: ${OPENAI_MODEL_TRANSLATE}`);
+  console.log(`Modelos => enganche: ${OPENAI_MODEL_ENGANCHE} | contexto: ${OPENAI_MODEL_CONTEXT} | mail: ${OPENAI_MODEL_MAIL} | traduccion: ${OPENAI_MODEL_TRANSLATE} | ortografia: ${OPENAI_MODEL_ORTHOGRAPHY}`);
   console.log(`CHAT SUGGESTION_MAX_TOKENS => ${SUGGESTION_MAX_TOKENS}`);
   console.log(`MAIL_MAX_TOKENS => ${MAIL_MAX_TOKENS}`);
+  console.log(`CHAT_MAX_CHARS => ${CHAT_MAX_CHARS}`);
   console.log(`DEBUG_OPENAI => ${DEBUG_OPENAI}`);
   console.log(`LOG_FALLBACKS => ${LOG_FALLBACKS}`);
   console.log(`LOG_SUCCESS_SUMMARY => ${LOG_SUCCESS_SUMMARY}`);
-  console.log(`Rangos chat => 1:${CHAT_TARGET_SPECS[0].min}-${CHAT_TARGET_SPECS[0].max}, 2:${CHAT_TARGET_SPECS[1].min}-${CHAT_TARGET_SPECS[1].max}, 3:${CHAT_TARGET_SPECS[2].min}-${CHAT_TARGET_SPECS[2].max}`);
-  console.log(`Rangos mail => 1:${MAIL_TARGET_SPECS[0].min}-${MAIL_TARGET_SPECS[0].max}, 2:${MAIL_TARGET_SPECS[1].min}-${MAIL_TARGET_SPECS[1].max}, 3:${MAIL_TARGET_SPECS[2].min}-${MAIL_TARGET_SPECS[2].max}`);
+  console.log(`Rangos chat => 1:${CHAT_TARGET_SPECS[0].min}-${CHAT_TARGET_SPECS[0].max}, 2:${CHAT_TARGET_SPECS[1].min}-${CHAT_TARGET_SPECS[1].max}`);
+  console.log(`Rangos mail sample => ${JSON.stringify(getDynamicMailTargetSpecs(""))}`);
 });
