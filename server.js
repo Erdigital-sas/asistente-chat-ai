@@ -20,7 +20,15 @@ function readFloatEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
 }
-
+function removeSpanishVowelAccents(text = "") {
+  return String(text || "")
+    .replace(/[áÁ]/g, "a")
+    .replace(/[éÉ]/g, "e")
+    .replace(/[íÍ]/g, "i")
+    .replace(/[óÓ]/g, "o")
+    .replace(/[úÚ]/g, "u")
+    .replace(/[üÜ]/g, "u");
+}
 function removeAccents(text = "") {
   return String(text ?? "")
     .normalize("NFD")
@@ -2032,6 +2040,69 @@ function sameStructure(a = "", b = "") {
 
   return false;
 }
+function wordsForSimilarity(text = "", maxWords = 0) {
+  const words = normalizeText(text)
+    .split(/\s+/)
+    .filter((word) => word.length > 2)
+    .filter((word) => !STOPWORDS_SUGGESTIONS.has(word));
+
+  return maxWords > 0 ? words.slice(0, maxWords) : words;
+}
+
+function overlapBySmallestText(a = "", b = "", maxWords = 0) {
+  const wordsA = wordsForSimilarity(a, maxWords);
+  const wordsB = wordsForSimilarity(b, maxWords);
+
+  if (!wordsA.length || !wordsB.length) return 0;
+
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
+
+  let overlap = 0;
+
+  for (const word of setA) {
+    if (setB.has(word)) overlap += 1;
+  }
+
+  return overlap / Math.max(1, Math.min(setA.size, setB.size));
+}
+
+function firstSentence(text = "") {
+  const clean = cleanHuman(text);
+  if (!clean) return "";
+
+  const parts = clean.split(/[.!?]\s+/).map((x) => x.trim()).filter(Boolean);
+  return (parts[0] || clean).slice(0, 260).trim();
+}
+
+function isPairTooSimilar(a = "", b = "", caso = {}) {
+  const cleanA = cleanSuggestion(a);
+  const cleanB = cleanSuggestion(b);
+
+  if (!cleanA || !cleanB) return false;
+
+  if (looksTooSimilar(cleanA, cleanB)) return true;
+  if (sameStructure(cleanA, cleanB)) return true;
+
+  const openingOverlap = overlapBySmallestText(cleanA, cleanB, 10);
+  if (openingOverlap >= 0.62) return true;
+
+  const sentenceA = firstSentence(cleanA);
+  const sentenceB = firstSentence(cleanB);
+
+  if (sentenceA && sentenceB) {
+    const firstSentenceOverlap = overlapBySmallestText(sentenceA, sentenceB, 0);
+    if (firstSentenceOverlap >= 0.66) return true;
+  }
+
+  const fullOverlap = overlapBySmallestText(cleanA, cleanB, 0);
+
+  if (caso.pageType === "mail") {
+    return fullOverlap >= 0.64;
+  }
+
+  return fullOverlap >= 0.72;
+}
 function isSuggestionForbidden(suggestion = "", caso = {}) {
   const s = cleanSuggestion(suggestion);
   const n = normalizeText(s);
@@ -2164,15 +2235,13 @@ function selectFinalCandidates(pool = [], caso = {}) {
     const spec = specs[slot];
 
     let candidate = ranked.find((item) => {
-      if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
-      if (selected.some((x) => sameStructure(x.text, item.text))) return false;
+      if (selected.some((x) => isPairTooSimilar(x.text, item.text, caso))) return false;
       return item.length >= spec.min && item.length <= spec.max;
     });
 
     if (!candidate) {
       candidate = ranked.find((item) => {
-        if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
-        if (selected.some((x) => sameStructure(x.text, item.text))) return false;
+        if (selected.some((x) => isPairTooSimilar(x.text, item.text, caso))) return false;
         return item.length >= Math.round(spec.min * 0.72) &&
           item.length <= Math.round(spec.max * 1.22);
       });
@@ -2180,8 +2249,7 @@ function selectFinalCandidates(pool = [], caso = {}) {
 
     if (!candidate) {
       candidate = ranked.find((item) => {
-        if (selected.some((x) => looksTooSimilar(x.text, item.text))) return false;
-        if (selected.some((x) => sameStructure(x.text, item.text))) return false;
+        if (selected.some((x) => isPairTooSimilar(x.text, item.text, caso))) return false;
         return true;
       });
     }
@@ -2214,9 +2282,9 @@ function isWeakResult(candidates = [], selected = [], caso = {}) {
     }
   }
 
-  if (looksTooSimilar(selected[0].text, selected[1].text)) return true;
-  if (sameStructure(selected[0].text, selected[1].text)) return true;
-
+  if (isPairTooSimilar(selected[0].text, selected[1].text, caso)) {
+  return true;
+}
   return false;
 }
 function buildWeaknessFeedback(candidates = [], caso = {}) {
@@ -2278,6 +2346,10 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
   if (caso.pageType === "mail") {
     notes.push("- En mail, entrega 2 versiones: una fiel/corregida y una mejorada/desarrollada.");
     notes.push("- No resumas agresivamente una carta larga.");
+    notes.push("- Las 2 versiones no pueden empezar igual ni parecido.");
+    notes.push("- La version 2 no puede usar la misma primera frase que la version 1.");
+    notes.push("- La version 2 debe cambiar el orden de ideas y el ritmo, no solo cambiar algunas palabras.");
+    notes.push("- Si una empieza con 'Quiero responderte con calma', la otra debe empezar desde otro angulo completamente diferente.");
   } else {
     notes.push("- Chat: opcion 1 de 100 a 180 caracteres.");
     notes.push("- Chat: opcion 2 de 200 a 300 caracteres.");
@@ -2394,25 +2466,32 @@ function buildMailSystemPrompt(caso = {}) {
   return [
     "Eres el motor de CARTAS de una herramienta interna.",
     "Debes devolver exactamente 2 versiones finales en espanol, listas para enviar como carta.",
-    "Tu trabajo es mejorar el borrador del operador usando el contexto del mail o carta.",
     "",
-    "REGLA CENTRAL",
-    "- este modo es para cartas/mails, no para chat corto",
-    "- corrige errores",
-    "- mejora el tono",
-    "- conserva la intencion del operador",
-    "- no uses perfil si no fue enviado",
-    "- no inventes datos",
-    "- no conviertas una carta larga en una respuesta corta",
+    "OBJETIVO",
+    "- mejorar el borrador del operador usando el contexto del mail o carta",
+    "- corregir errores",
+    "- mejorar naturalidad",
+    "- conservar la intencion del operador",
+    "- no inventar datos",
+    "- no convertir una carta larga en respuesta corta",
     "",
     "LONGITUD ESPERADA",
     `1. Fiel/corregida: ${specs[0].min}-${specs[0].max} caracteres aproximados.`,
     `2. Mejorada/desarrollada: ${specs[1].min}-${specs[1].max} caracteres aproximados.`,
     "",
-    "DIFERENCIA ENTRE OPCIONES",
-    "- la opcion 1 conserva mas fielmente estructura e ideas del operador",
-    "- la opcion 2 tiene mejor fluidez, conexion y desarrollo",
-    "- la opcion 2 NO debe ser la opcion 1 inflada",
+    "DIFERENCIA OBLIGATORIA ENTRE VERSIONES",
+    "- la version 1 conserva mas fielmente estructura e ideas del operador",
+    "- la version 2 debe tener otro inicio, otro ritmo y otra estructura",
+    "- la version 2 NO puede ser la version 1 con mas palabras",
+    "- la version 2 NO puede empezar igual ni parecido a la version 1",
+    "- no pueden compartir la primera frase",
+    "- no pueden cerrar igual",
+    "- no pueden repetir el mismo orden de ideas",
+    "",
+    "REGLA ESPECIAL DE INICIO",
+    "- si la version 1 empieza con una idea como 'Quiero responderte con calma' o similar, la version 2 debe empezar desde otro angulo",
+    "- evita que ambas versiones empiecen con 'Quiero', 'Quise', 'Me tome un momento', 'Gracias por escribirme' o estructuras equivalentes",
+    "- la version 2 puede empezar desde emocion, claridad, autenticidad, ritmo, sensacion o intencion, pero no desde la misma frase base",
     "",
     "REGLAS",
     "- sin emojis",
@@ -2421,6 +2500,7 @@ function buildMailSystemPrompt(caso = {}) {
     "- no propongas encuentros, llamadas ni salir de la app",
     "- no inventes promesas",
     "- no elimines ideas importantes del operador",
+    "- no uses etiquetas internas",
     "",
     "Devuelve solo:",
     "1. ...",
@@ -2680,21 +2760,24 @@ function fallbackContextSuggestions(caso = {}) {
 }
 
 function fallbackMailSuggestions(caso = {}) {
-  const draft = caso.textoPlano || "";
+  const draft = cleanHuman(caso.textoPlano || "");
 
   if (draft && draft.length > 40) {
+    const cleanDraft = draft.length > 1600
+      ? `${draft.slice(0, 1600).trim()}...`
+      : draft;
+
     return [
-      `Quise responderte con calma y mantener la idea principal de lo que queria decirte. ${draft}`,
-      `Me tome un momento para escribirlo mejor, con una forma mas clara y natural, sin cambiar la intencion de fondo. ${draft}`
+      cleanDraft,
+      "Hay algo que prefiero decirte sin apuro y sin adornarlo demasiado. Me gusta cuando una conversacion puede sentirse tranquila, honesta y sin presion, porque ahi es donde se nota si realmente hay algo que vale la pena seguir descubriendo."
     ];
   }
 
   return [
     "Gracias por escribirme. Me gusta poder responder con calma, porque una carta permite decir las cosas de una manera mas clara y cercana que un mensaje rapido.",
-    "Quise tomarme un momento para responderte bien. A veces una carta sencilla y honesta puede abrir mejor una conversacion que muchas frases sueltas."
+    "Hay conversaciones que merecen un poco mas de espacio. Prefiero responderte de una forma sencilla y honesta, sin correr, para que mis palabras se sientan naturales y no como una frase escrita por compromiso."
   ];
 }
-
 function fallbackRiskSuggestions(caso = {}) {
   if (caso.modoAyuda === "enganche") {
     const profile = buildProfileBasedFallbacks(caso);
@@ -2779,8 +2862,7 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
 
     if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return;
 
-    if (final.some((x) => looksTooSimilar(x, clean))) return;
-    if (final.some((x) => sameStructure(x, clean))) return;
+    if (final.some((x) => isPairTooSimilar(x, clean, caso))) return;
 
     final.push(clean);
   };
@@ -2802,11 +2884,35 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
   while (final.length < 2) {
     const emergency = emergencySuggestions(caso);
     const fallback = emergency[final.length] || emergency[0] || "Prefiero responderte de una forma clara, natural y sin presion para que la conversacion siga comoda.";
-    final.push(fallback);
+
+    if (!final.some((x) => isPairTooSimilar(x, fallback, caso))) {
+      final.push(fallback);
+    } else {
+      final.push(`Lo que quiero decirte es simple: prefiero que esta conversacion se sienta tranquila, honesta y sin presion, para que podamos ver si realmente hay algo natural entre los dos.`);
+    }
+  }
+
+  if (final.length >= 2 && isPairTooSimilar(final[0], final[1], caso)) {
+    const alternatives = dedupeStrings([
+      ...fallbackSuggestions(caso),
+      ...emergencySuggestions(caso)
+    ]);
+
+    const alternative = alternatives.find((item) => {
+      const clean = cleanSuggestion(item);
+      if (!clean) return false;
+      if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return false;
+      return !isPairTooSimilar(final[0], clean, caso);
+    });
+
+    if (alternative) {
+      final[1] = cleanSuggestion(alternative);
+    }
   }
 
   return final.slice(0, 2);
-}/* =========================================================
+}
+/* =========================================================
  * CASE BUILDER
  * ======================================================= */
 
@@ -4856,7 +4962,7 @@ app.post("/ortografia", authorizeOperator, async (req, res) => {
             "- no censures",
             "- no suavices lenguaje fuerte, vulgar u ofensivo",
             "- no cambies palabras por sinonimos si no hace falta",
-            "- no agregues acentos innecesarios si el texto se entiende",
+            "- no uses tildes ni acentos graficos; conserva un español simple sin acentuaciones",
             "",
             "Devuelve solo el texto corregido."
           ].join("\n")
@@ -4871,7 +4977,9 @@ app.post("/ortografia", authorizeOperator, async (req, res) => {
       timeoutMs: OPENAI_TIMEOUT_ORTHOGRAPHY_MS
     });
 
-    const corregido = cleanHuman(data?.choices?.[0]?.message?.content || "");
+    const corregido = removeSpanishVowelAccents(
+  cleanHuman(data?.choices?.[0]?.message?.content || "")
+);
 
     runtimeStats.orthography.ok += 1;
     runtimeStats.orthography.lastMs = Date.now() - startedAt;
