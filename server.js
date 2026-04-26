@@ -588,9 +588,9 @@ const translationCache = new Map();
 const inflightTranslationJobs = new Map();
 const inflightSuggestionJobs = new Map();
 const recentSuggestionMemory = new Map();
+const engancheVariationCounters = new Map();
 const operatorSuggestionQueues = new Map();
 const adminLoginAttempts = new Map();
-
 const runtimeStats = {
   startedAt: Date.now(),
   http: { total: 0, ok: 0, error: 0, lastMs: 0 },
@@ -1452,7 +1452,198 @@ const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|que tal)\b/i;
 const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ahi en lo de)\b/i;
 const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|carino|bebe)\b/gi;
 const THIRD_PERSON_GENERIC_REGEX = /\b(la historia de|la vida de|el perfil de|los datos de|la forma de ser de|la personalidad de)\b/i;
+const ENGANCHE_VARIATION_ANGLES = [
+  {
+    key: "curiosidad_personal",
+    label: "Curiosidad personal",
+    instruction: "abre desde una curiosidad concreta sobre su forma de ser, no desde una lista de gustos",
+    avoid: "no empieces diciendo directamente 'vi que te gusta...'"
+  },
+  {
+    key: "contraste_suave",
+    label: "Contraste suave",
+    instruction: "usa un contraste entre dos rasgos del perfil, por ejemplo calma y aventura, sencillez y profundidad",
+    avoid: "no enumeres intereses uno tras otro"
+  },
+  {
+    key: "sensacion_perfil",
+    label: "Sensacion del perfil",
+    instruction: "habla de la sensacion que transmite el perfil, como calma, energia, misterio o naturalidad",
+    avoid: "no copies literalmente los intereses"
+  },
+  {
+    key: "detalle_inusual",
+    label: "Detalle inusual",
+    instruction: "elige un detalle pequeno del perfil y conviertelo en una entrada mas humana",
+    avoid: "no uses una apertura generica de saludo"
+  },
+  {
+    key: "ritmo_de_vida",
+    label: "Ritmo de vida",
+    instruction: "conecta los intereses con el ritmo de vida que podria tener esa persona",
+    avoid: "no digas que tienen mucho en comun si no hay base real"
+  },
+  {
+    key: "pregunta_imaginativa",
+    label: "Pregunta imaginativa",
+    instruction: "crea una pregunta con imaginacion, basada en una escena o decision cotidiana",
+    avoid: "no hagas preguntas basicas como 'cual es tu comida favorita'"
+  },
+  {
+    key: "conexion_emocional",
+    label: "Conexion emocional",
+    instruction: "orienta el mensaje a lo que esa persona podria hacer sentir, no solo a lo que le gusta",
+    avoid: "no suenes intenso ni romantico de entrada"
+  },
+  {
+    key: "observacion_directa",
+    label: "Observacion directa",
+    instruction: "usa una observacion directa y natural, como si el operador hubiera notado algo real",
+    avoid: "no uses frases tipo 'tu perfil me llamo la atencion' sin decir por que"
+  },
+  {
+    key: "energia_social",
+    label: "Energia social",
+    instruction: "enfoca el mensaje en la energia que puede tener una conversacion con ella",
+    avoid: "no uses frases vacias sobre buena energia sin aterrizarlas"
+  },
+  {
+    key: "historia_por_descubrir",
+    label: "Historia por descubrir",
+    instruction: "sugiere que hay algo mas detras del perfil, sin fingir que ya la conoces",
+    avoid: "no digas que ya pensaste en ella ni que la recuerdas"
+  },
+  {
+    key: "eleccion_divertida",
+    label: "Eleccion divertida",
+    instruction: "plantea una eleccion ligera entre dos elementos del perfil para abrir conversacion",
+    avoid: "no conviertas el mensaje en encuesta fria"
+  },
+  {
+    key: "calma_y_confianza",
+    label: "Calma y confianza",
+    instruction: "usa un tono tranquilo y seguro, sin presion, destacando naturalidad",
+    avoid: "no suenes necesitado ni demasiado disponible"
+  }
+];
 
+function hashStringForVariation(value = "") {
+  const text = String(value || "");
+  let hash = 2166136261;
+
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return Math.abs(hash >>> 0);
+}
+
+function getVariationTimeBucket(minutes = 30) {
+  const ms = Math.max(1, minutes) * 60 * 1000;
+  return Math.floor(Date.now() / ms);
+}
+
+function getProfileVariationSignature(caso = {}) {
+  const profile = caso.perfil || {};
+
+  return normalizeText([
+    caso.pageType,
+    caso.modoAyuda,
+    caso.operador,
+    caso.extensionId,
+    profile.nombreClienta,
+    profile.paisClienta,
+    profile.estadoCivil,
+    profile.aboutText,
+    (profile.aboutMe || []).join("|"),
+    (profile.interesesClienta || []).join("|"),
+    (profile.lookingFor || []).join("|"),
+    (profile.datosClienta || []).join("|")
+  ].filter(Boolean).join("||")).slice(0, 900);
+}
+
+function getGlobalSuggestionMemoryKey(caso = {}) {
+  const profile = caso.perfil || {};
+
+  if (caso.modoAyuda === "enganche") {
+    return [
+      "global_enganche",
+      normalizeText(profile.paisClienta || ""),
+      normalizeText((profile.interesesClienta || []).slice(0, 6).join("|")),
+      normalizeText((profile.lookingFor || []).slice(0, 6).join("|")),
+      normalizeText((profile.aboutMe || []).slice(0, 6).join("|")),
+      normalizeText(profile.aboutText || "").slice(0, 240)
+    ].join("||");
+  }
+
+  return [
+    "global",
+    normalizeText(caso.pageType || ""),
+    normalizeText(caso.modoAyuda || ""),
+    normalizeText(caso.clientePlano || "").slice(0, 180),
+    normalizeText(caso.textoPlano || "").slice(0, 180)
+  ].join("||");
+}
+
+function nextEngancheVariationOffset(signature = "") {
+  const key = `enganche_variation::${signature}`;
+  const now = Date.now();
+
+  pruneEngancheVariationCounters();
+
+  const current = engancheVariationCounters.get(key) || {
+    count: 0,
+    expiresAt: now + SUGGESTION_MEMORY_TTL_MS
+  };
+
+  if (current.expiresAt <= now) {
+    current.count = 0;
+    current.expiresAt = now + SUGGESTION_MEMORY_TTL_MS;
+  }
+
+  const offset = current.count;
+  current.count = (current.count + 1) % ENGANCHE_VARIATION_ANGLES.length;
+  current.expiresAt = now + SUGGESTION_MEMORY_TTL_MS;
+
+  engancheVariationCounters.set(key, current);
+
+  return offset;
+}
+function pickEngancheVariationPlan(caso = {}) {
+  if (caso.modoAyuda !== "enganche") return null;
+
+  const signature = getProfileVariationSignature(caso);
+  const bucket = getVariationTimeBucket(30);
+
+  const baseIndex = hashStringForVariation(`${signature}::${bucket}`) % ENGANCHE_VARIATION_ANGLES.length;
+  const offset = nextEngancheVariationOffset(signature);
+  const index = (baseIndex + offset) % ENGANCHE_VARIATION_ANGLES.length;
+
+  return {
+    ...ENGANCHE_VARIATION_ANGLES[index],
+    index,
+    total: ENGANCHE_VARIATION_ANGLES.length,
+    signature
+  };
+}
+
+function formatEngancheVariationForPrompt(caso = {}) {
+  const plan = caso.variationPlan;
+
+  if (!plan) {
+    return "Sin plan de variacion especial.";
+  }
+
+  return [
+    `ANGULO ASIGNADO: ${plan.label}`,
+    `INSTRUCCION: ${plan.instruction}`,
+    `EVITAR: ${plan.avoid}`,
+    "REGLA: usa este angulo como base principal del enganche.",
+    "REGLA: no abras con una enumeracion literal de intereses.",
+    "REGLA: si los intereses son comunes, conviertelos en una observacion o escena distinta."
+  ].join("\n");
+}
 const RISK_CATALOG = {
   contacto_externo: {
     key: "contacto_externo",
@@ -1893,7 +2084,15 @@ function getSuggestionMemoryKey(caso = {}) {
     normalizeText(caso.perfil?.aboutText || "").slice(0, 220)
   ].join("||");
 }
+function pruneEngancheVariationCounters() {
+  const now = Date.now();
 
+  for (const [key, entry] of engancheVariationCounters.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      engancheVariationCounters.delete(key);
+    }
+  }
+}
 function pruneSuggestionMemory() {
   const now = Date.now();
 
@@ -2102,6 +2301,17 @@ function isPairTooSimilar(a = "", b = "", caso = {}) {
   }
 
   return fullOverlap >= 0.72;
+}
+
+function repeatsRecentSuggestion(text = "", recent = [], caso = {}) {
+  const clean = cleanSuggestion(text);
+  if (!clean || !Array.isArray(recent) || !recent.length) return false;
+
+  return recent.some((item) => {
+    const old = cleanSuggestion(item);
+    if (!old) return false;
+    return isPairTooSimilar(clean, old, caso);
+  });
 }
 function isSuggestionForbidden(suggestion = "", caso = {}) {
   const s = cleanSuggestion(suggestion);
@@ -2371,6 +2581,7 @@ function buildSpecText(caso = {}) {
 
 function buildEngancheSystemPrompt(caso = {}) {
   const name = caso.perfil?.nombreClienta || "la clienta";
+  const variationText = formatEngancheVariationForPrompt(caso);
 
   return [
     "Eres el motor de ENGANCHE de una herramienta interna de chat.",
@@ -2396,11 +2607,14 @@ function buildEngancheSystemPrompt(caso = {}) {
     "- no pueden usar la misma estructura",
     "",
     "USO DEL PERFIL",
-    "- si hay ABOUT_TEXT, usalo como prioridad alta",
-    "- usa maximo 1 o 2 datos reales del perfil por opcion",
-    "- no inventes ciudad, pais, hijos, estado civil ni intenciones",
-    "",
-    "TONO",
+"- si hay ABOUT_TEXT, usalo como prioridad alta",
+"- usa maximo 1 o 2 datos reales del perfil por opcion",
+"- no inventes ciudad, pais, hijos, estado civil ni intenciones",
+"",
+"PLAN DE VARIACION OBLIGATORIO",
+variationText,
+"",
+"TONO",
     "- natural",
     "- atractivo",
     "- humano",
@@ -2609,14 +2823,18 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     ].join("\n"));
   } else if (caso.modoAyuda === "enganche") {
     common.push([
-      "INSTRUCCIONES FINALES",
-      "- usa perfil, no chat",
-      "- no finjas conversacion previa",
-      "- si hay ABOUT_TEXT, priorizalo",
-      "- habla directamente con la clienta",
-      "- no uses etiquetas internas",
-      "- entrega 2 opciones de enganche: una corta/directa y una extendida/diferente"
-    ].join("\n"));
+  "INSTRUCCIONES FINALES",
+  "- usa perfil, no chat",
+  "- no finjas conversacion previa",
+  "- si hay ABOUT_TEXT, priorizalo",
+  "- habla directamente con la clienta",
+  "- no uses etiquetas internas",
+  "- entrega 2 opciones de enganche: una corta/directa y una extendida/diferente",
+  "- respeta el PLAN DE VARIACION asignado",
+  "- evita escribir el mismo tipo de enganche que se usaria para cualquier otra persona con intereses parecidos",
+  "- no abras siempre con 'vi que te gusta...' ni con una lista de intereses",
+  "- convierte los intereses en una observacion, contraste, escena o pregunta distinta"
+].join("\n"));
   } else {
     common.push([
       "INSTRUCCIONES FINALES",
@@ -2918,6 +3136,7 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
 
 function buildCase(input = {}) {
   const operador = String(input.operador || "").trim();
+  const extensionId = normalizeSpaces(input.extension_id || input.extensionId || "");
 
   const pageType = String(input.page_type || input.pageType || "chat").trim().toLowerCase() === "mail"
     ? "mail"
@@ -2997,6 +3216,7 @@ function buildCase(input = {}) {
 
   const caso = {
     operador,
+    extensionId,
     pageType,
     modoAyuda,
     textoPlano,
@@ -3026,13 +3246,16 @@ function buildCase(input = {}) {
   };
 
   caso.memoryKey = getSuggestionMemoryKey(caso);
+  caso.globalMemoryKey = getGlobalSuggestionMemoryKey(caso);
+  caso.variationPlan = pickEngancheVariationPlan(caso);
 
-  return caso;
+return caso;
 }
 
 function buildInFlightSuggestionKey(input = {}) {
   return [
     normalizeText(input.operador || "anon").slice(0, 80),
+    normalizeText(input.extension_id || input.extensionId || "").slice(0, 160),
     normalizeText(input.page_type || "chat"),
     normalizeText(input.modo_ayuda || "contexto"),
     normalizeText(input.texto || "").slice(0, 260),
@@ -3067,7 +3290,10 @@ async function callSuggestionModel(caso = {}, recent = [], previousOptions = [],
 
 async function generateSuggestionsCore(input = {}) {
   const caso = buildCase(input);
-  const recent = readRecentSuggestions(caso.memoryKey);
+  const recent = dedupeStrings([
+  ...readRecentSuggestions(caso.memoryKey),
+  ...readRecentSuggestions(caso.globalMemoryKey)
+]).slice(0, 18);
   const usages = [];
   const pool = [];
   let secondPassUsed = false;
@@ -3127,10 +3353,16 @@ async function generateSuggestionsCore(input = {}) {
   }
 
   pool.push(...mapOptionsToCandidates(fallbackSuggestions(caso), "fallback", caso));
-  pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
+pool.push(...mapOptionsToCandidates(emergencySuggestions(caso), "emergency", caso));
 
-  const selected = selectFinalCandidates(pool, caso);
-  const final = ensureExactlyTwoSuggestions(selected, caso);
+const filteredPool = pool.filter((item) => {
+  return !repeatsRecentSuggestion(item.text, recent, caso);
+});
+
+const selectablePool = filteredPool.length >= 2 ? filteredPool : pool;
+
+const selected = selectFinalCandidates(selectablePool, caso);
+const final = ensureExactlyTwoSuggestions(selected, caso);
 
   if (final.length < 2 || selected.length < 2) {
     runtimeStats.suggestions.forcedFill += 1;
@@ -3166,6 +3398,7 @@ async function generateSuggestionsCore(input = {}) {
   }
 
   writeRecentSuggestions(caso.memoryKey, final);
+writeRecentSuggestions(caso.globalMemoryKey, final);
 
   return {
     sugerencias: final,
@@ -4791,8 +5024,9 @@ if (!hasAnyInput) {
   });
 }
 
-    const resultado = await generateSuggestions({
+   const resultado = await generateSuggestions({
       operador,
+      extension_id,
       texto,
       contexto,
       cliente,
@@ -4806,6 +5040,7 @@ if (!hasAnyInput) {
 
     const tipoBase = getOutputType(resultado.caso || buildCase({
       operador,
+      extension_id,
       texto,
       contexto,
       cliente,
@@ -4851,8 +5086,9 @@ if (!hasAnyInput) {
       ok: true,
       sugerencias: Array.isArray(resultado?.sugerencias)
   ? resultado.sugerencias.slice(0, 2)
-  : ensureExactlyTwoSuggestions([], buildCase({
+: ensureExactlyTwoSuggestions([], buildCase({
             operador,
+            extension_id,
             texto,
             contexto,
             cliente,
@@ -4864,10 +5100,12 @@ if (!hasAnyInput) {
             target_language_code
           })),
       meta: {
-        tipo,
-        modo_ayuda,
-        page_type,
-        used_fallback_only: Boolean(resultado.usedFallbackOnly),
+  tipo,
+  modo_ayuda,
+  page_type,
+  variation_angle: resultado.caso?.variationPlan?.key || null,
+  variation_label: resultado.caso?.variationPlan?.label || null,
+  used_fallback_only: Boolean(resultado.usedFallbackOnly),
         second_pass_used: Boolean(resultado.secondPassUsed),
         openai_error: resultado.openAiError || null
       }
@@ -4892,17 +5130,18 @@ if (!hasAnyInput) {
 
     try {
       const caso = buildCase({
-        operador,
-        texto: req.body?.texto || "",
-        contexto: req.body?.contexto || "",
-        cliente: req.body?.cliente || "",
-        perfil: req.body?.perfil || "",
-        chat_signals: req.body?.chat_signals || {},
-        page_type: req.body?.page_type || "chat",
-        modo_ayuda: req.body?.modo_ayuda || "contexto_correccion",
-        target_language: req.body?.target_language || "English",
-        target_language_code: req.body?.target_language_code || "en"
-      });
+  operador,
+  extension_id: req.body?.extension_id || "",
+  texto: req.body?.texto || "",
+  contexto: req.body?.contexto || "",
+  cliente: req.body?.cliente || "",
+  perfil: req.body?.perfil || "",
+  chat_signals: req.body?.chat_signals || {},
+  page_type: req.body?.page_type || "chat",
+  modo_ayuda: req.body?.modo_ayuda || "contexto_correccion",
+  target_language: req.body?.target_language || "English",
+  target_language_code: req.body?.target_language_code || "en"
+});
 
       return res.json({
         ok: true,
