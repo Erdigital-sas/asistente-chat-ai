@@ -1484,6 +1484,25 @@ function isProfileAsMainSubjectOpening(text = "") {
 
   return /\b(tu perfil transmite|tu perfil deja|tu perfil suena|tu perfil muestra|tu perfil tiene|tu perfil no suena|en tu perfil se nota|en tu perfil hay|hay algo en tu perfil|algo en tu perfil|lo que muestras en tu perfil|lo que cuentas en tu perfil|lo que compartes en tu perfil|ese perfil|este perfil)\b/.test(opening);
 }
+function stripClientNameForOpeningCheck(text = "", caso = {}) {
+  let n = normalizeText(text);
+  const name = normalizeText(caso.perfil?.nombreClienta || "");
+
+  if (name) {
+    const re = new RegExp(`^${escapeRegExp(name)}\\s*[,;:\\-–—]?\\s*`, "i");
+    n = n.replace(re, "").trim();
+  }
+
+  return n;
+}
+
+function hasWeakEngancheOpening(text = "", caso = {}) {
+  const n = stripClientNameForOpeningCheck(text, caso);
+
+  if (!n) return false;
+
+  return /^(hay personas|hay gente|hay perfiles|hay quienes|algunas personas|existen personas|a veces hay personas|a veces hay gente)\b/.test(n);
+}
 const ENGANCHE_VARIATION_ANGLES = [
   {
     key: "curiosidad_personal",
@@ -1558,6 +1577,112 @@ const ENGANCHE_VARIATION_ANGLES = [
     avoid: "no suenes necesitado ni demasiado disponible"
   }
 ];
+const ENGANCHE_OPENING_STYLES = [
+{
+  key: "observacion_directa",
+  label: "Observacion directa",
+  instruction: "inicia con una observacion directa sobre ella, como si hubieras notado algo real",
+  starts: ["Se nota que...", "Das la impresion de...", "Me dio curiosidad..."],
+  avoid: "evita repetir aperturas reflexivas genericas cuando puedas empezar desde una observacion mas concreta"
+},
+  {
+    key: "detalle_concreto",
+    label: "Detalle concreto",
+    instruction: "inicia desde un detalle pequeno de lo que ella comparte y conviertelo en una entrada humana",
+    starts: ["Me llamo la atencion...", "Ese detalle de...", "No pase por alto..."],
+    avoid: "no uses una frase general sobre personas"
+  },
+  {
+  key: "contraste_personal",
+  label: "Contraste personal",
+  instruction: "inicia con una mezcla o contraste que ella parece transmitir",
+  starts: ["Me gusta esa mezcla...", "Tienes una combinacion curiosa...", "Hay una parte tranquila y otra mas..."],
+  avoid: "evita convertir el contraste en una frase generica que podria servir para cualquier persona"
+},
+  {
+    key: "pregunta_viva",
+    label: "Pregunta viva",
+    instruction: "inicia con una pregunta ligera, imaginativa y distinta",
+    starts: ["Te hago una pregunta...", "Me dejaste una duda...", "Si tuvieras que elegir..."],
+    avoid: "no hagas preguntas basicas ni de entrevista"
+  },
+  {
+    key: "intuicion_suave",
+    label: "Intuicion suave",
+    instruction: "inicia con una intuicion prudente, sin afirmar demasiado",
+    starts: ["No se si me equivoco, pero...", "Tengo la impresion de que...", "Algo me dice que..."],
+    avoid: "no finjas conocerla de antes"
+  },
+  {
+    key: "energia_de_charla",
+    label: "Energia de charla",
+    instruction: "inicia imaginando el tipo de conversacion que podria darse con ella",
+    starts: ["Creo que contigo una charla...", "Siento que una conversacion contigo...", "Me da curiosidad saber si..."],
+    avoid: "no uses frases vacias sobre buena energia"
+  },
+  {
+    key: "entrada_sencilla",
+    label: "Entrada sencilla",
+    instruction: "inicia simple, honesto y sin adornos, como alguien natural",
+    starts: ["Prefiero empezar simple...", "Voy a decirlo sin hacerlo raro...", "No queria llegar con un saludo comun..."],
+    avoid: "no suenes intenso ni demasiado producido"
+  },
+  {
+    key: "escena_imaginada",
+    label: "Escena imaginada",
+    instruction: "inicia con una escena ligera basada en sus intereses o forma de mostrarse",
+    starts: ["Te imagino mas en...", "Si tuviera que imaginar un plan tuyo...", "Me dio curiosidad imaginar..."],
+    avoid: "no inventes datos concretos que no existan"
+  },
+  {
+    key: "curiosidad_natural",
+    label: "Curiosidad natural",
+    instruction: "inicia desde una curiosidad honesta, no desde halago generico",
+    starts: ["Me dio curiosidad...", "Quise entrar por algo diferente...", "Me quede pensando en..."],
+    avoid: "no digas 'me quede pensando en ti' porque suena a confianza previa"
+  },
+  {
+    key: "ritmo_personal",
+    label: "Ritmo personal",
+    instruction: "inicia hablando del ritmo o forma de vivir que ella parece tener",
+    starts: ["Pareces tener un ritmo...", "Se siente que no vas por la vida...", "Me dio curiosidad esa forma tuya de..."],
+    avoid: "no uses frases de plantilla sobre personas especiales"
+  }
+];
+
+function pickEngancheOpeningStyle(caso = {}) {
+  if (caso.modoAyuda !== "enganche") return null;
+
+  const signature = getProfileVariationSignature(caso);
+  const variationKey = caso.variationPlan?.key || "";
+  const bucket = getVariationTimeBucket(20);
+
+  const index = hashStringForVariation(`${signature}::${variationKey}::${bucket}::opening`) % ENGANCHE_OPENING_STYLES.length;
+
+  return {
+    ...ENGANCHE_OPENING_STYLES[index],
+    index,
+    total: ENGANCHE_OPENING_STYLES.length
+  };
+}
+
+function formatEngancheOpeningStyleForPrompt(caso = {}) {
+  const plan = caso.openingStylePlan;
+
+  if (!plan) {
+    return "Sin estilo de inicio especial.";
+  }
+
+  return [
+    `ESTILO DE INICIO ASIGNADO: ${plan.label}`,
+    `INSTRUCCION: ${plan.instruction}`,
+    `INICIOS POSIBLES, NO COPIAR LITERAL: ${plan.starts.join(" | ")}`,
+    `EVITAR: ${plan.avoid}`,
+   "REGLA: usa este estilo como guia de variedad, no como plantilla literal.",
+"REGLA: opcion 1 y opcion 2 deben intentar iniciar con familias distintas.",
+"REGLA: una apertura tipo 'Hay personas...' puede usarse solo si aporta algo especifico y no suena repetida."
+  ].join("\n");
+}
 function hashStringForVariation(value = "") {
   const text = String(value || "");
   let hash = 2166136261;
@@ -2104,7 +2229,7 @@ function buildExternalContactRiskProtocol(caso = {}) {
 
   if (depth === "conversacion_activa") {
     base.push(
-      "- como ya hay conversacion previa, reconoce la conexion: 'me gusta hablar contigo', 'me siento comoda conversando contigo', 'nos conocimos aqui'",
+      "- como ya hay conversacion previa, reconoce la conexion: 'me gusta hablar contigo', 'me siento comodo conversando contigo', 'nos conocimos aqui'",
       "- explica que antes de compartir informacion privada prefieres mantener la confianza dentro de este espacio",
       "- puedes decir que si la confianza sigue creciendo, los pasos se dan de forma natural, sin prometer contacto externo"
     );
@@ -2477,8 +2602,8 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
   if (META_REGEX.test(n)) return true;
 
   if (caso.modoAyuda === "enganche" && talksAboutClientInThirdPerson(s, caso)) return true;
-  if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(s)) return true;
-  if (caso.modoAyuda === "enganche" && FALSE_FAMILIARITY_REGEX.test(n)) return true;
+if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(s)) return true;
+if (caso.modoAyuda === "enganche" && FALSE_FAMILIARITY_REGEX.test(n)) return true;
 
   if (
     caso.modoAyuda === "contexto_correccion" &&
@@ -2531,6 +2656,9 @@ function scoreSuggestion(suggestion = "", caso = {}, index = 0) {
   if (EMPTY_MIRROR_REGEX.test(n)) score -= 0.18;
   if (ONE_WORD_MIRROR_REGEX.test(n)) score -= 0.20;
   if (EMPTY_GENERIC_START_REGEX.test(n) && caso.modoAyuda !== "enganche" && caso.pageType !== "mail") score -= 0.10;
+if (caso.modoAyuda === "enganche" && hasWeakEngancheOpening(s, caso)) {
+  score -= 0.07;
+}
 
   if (
     ["contacto_externo", "redes_externas"].includes(caso.risk?.primary?.key) &&
@@ -2704,6 +2832,13 @@ if (
 ) {
   notes.push("- No hagas que el perfil sea el protagonista. No empieces con 'tu perfil', 'en tu perfil' ni 'hay algo en tu perfil'. Habla directamente de ella como persona.");
 }
+if (
+  caso.modoAyuda === "enganche" &&
+  candidates.length &&
+  candidates.some((item) => hasWeakEngancheOpening(item.text, caso))
+) {
+notes.push("- Varía la familia de inicio. Si usas una apertura tipo 'Hay personas...', que sea puntual, especifica para esta clienta y no una plantilla repetida.");
+}
 
   if (caso.pageType === "mail") {
     notes.push("- En mail, entrega 2 versiones: una fiel/corregida y una mejorada/desarrollada.");
@@ -2734,6 +2869,7 @@ function buildSpecText(caso = {}) {
 function buildEngancheSystemPrompt(caso = {}) {
   const name = caso.perfil?.nombreClienta || "la clienta";
   const variationText = formatEngancheVariationForPrompt(caso);
+const openingStyleText = formatEngancheOpeningStyleForPrompt(caso);
 
   return [
     "Eres el motor de ENGANCHE de una herramienta interna de chat.",
@@ -2771,6 +2907,16 @@ function buildEngancheSystemPrompt(caso = {}) {
 "",
 "PLAN DE VARIACION OBLIGATORIO",
 variationText,
+"",
+"PLAN DE DIVERSIDAD DE INICIO",
+openingStyleText,
+"",
+"DIVERSIDAD DE APERTURAS",
+"- evita que todas las opciones empiecen con la misma familia de frase",
+"- si una opcion empieza con una reflexion general, la otra debe empezar con observacion directa, detalle concreto, pregunta o intuicion",
+"- frases como 'Hay personas...' pueden usarse solo si realmente aportan, pero no como plantilla repetida",
+"- la opcion extendida debe tener una apertura distinta a la opcion corta",
+"- prioriza inicios humanos, concretos y variados",
 "",
 "TONO",
     "- natural",
@@ -3001,7 +3147,14 @@ if (externalContactRiskProtocol) {
   "- prohibido iniciar con 'tu perfil', 'en tu perfil', 'hay algo en tu perfil' o 'tu perfil transmite'",
   "- no hagas que el perfil sea el sujeto principal de la frase",
   "- habla de ella: 'se nota que eres', 'pareces', 'das la impresion', 'me gusta esa mezcla tuya'",
-  "- si mencionas el perfil, que sea secundario: 'por lo que compartes' o 'por lo que muestras'"
+  "- si mencionas el perfil, que sea secundario: 'por lo que compartes' o 'por lo que muestras'",
+"- evita repetir la misma familia de inicio entre opcion 1 y opcion 2",
+"- si usas una apertura tipo 'Hay personas...', que sea especifica para esta clienta y no una plantilla repetida",
+"- si usas una apertura reflexiva, que sea diferente y especifica para esta clienta",
+"- alterna entre observacion directa, detalle concreto, intuicion suave, pregunta viva, escena imaginada o entrada sencilla",
+"- la opcion extendida debe iniciar con una estructura distinta a la opcion corta",
+"- usa el PLAN DE DIVERSIDAD DE INICIO para variar la entrada",
+"- evita frases de plantilla que podrian servir para cualquier clienta"
 ].join("\n"));
   } else {
     common.push([
@@ -3231,7 +3384,7 @@ function fallbackRiskSuggestions(caso = {}) {
       }
 
       return [
-        `${namePrefix(caso)}puede que hayas visto algo fuera, pero prefiero que nos conozcamos por aqui primero. Me hace sentir mas tranquila y segura.`,
+        `${namePrefix(caso)}puede que hayas visto algo fuera, pero prefiero que nos conozcamos por aqui primero. Me hace sentir mas tranquilo y seguro.`,
         `${namePrefix(caso)}no es desconfianza, solo prefiero no mezclar espacios tan rapido. Si vamos a conocernos, me gusta que empiece de forma tranquila por aqui.`
       ];
 
@@ -3244,7 +3397,7 @@ function fallbackRiskSuggestions(caso = {}) {
     case "pregunta_pago_plataforma":
       return [
         `${namePrefix(caso)}sobre como funciona la plataforma prefiero no inventarte nada. Lo que si puedo decirte es que me gusta que hablemos con calma por aqui.`,
-        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser clara contigo y seguir desde una conversacion mas natural.`
+        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser claro contigo y seguir desde una conversacion mas natural.`
       ];
 
     case "desconfianza_realidad":
@@ -3306,7 +3459,7 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
     if (DISALLOWED_MEET_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return;
 
     if (FALSE_FAMILIARITY_REGEX.test(n) && caso.modoAyuda === "enganche") return;
-    if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return;
+if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return;
 
     if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return;
 
@@ -3358,7 +3511,7 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
       if (!clean) return false;
       if (DISALLOWED_CONTACT_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return false;
       if (DISALLOWED_MEET_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return false;
-      if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return false;
+    if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return false;
       if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return false;
 
       return !isPairTooSimilar(final[0], clean, caso);
@@ -3486,9 +3639,10 @@ function buildCase(input = {}) {
     targetLanguageCode: normalizeSpaces(input.target_language_code || input.targetLanguageCode || "en").toLowerCase()
   };
 
-  caso.memoryKey = getSuggestionMemoryKey(caso);
-  caso.globalMemoryKey = getGlobalSuggestionMemoryKey(caso);
-  caso.variationPlan = pickEngancheVariationPlan(caso);
+ caso.memoryKey = getSuggestionMemoryKey(caso);
+caso.globalMemoryKey = getGlobalSuggestionMemoryKey(caso);
+caso.variationPlan = pickEngancheVariationPlan(caso);
+caso.openingStylePlan = pickEngancheOpeningStyle(caso);
 
 return caso;
 }
@@ -5378,6 +5532,8 @@ if (!hasAnyInput) {
   conversation_depth: resultado.caso ? getConversationDepthLabel(resultado.caso) : null,
   variation_angle: resultado.caso?.variationPlan?.key || null,
   variation_label: resultado.caso?.variationPlan?.label || null,
+opening_style: resultado.caso?.openingStylePlan?.key || null,
+opening_label: resultado.caso?.openingStylePlan?.label || null,
   used_fallback_only: Boolean(resultado.usedFallbackOnly),
   second_pass_used: Boolean(resultado.secondPassUsed),
   openai_error: resultado.openAiError || null
