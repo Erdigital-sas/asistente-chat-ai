@@ -355,6 +355,12 @@ const LOG_SUCCESS_SUMMARY = String(process.env.LOG_SUCCESS_SUMMARY || "0") === "
 
 const MAX_CONTEXT_LINES = readIntEnv("MAX_CONTEXT_LINES", 18, 4, 36);
 const MIN_RESPONSE_LENGTH = readIntEnv("MIN_RESPONSE_LENGTH", 80, 20, 220);
+const IA_DAILY_LIMIT_PER_OPERATOR = readIntEnv(
+  "IA_DAILY_LIMIT_PER_OPERATOR",
+  150,
+  1,
+  5000
+);
 
 const OPERATOR_SHARED_KEY = String(process.env.OPERATOR_SHARED_KEY || "2026");
 
@@ -2149,6 +2155,96 @@ function getModelForSuggestionCase(caso = {}) {
   if (caso.modoAyuda === "enganche") return OPENAI_MODEL_ENGANCHE;
   return OPENAI_MODEL_CONTEXT;
 }
+class DailyIaLimitError extends Error {
+  constructor({ operador = "", used = 0, limit = 150, fecha = "" } = {}) {
+    super(`Limite diario de IA alcanzado: ${used}/${limit}. Puedes seguir usando traduccion y ortografia.`);
+    this.code = "DAILY_IA_LIMIT_REACHED";
+    this.operador = operador;
+    this.used = used;
+    this.limit = limit;
+    this.fecha = fecha;
+    this.remaining = Math.max(0, limit - used);
+  }
+}
+
+function isDailyLimitedSuggestionCase(caso = {}) {
+  if (caso.pageType === "mail") return true;
+
+  return (
+    caso.modoAyuda === "enganche" ||
+    caso.modoAyuda === "contexto_correccion"
+  );
+}
+
+function getDailyIaLimitRangeUTC(date = new Date()) {
+  const fecha = formatDateISO(date);
+
+  return {
+    fecha,
+    startIso: `${fecha}T00:00:00.000Z`,
+    endIso: `${addDaysISO(fecha, 1)}T00:00:00.000Z`
+  };
+}
+
+async function getOperatorDailyIaUsage(operador = "") {
+  const operadorFinal = formatOperatorName(operador || "");
+  const range = getDailyIaLimitRangeUTC();
+  const limit = IA_DAILY_LIMIT_PER_OPERATOR;
+
+  if (!operadorFinal) {
+    return {
+      operador: "",
+      fecha: range.fecha,
+      used: 0,
+      limit,
+      remaining: limit,
+      applies_to: ["IA_ENGANCHE", "IA_CONTEXTO", "IA_MAIL"]
+    };
+  }
+
+  const { count, error } = await supabase
+    .from("consumo")
+    .select("id", { count: "exact", head: true })
+    .eq("operador", operadorFinal)
+    .eq("request_ok", true)
+    .gte("created_at", range.startIso)
+    .lt("created_at", range.endIso)
+    .or("tipo.like.IA_ENGANCHE%,tipo.like.IA_CONTEXTO%,tipo.like.IA_MAIL%");
+
+  if (error) {
+    logError("DAILY_IA_LIMIT_READ_ERROR", {
+      operador: operadorFinal,
+      error: error.message || error
+    });
+
+    throw new Error("No se pudo validar el limite diario de IA");
+  }
+
+  const used = Number(count || 0);
+
+  return {
+    operador: operadorFinal,
+    fecha: range.fecha,
+    used,
+    limit,
+    remaining: Math.max(0, limit - used),
+    applies_to: ["IA_ENGANCHE", "IA_CONTEXTO", "IA_MAIL"]
+  };
+}
+
+async function assertOperatorDailyIaLimit(caso = {}) {
+  if (!isDailyLimitedSuggestionCase(caso)) {
+    return null;
+  }
+
+  const usage = await getOperatorDailyIaUsage(caso.operador);
+
+  if (usage.used >= usage.limit) {
+    throw new DailyIaLimitError(usage);
+  }
+
+  return usage;
+}
 
 function inferContactType(caso = {}) {
   if (caso.pageType === "mail") return "mail";
@@ -3685,6 +3781,7 @@ async function callSuggestionModel(caso = {}, recent = [], previousOptions = [],
 
 async function generateSuggestionsCore(input = {}) {
   const caso = buildCase(input);
+  const dailyLimit = await assertOperatorDailyIaLimit(caso);
   const recent = dedupeStrings([
   ...readRecentSuggestions(caso.memoryKey),
   ...readRecentSuggestions(caso.globalMemoryKey)
@@ -3825,13 +3922,14 @@ async function generateSuggestionsCore(input = {}) {
 writeRecentSuggestions(caso.globalMemoryKey, final);
 
   return {
-    sugerencias: final,
-    usageData: combineUsageData(usages),
-    secondPassUsed,
-    usedFallbackOnly,
-    openAiError: openAiError ? compactOpenAIError(openAiError) : null,
-    caso
-  };
+  sugerencias: final,
+  usageData: combineUsageData(usages),
+  secondPassUsed,
+  usedFallbackOnly,
+  openAiError: openAiError ? compactOpenAIError(openAiError) : null,
+  dailyLimit,
+  caso
+};
 }
 
 async function generateSuggestions(input = {}) {
@@ -5017,6 +5115,8 @@ function getHealthPayload() {
       dynamic_translation_language: true,
       force_two_options: true,
       force_three_options: false,
+ia_daily_limit_per_operator: IA_DAILY_LIMIT_PER_OPERATOR,
+ia_daily_limit_applies_to: ["IA_ENGANCHE", "IA_CONTEXTO", "IA_MAIL"],
       debug_openai: DEBUG_OPENAI,
       log_fallbacks: LOG_FALLBACKS,
       log_success_summary: LOG_SUCCESS_SUMMARY
@@ -5359,6 +5459,27 @@ app.post("/login", authorizeOperator, async (req, res) => {
     operador: req.operadorAutorizado
   });
 });
+app.post("/ia-usage", authorizeOperator, async (req, res) => {
+  try {
+    const usage = await getOperatorDailyIaUsage(req.operadorAutorizado);
+
+    return res.json({
+      ok: true,
+      daily_limit: {
+        limit: usage.limit,
+        used: usage.used,
+        remaining: usage.remaining,
+        fecha: usage.fecha,
+        applies_to: usage.applies_to
+      }
+    });
+  } catch (err) {
+    return res.json({
+      ok: false,
+      error: err.message || "No se pudo consultar el uso diario de IA"
+    });
+  }
+});
 
 app.post("/warning-sync", authorizeOperator, async (req, res) => {
   const startedAt = Date.now();
@@ -5534,12 +5655,50 @@ if (!hasAnyInput) {
   variation_label: resultado.caso?.variationPlan?.label || null,
 opening_style: resultado.caso?.openingStylePlan?.key || null,
 opening_label: resultado.caso?.openingStylePlan?.label || null,
+daily_limit: resultado.dailyLimit
+  ? {
+      limit: resultado.dailyLimit.limit,
+      used_before_request: resultado.dailyLimit.used,
+      used_after_request: Math.min(
+        resultado.dailyLimit.limit,
+        resultado.dailyLimit.used + 1
+      ),
+      remaining_after_request: Math.max(
+        0,
+        resultado.dailyLimit.limit - resultado.dailyLimit.used - 1
+      ),
+      fecha: resultado.dailyLimit.fecha,
+      applies_to: resultado.dailyLimit.applies_to
+    }
+  : null,
   used_fallback_only: Boolean(resultado.usedFallbackOnly),
   second_pass_used: Boolean(resultado.secondPassUsed),
   openai_error: resultado.openAiError || null
 }
     });
-  } catch (err) {
+    } catch (err) {
+    if (err?.code === "DAILY_IA_LIMIT_REACHED") {
+      runtimeStats.suggestions.error += 1;
+      runtimeStats.suggestions.lastMs = Date.now() - startedAt;
+
+      return res.json({
+        ok: false,
+        sugerencias: [],
+        error: err.message,
+        meta: {
+          tipo: "IA_DAILY_LIMIT_REACHED",
+          operador: err.operador || operador,
+          fecha: err.fecha || "",
+          daily_limit: {
+            limit: err.limit,
+            used: err.used,
+            remaining: err.remaining,
+            applies_to: ["IA_ENGANCHE", "IA_CONTEXTO", "IA_MAIL"]
+          }
+        }
+      });
+    }
+
     registerConsumptionAsync({
       operador,
       extension_id: req.body?.extension_id || "",
