@@ -680,7 +680,7 @@
         <p>
           Desde aqui crearas, activaras, desactivaras y eliminaras los usuarios operadores
           que pueden entrar a la extension. Tambien veras estadisticas por fechas,
-          costos, tokens, mensajes enviados y warnings.
+          costos, tokens, mensajes enviados, ortografia y warnings.
         </p>
       </div>
 
@@ -815,7 +815,7 @@
         <div class="analytics-card card">
           <h3>Configuracion visible</h3>
           <p>
-            Aqui quedaran visibles la clave compartida, el modelo activo y los costos
+            Aqui quedaran visibles la clave compartida, los modelos activos y los costos
             usados para calcular el gasto estimado.
           </p>
 
@@ -851,6 +851,10 @@
           <div id="kpi-trad-requests" class="value">-</div>
         </div>
         <div class="kpi card">
+          <div class="label">Ortografia</div>
+          <div id="kpi-ortografia-requests" class="value">-</div>
+        </div>
+        <div class="kpi card">
           <div class="label">Tokens totales</div>
           <div id="kpi-total-tokens" class="value">-</div>
         </div>
@@ -882,6 +886,7 @@
                   <th>Requests</th>
                   <th>IA</th>
                   <th>Trad</th>
+                  <th>Ortografia</th>
                   <th>Tokens</th>
                   <th>Costo</th>
                   <th>Warnings</th>
@@ -889,7 +894,7 @@
               </thead>
               <tbody id="analytics-series-body">
                 <tr>
-                  <td colspan="10" class="empty">Pendiente de cargar.</td>
+                  <td colspan="11" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
@@ -927,7 +932,7 @@
           <h3>Gasto por operador</h3>
           <p>
             Aqui saldra el ranking completo por operador con mensajes enviados, requests,
-            prompt tokens, completion tokens, total de tokens, costo estimado y warnings.
+            IA, traducciones, ortografia, tokens, costo estimado y warnings.
           </p>
 
           <div class="table-wrap">
@@ -941,6 +946,7 @@
                   <th>Requests</th>
                   <th>IA</th>
                   <th>Trad</th>
+                  <th>Ortografia</th>
                   <th>Prompt</th>
                   <th>Completion</th>
                   <th>Total tokens</th>
@@ -951,7 +957,7 @@
               </thead>
               <tbody id="analytics-operators-body">
                 <tr>
-                  <td colspan="13" class="empty">Pendiente de cargar.</td>
+                  <td colspan="14" class="empty">Pendiente de cargar.</td>
                 </tr>
               </tbody>
             </table>
