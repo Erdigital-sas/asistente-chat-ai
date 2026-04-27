@@ -17,7 +17,14 @@ const state = {
     summary: {
       messages_sent_total: 0,
       messages_sent_100_plus: 0,
-      messages_sent_under_100: 0
+      messages_sent_under_100: 0,
+      total_requests: 0,
+      ia_requests: 0,
+      trad_requests: 0,
+      ortografia_requests: 0,
+      total_tokens: 0,
+      estimated_cost_total: 0,
+      warnings_total: 0
     },
     operator_stats: [],
     warning_top: [],
@@ -136,7 +143,14 @@ function emptyDashboardState() {
     summary: {
       messages_sent_total: 0,
       messages_sent_100_plus: 0,
-      messages_sent_under_100: 0
+      messages_sent_under_100: 0,
+      total_requests: 0,
+      ia_requests: 0,
+      trad_requests: 0,
+      ortografia_requests: 0,
+      total_tokens: 0,
+      estimated_cost_total: 0,
+      warnings_total: 0
     },
     operator_stats: [],
     warning_top: [],
@@ -533,7 +547,7 @@ function setAnalyticsEmptyState(message = "Sin datos") {
   const operatorsBody = $("analytics-operators-body");
 
   if (seriesBody) {
-    seriesBody.innerHTML = `<tr><td colspan="10" class="empty">${escapeHtml(message)}</td></tr>`;
+    seriesBody.innerHTML = `<tr><td colspan="11" class="empty">${escapeHtml(message)}</td></tr>`;
   }
 
   if (warningBody) {
@@ -541,7 +555,7 @@ function setAnalyticsEmptyState(message = "Sin datos") {
   }
 
   if (operatorsBody) {
-    operatorsBody.innerHTML = `<tr><td colspan="13" class="empty">${escapeHtml(message)}</td></tr>`;
+    operatorsBody.innerHTML = `<tr><td colspan="14" class="empty">${escapeHtml(message)}</td></tr>`;
   }
 
   if (existeEl("kpi-messages-sent-total")) $("kpi-messages-sent-total").textContent = "-";
@@ -550,6 +564,7 @@ function setAnalyticsEmptyState(message = "Sin datos") {
   if (existeEl("kpi-total-requests")) $("kpi-total-requests").textContent = "-";
   if (existeEl("kpi-ia-requests")) $("kpi-ia-requests").textContent = "-";
   if (existeEl("kpi-trad-requests")) $("kpi-trad-requests").textContent = "-";
+  if (existeEl("kpi-ortografia-requests")) $("kpi-ortografia-requests").textContent = "-";
   if (existeEl("kpi-total-tokens")) $("kpi-total-tokens").textContent = "-";
   if (existeEl("kpi-total-cost")) $("kpi-total-cost").textContent = "-";
   if (existeEl("kpi-total-warnings")) $("kpi-total-warnings").textContent = "-";
@@ -581,14 +596,19 @@ function renderPricingInfo() {
     ${escapeHtml(state.sharedKey || "-")}<br><br>
 
     <b>Modelo sugerencias</b><br>
-    ${escapeHtml(pricing.suggestions_model || "-")}<br>
+    ${escapeHtml(pricing.suggestions_model || pricing.enganche_model || "-")}<br>
     Input: ${escapeHtml(String(pricing.suggestion_input_cost_per_1m ?? "-"))} por 1M<br>
     Output: ${escapeHtml(String(pricing.suggestion_output_cost_per_1m ?? "-"))} por 1M<br><br>
 
     <b>Modelo traduccion</b><br>
     ${escapeHtml(pricing.translate_model || "-")}<br>
     Input: ${escapeHtml(String(pricing.translate_input_cost_per_1m ?? "-"))} por 1M<br>
-    Output: ${escapeHtml(String(pricing.translate_output_cost_per_1m ?? "-"))} por 1M
+    Output: ${escapeHtml(String(pricing.translate_output_cost_per_1m ?? "-"))} por 1M<br><br>
+
+    <b>Modelo ortografia</b><br>
+    ${escapeHtml(pricing.orthography_model || "-")}<br>
+    Input: ${escapeHtml(String(pricing.orthography_input_cost_per_1m ?? "-"))} por 1M<br>
+    Output: ${escapeHtml(String(pricing.orthography_output_cost_per_1m ?? "-"))} por 1M
   `;
 }
 
@@ -619,6 +639,10 @@ function renderKpis() {
     $("kpi-trad-requests").textContent = formatNumber(summary.trad_requests || 0);
   }
 
+  if (existeEl("kpi-ortografia-requests")) {
+    $("kpi-ortografia-requests").textContent = formatNumber(summary.ortografia_requests || 0);
+  }
+
   if (existeEl("kpi-total-tokens")) {
     $("kpi-total-tokens").textContent = formatNumber(summary.total_tokens || 0);
   }
@@ -642,6 +666,7 @@ function agruparSeries(series = [], mode = "day") {
       requests_total: Number(row.requests_total || 0),
       ia_requests: Number(row.ia_requests || 0),
       trad_requests: Number(row.trad_requests || 0),
+      ortografia_requests: Number(row.ortografia_requests || 0),
       total_tokens: Number(row.total_tokens || 0),
       estimated_cost_total: Number(row.estimated_cost_total || 0),
       warnings_total: Number(row.warnings_total || 0)
@@ -663,6 +688,7 @@ function agruparSeries(series = [], mode = "day") {
         requests_total: 0,
         ia_requests: 0,
         trad_requests: 0,
+        ortografia_requests: 0,
         total_tokens: 0,
         estimated_cost_total: 0,
         warnings_total: 0
@@ -676,6 +702,7 @@ function agruparSeries(series = [], mode = "day") {
     item.requests_total += Number(row.requests_total || 0);
     item.ia_requests += Number(row.ia_requests || 0);
     item.trad_requests += Number(row.trad_requests || 0);
+    item.ortografia_requests += Number(row.ortografia_requests || 0);
     item.total_tokens += Number(row.total_tokens || 0);
     item.estimated_cost_total += Number(row.estimated_cost_total || 0);
     item.warnings_total += Number(row.warnings_total || 0);
@@ -693,7 +720,7 @@ function renderSeriesTable() {
   const rows = agruparSeries(series, mode);
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="10" class="empty">No hay datos para ese rango o filtro.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="11" class="empty">No hay datos para ese rango o filtro.</td></tr>`;
     return;
   }
 
@@ -706,6 +733,7 @@ function renderSeriesTable() {
       <td>${formatNumber(row.requests_total || 0)}</td>
       <td>${formatNumber(row.ia_requests || 0)}</td>
       <td>${formatNumber(row.trad_requests || 0)}</td>
+      <td>${formatNumber(row.ortografia_requests || 0)}</td>
       <td>${formatNumber(row.total_tokens || 0)}</td>
       <td>${formatUsd(row.estimated_cost_total || 0)}</td>
       <td>${formatNumber(row.warnings_total || 0)}</td>
@@ -741,7 +769,7 @@ function renderOperatorAnalyticsTable() {
   const rows = Array.isArray(state.dashboard?.operator_stats) ? state.dashboard.operator_stats : [];
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="13" class="empty">No hay consumo para ese rango o filtro.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="14" class="empty">No hay consumo para ese rango o filtro.</td></tr>`;
     return;
   }
 
@@ -754,6 +782,7 @@ function renderOperatorAnalyticsTable() {
       <td>${formatNumber(row.requests_total || 0)}</td>
       <td>${formatNumber(row.ia_requests || 0)}</td>
       <td>${formatNumber(row.trad_requests || 0)}</td>
+      <td>${formatNumber(row.ortografia_requests || 0)}</td>
       <td>${formatNumber(row.prompt_tokens || 0)}</td>
       <td>${formatNumber(row.completion_tokens || 0)}</td>
       <td>${formatNumber(row.total_tokens || 0)}</td>
