@@ -1458,13 +1458,32 @@ const BANNED_TOPIC_WORDS = new Set([
 const INTERNAL_LABEL_REGEX = /\b(NOMBRE_CLIENTA|PAIS_CLIENTA|FECHA_NACIMIENTO|ESTADO_CIVIL|INTERESES_EN_COMUN|INTERESTED_IN|INTERESES_CLIENTA|LOOKING_FOR|ABOUT_ME|ABOUT_TEXT|DATOS_CLIENTA|PROFILE_ANCHORS|RAW_PROFILE|no disponible|ninguno)\b/i;
 const META_REGEX = /\b(responderte mejor|escribirte mejor|tu vibra|tu energia|como te decia|frase vacia|mejor dicho|te respondi mejor)\b/i;
 const FALSE_FAMILIARITY_REGEX = /\b(nuestras conversaciones|lo que hablamos|como me dijiste|me acorde de ti|me qued[eé] pensando en ti|hace tiempo|otra vez por aqui|retomar lo nuestro|seguir donde lo dejamos)\b/i;
-const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|numero|phone)\b/i;
+const DISALLOWED_CONTACT_REGEX = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|email|correo|telefono|numero|celular|mobile|number|phone)\b/i;
 const DISALLOWED_MEET_REGEX = /\b(vernos|en persona|salir|cafe|cena|drink|dinner|direccion|hotel|llamame|llamarte|call me)\b/i;
 const EMPTY_MIRROR_REGEX = /^(entiendo|tiene sentido|lo que dices|gracias por decirme|te entiendo|suena bien|claro)\b/i;
 const EMPTY_GENERIC_START_REGEX = /^(hola|hey|buenas|como estas|que tal)\b/i;
 const ONE_WORD_MIRROR_REGEX = /\b(eso que dijiste sobre|lo que dijiste sobre|ahi en lo de)\b/i;
 const OVER_AFFECTION_REGEX = /\b(mi amor|amor|love|baby|darling|honey|carino|bebe)\b/gi;
 const THIRD_PERSON_GENERIC_REGEX = /\b(la historia de|la vida de|el perfil de|los datos de|la forma de ser de|la personalidad de)\b/i;
+function isProfileAsMainSubjectOpening(text = "") {
+  const n = normalizeText(text);
+
+  if (!n) return false;
+
+  const opening = n
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 18)
+    .join(" ");
+
+  if (
+    /^(tu perfil|en tu perfil|hay algo en tu perfil|algo en tu perfil|lo que muestras en tu perfil|lo que cuentas en tu perfil|lo que compartes en tu perfil|el perfil|este perfil|hay perfiles)\b/.test(n)
+  ) {
+    return true;
+  }
+
+  return /\b(tu perfil transmite|tu perfil deja|tu perfil suena|tu perfil muestra|tu perfil tiene|tu perfil no suena|en tu perfil se nota|en tu perfil hay|hay algo en tu perfil|algo en tu perfil|lo que muestras en tu perfil|lo que cuentas en tu perfil|lo que compartes en tu perfil|ese perfil|este perfil)\b/.test(opening);
+}
 const ENGANCHE_VARIATION_ANGLES = [
   {
     key: "curiosidad_personal",
@@ -1475,25 +1494,25 @@ const ENGANCHE_VARIATION_ANGLES = [
   {
     key: "contraste_suave",
     label: "Contraste suave",
-    instruction: "usa un contraste entre dos rasgos del perfil, por ejemplo calma y aventura, sencillez y profundidad",
+    instruction: "usa un contraste entre dos rasgos que ella parece transmitir, por ejemplo calma y aventura, sencillez y profundidad",
     avoid: "no enumeres intereses uno tras otro"
   },
   {
-    key: "sensacion_perfil",
-    label: "Sensacion del perfil",
-    instruction: "habla de la sensacion que transmite el perfil, como calma, energia, misterio o naturalidad",
-    avoid: "no copies literalmente los intereses"
+    key: "sensacion_personal",
+    label: "Sensacion personal",
+    instruction: "habla de la sensacion que ella transmite por lo que comparte, como calma, energia, misterio o naturalidad",
+    avoid: "no digas que su perfil transmite algo; habla de ella como persona"
   },
   {
     key: "detalle_inusual",
     label: "Detalle inusual",
-    instruction: "elige un detalle pequeno del perfil y conviertelo en una entrada mas humana",
+    instruction: "elige un detalle pequeno de lo que ella muestra y conviertelo en una entrada mas humana",
     avoid: "no uses una apertura generica de saludo"
   },
   {
     key: "ritmo_de_vida",
     label: "Ritmo de vida",
-    instruction: "conecta los intereses con el ritmo de vida que podria tener esa persona",
+    instruction: "conecta sus intereses con el ritmo de vida que podria disfrutar",
     avoid: "no digas que tienen mucho en comun si no hay base real"
   },
   {
@@ -1505,31 +1524,31 @@ const ENGANCHE_VARIATION_ANGLES = [
   {
     key: "conexion_emocional",
     label: "Conexion emocional",
-    instruction: "orienta el mensaje a lo que esa persona podria hacer sentir, no solo a lo que le gusta",
+    instruction: "orienta el mensaje a lo que ella podria hacer sentir, no solo a lo que le gusta",
     avoid: "no suenes intenso ni romantico de entrada"
   },
   {
     key: "observacion_directa",
     label: "Observacion directa",
-    instruction: "usa una observacion directa y natural, como si el operador hubiera notado algo real",
-    avoid: "no uses frases tipo 'tu perfil me llamo la atencion' sin decir por que"
+    instruction: "usa una observacion directa y natural, como si el operador hubiera notado algo real en ella",
+    avoid: "no uses frases tipo 'tu perfil me llamo la atencion'"
   },
   {
     key: "energia_social",
     label: "Energia social",
-    instruction: "enfoca el mensaje en la energia que puede tener una conversacion con ella",
+    instruction: "enfoca el mensaje en la energia que podria tener una conversacion con ella",
     avoid: "no uses frases vacias sobre buena energia sin aterrizarlas"
   },
   {
     key: "historia_por_descubrir",
     label: "Historia por descubrir",
-    instruction: "sugiere que hay algo mas detras del perfil, sin fingir que ya la conoces",
-    avoid: "no digas que ya pensaste en ella ni que la recuerdas"
+    instruction: "sugiere que hay algo mas detras de lo que ella muestra o comparte, sin fingir que ya la conoces",
+    avoid: "no digas que ya pensaste en ella, que la recuerdas ni que su perfil es el protagonista"
   },
   {
     key: "eleccion_divertida",
     label: "Eleccion divertida",
-    instruction: "plantea una eleccion ligera entre dos elementos del perfil para abrir conversacion",
+    instruction: "plantea una eleccion ligera entre dos elementos que ella parece disfrutar para abrir conversacion",
     avoid: "no conviertas el mensaje en encuesta fria"
   },
   {
@@ -1539,7 +1558,6 @@ const ENGANCHE_VARIATION_ANGLES = [
     avoid: "no suenes necesitado ni demasiado disponible"
   }
 ];
-
 function hashStringForVariation(value = "") {
   const text = String(value || "");
   let hash = 2166136261;
@@ -1671,9 +1689,9 @@ const RISK_CATALOG = {
     guidance: "No inventes politicas ni cobros. Responde con prudencia y sin vender humo."
   },
   redes_externas: {
-    key: "redes_externas",
-    label: "Redes externas detectadas",
-    severity: 90,
+  key: "redes_externas",
+  label: "Redes externas detectadas",
+  severity: 105,
     guidance: "No confirmes identidades externas ni saques la conversacion fuera."
   },
   abandono_ritmo_contacto: {
@@ -1921,9 +1939,8 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
     seen.add(risk.key);
     risks.push(risk);
   };
-
-  const hasContactWords = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|facebook|tiktok|twitter|numero|telefono|phone|mail|email|correo)\b/.test(text);
-  const hasOffAppWords = /\b(fuera de la app|por otra app|otra app|outside the app|text me|call me|add me|escribeme|pasame|pasa tu|dame tu|te dejo mi|my number|mi numero|mi telefono)\b/.test(text);
+const hasContactWords = /\b(whatsapp|telegram|instagram|insta|snapchat|snap|discord|facebook|tiktok|twitter|numero|telefono|celular|phone|mobile|number|mail|email|correo)\b/.test(text);
+  const hasOffAppWords = /\b(fuera de la app|por otra app|otra app|outside the app|text me|call me|add me|escribeme|pasame|pasa tu|dame tu|te dejo mi|my number|mi numero|mi telefono|mi celular|tu celular|dame tu celular|pasame tu celular)\b/.test(text);
 
   if (hasContactWords || hasOffAppWords) {
     pushRisk(RISK_CATALOG.contacto_externo);
@@ -1950,7 +1967,7 @@ function detectRisks({ textoPlano = "", clientePlano = "", contextoPlano = "" })
     pushRisk(RISK_CATALOG.abandono_ritmo_contacto);
   }
 
-  const hasDistrustWords = /\b(fake|falso|falsa|real|eres real|scam|estafa|bot|catfish)\b/.test(text);
+  const hasDistrustWords = /\b(fake|falso|falsa|real|eres real|soy real|scam|estafa|bot|catfish|desconfias|desconfia|desconfianza|dudas de mi|no soy yo|soy yo|eres tu)\b/.test(text);
 
   if (hasDistrustWords) {
     pushRisk(RISK_CATALOG.desconfianza_realidad);
@@ -2012,6 +2029,108 @@ function inferContactType(caso = {}) {
   if (caso.pageType === "mail") return "mail";
   if (caso.modoAyuda === "enganche") return "nuevo_o_sin_respuesta";
   return "conversacion";
+}
+function getConversationDepthLabel(caso = {}) {
+  const totalClienta = Number(caso.chatSignals?.total_clienta_visible || 0);
+  const totalOperador = Number(caso.chatSignals?.total_operador_visible || 0);
+  const totalSignals = totalClienta + totalOperador;
+
+  const totalContextLines = Array.isArray(caso.contextLines)
+    ? caso.contextLines.filter((line) => {
+        return line && (line.role === "clienta" || line.role === "operador");
+      }).length
+    : 0;
+
+  const total = Math.max(totalSignals, totalContextLines);
+
+  if (total >= 8 || (totalClienta >= 3 && totalOperador >= 3)) {
+    return "conversacion_activa";
+  }
+
+  if (total >= 3 || totalClienta >= 1) {
+    return "conversacion_iniciada";
+  }
+
+  return "nuevo_o_sin_historial";
+}
+
+function isExternalContactRisk(caso = {}) {
+  const key = caso.risk?.primary?.key || "";
+
+  return [
+    "contacto_externo",
+    "redes_externas",
+    "abandono_ritmo_contacto"
+  ].includes(key);
+}
+
+function isSafeBoundaryAboutExternalContact(text = "") {
+  const n = normalizeText(text);
+
+  const mentionsExternal =
+    DISALLOWED_CONTACT_REGEX.test(n) ||
+    DISALLOWED_MEET_REGEX.test(n) ||
+    /\b(red social|redes|fuera|otro lugar|otra parte|privado|privada|informacion privada|datos personales|celular|numero personal)\b/.test(n);
+
+  if (!mentionsExternal) return false;
+
+  const hasBoundary =
+    /\b(prefiero|mejor|quiero|me gusta|me siento|cuidar|cuidarme|seguro|segura|inseguro|insegura|privacidad|privado|privada|confianza|conocernos|conocerte|nos conocimos|seguir por aqui|quedarnos aqui|mantenerlo aqui|por ahora)\b/.test(n);
+
+  const hasRefusalOrDelay =
+    /\b(no|sin|por ahora|todavia|aun|antes de|hasta que|mientras|prefiero|mejor)\b/.test(n);
+
+  return hasBoundary && hasRefusalOrDelay;
+}
+
+function buildExternalContactRiskProtocol(caso = {}) {
+  if (!isExternalContactRisk(caso)) return "";
+
+  const depth = getConversationDepthLabel(caso);
+
+  const base = [
+    "PROTOCOLO CONTACTO EXTERNO / PRIVACIDAD",
+    "- si piden numero, telefono, celular, WhatsApp, Telegram, redes o contacto fuera de aqui, NO aceptes mover la conversacion fuera",
+    "- no respondas como robot ni como regla de plataforma",
+    "- no digas simplemente 'no puedo'",
+    "- explica el limite como decision personal, privacidad y seguridad",
+    "- mantente calido, tranquilo y humano",
+    "- no acuses a la clienta",
+    "- no suenes defensivo",
+    "- no cierres la conversacion",
+    "- redirige a seguir hablando aqui",
+    "- si pregunta 'desconfias que sea yo?', responde que no es desconfianza, sino cuidado de privacidad y ritmo natural"
+  ];
+
+  if (depth === "conversacion_activa") {
+    base.push(
+      "- como ya hay conversacion previa, reconoce la conexion: 'me gusta hablar contigo', 'me siento comoda conversando contigo', 'nos conocimos aqui'",
+      "- explica que antes de compartir informacion privada prefieres mantener la confianza dentro de este espacio",
+      "- puedes decir que si la confianza sigue creciendo, los pasos se dan de forma natural, sin prometer contacto externo"
+    );
+  } else if (depth === "conversacion_iniciada") {
+    base.push(
+      "- como ya empezaron a hablar, usa un tono cercano pero prudente",
+      "- explica que todavia estan conociendose y prefieres no compartir informacion privada tan pronto",
+      "- deja abierta la conversacion aqui"
+    );
+  } else {
+    base.push(
+      "- como es una conversacion nueva o con poco historial, marca el limite de forma suave",
+      "- explica que apenas estan empezando a conocerse",
+      "- evita sonar desconfiado; habla de seguridad y comodidad personal"
+    );
+  }
+
+  base.push(
+    "",
+    "EJEMPLOS DE TONO, NO COPIAR LITERAL SI NO ENCAJA:",
+    "- Se que para ti quizas seria mas comodo hablar por otro lado, pero prefiero quedarme por aqui. Apenas estamos conociendonos y me gusta cuidar mi privacidad.",
+    "- No es desconfianza. Me gusta conversar contigo, solo prefiero que sigamos por aqui por ahora y dejar que la confianza crezca de forma natural.",
+    "- Nos conocimos aqui, y por ahora me siento mejor manteniendo la conversacion en este espacio antes de compartir informacion privada."
+  );
+
+  return base.join("\n");
 }
 
 function extractKeywordSignals(text = "") {
@@ -2078,13 +2197,14 @@ function addressesClientDirectly(text = "", caso = {}) {
 
   if (name && n.startsWith(`${name},`)) return true;
 
-  if (/\b(vi que|me llamo la atencion|me dio curiosidad|note que|entiendo que|imagino que|me gusta que|lei que|lei en tu perfil)\b/.test(n)) {
+  if (
+    /\b(vi que|me llamo la atencion|me dio curiosidad|note que|entiendo que|imagino que|me gusta que|lei que|se nota que|pareces|das la impresion|por lo que compartes|por lo que muestras)\b/.test(n)
+  ) {
     return true;
   }
 
   return false;
 }
-
 function getSuggestionMemoryKey(caso = {}) {
   return [
     normalizeText(caso.operador || "anon").slice(0, 80),
@@ -2341,11 +2461,23 @@ function isSuggestionForbidden(suggestion = "", caso = {}) {
 
   if (caso.pageType !== "mail" && countQuestions(s) > 1) return true;
   if (INTERNAL_LABEL_REGEX.test(s)) return true;
-  if (DISALLOWED_CONTACT_REGEX.test(n)) return true;
-  if (DISALLOWED_MEET_REGEX.test(n)) return true;
+
+  /*
+   * Permitimos mencionar numero, celular, WhatsApp o redes SOLO cuando
+   * la respuesta marca un limite seguro: privacidad, confianza, seguir aqui.
+   */
+  if (DISALLOWED_CONTACT_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(s)) {
+    return true;
+  }
+
+  if (DISALLOWED_MEET_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(s)) {
+    return true;
+  }
+
   if (META_REGEX.test(n)) return true;
 
   if (caso.modoAyuda === "enganche" && talksAboutClientInThirdPerson(s, caso)) return true;
+  if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(s)) return true;
   if (caso.modoAyuda === "enganche" && FALSE_FAMILIARITY_REGEX.test(n)) return true;
 
   if (
@@ -2565,6 +2697,13 @@ function buildWeaknessFeedback(candidates = [], caso = {}) {
   ) {
     notes.push("- No finjas confianza previa. No digas 'nuestras conversaciones', 'me acorde de ti' ni 'lo que hablamos'.");
   }
+if (
+  caso.modoAyuda === "enganche" &&
+  candidates.length &&
+  candidates.some((item) => isProfileAsMainSubjectOpening(item.text))
+) {
+  notes.push("- No hagas que el perfil sea el protagonista. No empieces con 'tu perfil', 'en tu perfil' ni 'hay algo en tu perfil'. Habla directamente de ella como persona.");
+}
 
   if (caso.pageType === "mail") {
     notes.push("- En mail, entrega 2 versiones: una fiel/corregida y una mejorada/desarrollada.");
@@ -2619,10 +2758,16 @@ function buildEngancheSystemPrompt(caso = {}) {
     "- no pueden hacer la misma pregunta",
     "- no pueden usar la misma estructura",
     "",
-    "USO DEL PERFIL",
+ "USO DEL PERFIL",
 "- si hay ABOUT_TEXT, usalo como prioridad alta",
 "- usa maximo 1 o 2 datos reales del perfil por opcion",
 "- no inventes ciudad, pais, hijos, estado civil ni intenciones",
+"- el perfil es fuente interna de informacion, NO el protagonista de la frase",
+"- no empieces con 'tu perfil', 'en tu perfil', 'hay algo en tu perfil' ni estructuras parecidas",
+"- transforma los datos del perfil en observaciones humanas sobre ella",
+"- ejemplo malo: 'tu perfil transmite una calma bonita'",
+"- ejemplo bueno: 'se nota que eres de esas personas que transmiten calma sin esforzarse'",
+"- puedes decir 'por lo que compartes' o 'por lo que muestras' maximo una vez, pero no como inicio repetitivo",
 "",
 "PLAN DE VARIACION OBLIGATORIO",
 variationText,
@@ -2660,6 +2805,8 @@ function buildContextSystemPrompt(caso = {}) {
     "- si hay mensajes reales de la clienta, responde al momento actual",
     "- si ya hay conversacion activa, NO saludes como apertura",
     "- conserva la intencion del operador, pero corrige ansiedad, presion, reclamo o tono debil",
+"- si el caso incluye PROTOCOLO CONTACTO EXTERNO / PRIVACIDAD, ese protocolo tiene prioridad sobre una respuesta generica",
+"- en contacto externo, responde como limite personal de privacidad y confianza, no como regla fria de plataforma",
     "",
     "LIMITE CHAT",
     "- opcion 1 CORTA: 100 a 180 caracteres",
@@ -2802,7 +2949,11 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
     `- perfil: ${caso.modoAyuda === "enganche" ? ((caso.profileKeywords || []).join(" | ") || "ninguna") : "no usar perfil"}`,
     `- temas activos: ${(caso.activeThemes || []).join(" | ") || "ninguno"}`
   ].join("\n"));
+const externalContactRiskProtocol = buildExternalContactRiskProtocol(caso);
 
+if (externalContactRiskProtocol) {
+  common.push(externalContactRiskProtocol);
+}
   common.push([
     "RESPUESTAS RECIENTES A EVITAR",
     recent.length
@@ -2846,7 +2997,11 @@ function buildUserPrompt(caso = {}, recent = [], previousOptions = [], feedback 
   "- respeta el PLAN DE VARIACION asignado",
   "- evita escribir el mismo tipo de enganche que se usaria para cualquier otra persona con intereses parecidos",
   "- no abras siempre con 'vi que te gusta...' ni con una lista de intereses",
-  "- convierte los intereses en una observacion, contraste, escena o pregunta distinta"
+  "- convierte los intereses en una observacion, contraste, escena o pregunta distinta",
+  "- prohibido iniciar con 'tu perfil', 'en tu perfil', 'hay algo en tu perfil' o 'tu perfil transmite'",
+  "- no hagas que el perfil sea el sujeto principal de la frase",
+  "- habla de ella: 'se nota que eres', 'pareces', 'das la impresion', 'me gusta esa mezcla tuya'",
+  "- si mencionas el perfil, que sea secundario: 'por lo que compartes' o 'por lo que muestras'"
 ].join("\n"));
   } else {
     common.push([
@@ -2932,70 +3087,71 @@ function buildProfileBasedFallbacks(caso = {}) {
   if (aboutText) {
     const byVariation = {
       energia_social: [
-        `${name}lo que cuentas en tu perfil sobre ${aboutText} deja una energia facil de seguir. Me dio curiosidad que tipo de charla te hace sentir comoda aqui.`,
-        `${name}tu perfil no se siente como una lista cualquiera. Entre lo que disfrutas y la energia que transmites, dan ganas de descubrir que conversacion te atrapa de verdad.`
+        `${name}por lo que compartes, se siente una energia tranquila y facil de seguir. Me dio curiosidad que tipo de charla te hace sentir comoda aqui.`,
+        `${name}das la impresion de alguien que no necesita hacer ruido para llamar la atencion. Entre lo que disfrutas y lo que buscas, dan ganas de descubrir que conversacion te atrapa.`
       ],
       detalle_inusual: [
-        `${name}me quede con un detalle de tu perfil: ${aboutText}. No lo tomaria como una simple frase, sino como una pista de como disfrutas las cosas.`,
-        `${name}hay algo concreto en tu perfil que se siente distinto. Ese detalle de ${aboutText} me dio curiosidad porque no suena puesto solo por llenar espacio.`
+        `${name}me llamo la atencion ese detalle de ${aboutText}. No lo tomaria como una frase cualquiera, sino como una pista de como disfrutas las cosas.`,
+        `${name}hay un detalle en lo que compartes que se siente distinto. No suena puesto por llenar espacio, suena mas como una parte real de ti.`
       ],
       historia_por_descubrir: [
-        `${name}tu perfil deja la sensacion de que detras de ${aboutText} hay mas historia de la que aparece primero. Eso fue lo que me dio curiosidad.`,
-        `${name}hay perfiles que muestran poco, pero dejan ganas de saber mas. El tuyo, con eso de ${aboutText}, va justo por ese lado.`
+        `${name}se siente que detras de ${aboutText} hay mas historia de la que aparece primero. Eso fue lo que me dio curiosidad.`,
+        `${name}pareces de esas personas que muestran poco al inicio, pero dejan ganas de saber mas cuando alguien presta atencion.`
       ],
       contraste_suave: [
-        `${name}me dio curiosidad la mezcla que se siente en tu perfil: algo tranquilo, pero con ganas de vivir cosas. Eso no aparece en cualquier descripcion.`,
-        `${name}tu perfil tiene un contraste bonito: se siente calmado, pero no apagado. Me dio curiosidad saber que parte de ti sale primero cuando una charla fluye.`
+        `${name}se nota una mezcla bonita en ti: algo tranquilo, pero con ganas de vivir cosas. Eso no aparece en cualquier persona.`,
+        `${name}me gusta esa combinacion entre calma y curiosidad que se siente en lo que compartes. Da ganas de saber que parte tuya aparece primero al hablar.`
       ],
       pregunta_imaginativa: [
-        `${name}si tuviera que elegir una escena por tu perfil, seria algo entre una charla tranquila y un plan espontaneo. ¿Cual de esas dos partes te representa mas?`,
-        `${name}tu perfil me dejo una pregunta curiosa: cuando conectas con alguien, te gana mas la calma de una buena charla o la chispa de algo inesperado?`
+        `${name}si tuviera que imaginar una escena contigo, seria entre una charla tranquila y un plan espontaneo. ¿Cual de esas dos partes te representa mas?`,
+        `${name}me dejaste una duda curiosa: cuando conectas con alguien, te gana mas la calma de una buena charla o la chispa de algo inesperado?`
       ]
     };
 
     return byVariation[variationKey] || [
-      `${name}tu perfil tiene algo concreto que me dio curiosidad: ${aboutText}. No suena a una descripcion vacia, suena a alguien con quien la charla puede tomar buen ritmo.`,
-      `${name}hay algo natural en lo que muestras en tu perfil. Me dio curiosidad porque no parece una frase armada, sino una forma sencilla de dejar ver quien eres.`
+      `${name}se nota algo natural en la forma en que te muestras. No parece una frase armada; da curiosidad descubrir que hay detras.`,
+      `${name}por lo que compartes, pareces alguien con una forma tranquila de conectar. Eso me dio curiosidad mas que cualquier saludo comun.`
     ];
   }
 
   if (about.length && interests.length) {
     return [
-      `${name}hay una mezcla interesante entre como te describes y lo que disfrutas. ${aboutList} con ${interestText} suena a alguien que no vive las cosas en automatico.`,
-      `${name}lo que me llamo la atencion no fue solo que te guste ${interestText}, sino la forma en que eso combina con como te muestras: ${aboutList}.`
+      `${name}pareces tener una mezcla interesante entre ${aboutList} y eso de disfrutar ${interestText}. No suena a alguien que vive las cosas en automatico.`,
+      `${name}me llamo la atencion como se combina eso de ${interestText} con una forma de ser mas ${aboutList}. Suena a una mezcla poco aburrida.`
     ];
   }
 
   if (interests.length && country) {
     return [
-      `${name}entre ${country} y eso de ${interestText}, tu perfil deja una entrada mas interesante que un saludo comun. Me dio curiosidad como vives esas cosas.`,
-      `${name}lo de ${interestText} dice mas de ti que una frase cualquiera. Sumado a ${country}, me dio curiosidad saber que tipo de historias tienes detras.`
+      `${name}entre ${country} y eso de ${interestText}, me dio curiosidad imaginar que historias tienes detras. No queria empezar con un saludo comun.`,
+      `${name}lo de ${interestText} dice mas de ti que una frase cualquiera. Sumado a ${country}, me dio curiosidad saber que tipo de momentos disfrutas mas.`
     ];
   }
 
   if (about.length) {
     return [
-      `${name}tu forma de describirte como ${aboutList} me dio curiosidad. No suena a una lista fria, sino a una pequena pista de como eres cuando alguien te conoce mejor.`,
-      `${name}hay algo en eso de ${aboutList} que se siente mas personal que una simple descripcion. Me dieron ganas de entender que hay detras de esa parte tuya.`
+      `${name}eso de ser ${aboutList} me dio curiosidad. No suena a una lista fria, sino a una pequena pista de como eres cuando alguien te conoce mejor.`,
+      `${name}hay algo en esa mezcla de ${aboutList} que se siente mas personal que una simple descripcion. Me dieron ganas de entender que hay detras.`
     ];
   }
 
   if (looking.length) {
     return [
-      `${name}lo que buscas aqui, ${lookingText}, me parece una buena pista de la energia que valoras. Me dio curiosidad saber que hace que una conversacion te atrape.`,
-      `${name}tu perfil deja claro que no se trata solo de hablar por hablar. Eso de ${lookingText} suena a alguien que busca una conexion con algo mas de sentido.`
+      `${name}eso de buscar ${lookingText} me parece una buena pista de la energia que valoras. Me dio curiosidad saber que hace que una conversacion te atrape.`,
+      `${name}se nota que no se trata solo de hablar por hablar. Eso de ${lookingText} suena a alguien que busca una conexion con algo mas de sentido.`
     ];
   }
 
   if (country) {
     return [
       `${name}vi el detalle de ${country} y preferi no empezar con un saludo comun. A veces un dato simple abre una conversacion mas real que una frase bonita.`,
-      `${name}tu perfil me dio curiosidad desde un detalle sencillo: ${country}. Me gusta cuando una conversacion puede empezar sin sonar copiada ni forzada.`
+      `${name}me dio curiosidad ese detalle de ${country}. Me gusta cuando una conversacion puede empezar sin sonar copiada ni forzada.`
     ];
   }
 
   return [];
 }
+
 function fallbackContextSuggestions(caso = {}) {
   const lastClient = caso.clientePlano || "";
   const draft = caso.textoPlano || "";
@@ -3049,36 +3205,58 @@ function fallbackRiskSuggestions(caso = {}) {
     if (profile.length) return profile;
   }
 
+  const depth = getConversationDepthLabel(caso);
+  const activeConversation = depth === "conversacion_activa";
+
   switch (caso.risk?.primary?.key) {
     case "contacto_externo":
+      if (activeConversation) {
+        return [
+          `${namePrefix(caso)}no es desconfianza. Me gusta hablar contigo, solo prefiero que sigamos por aqui por ahora y cuidar mi privacidad antes de dar otro paso.`,
+          `${namePrefix(caso)}entiendo que seria mas comodo hablar por otro lado, pero nos conocimos aqui y me gusta dejar que la confianza crezca sin apurar nada.`
+        ];
+      }
+
       return [
-        `${namePrefix(caso)}prefiero que sigamos por aqui y sin correr. Me interesa mas que la conversacion se sienta real antes que moverla fuera del chat.`,
-        `${namePrefix(caso)}podemos llevarlo tranquilo por este chat. Para mi tiene mas sentido ver si la conversacion fluye aqui antes de pensar en otra cosa.`
+        `${namePrefix(caso)}se que quizas seria mas comodo hablar por otro lado, pero apenas estamos conociendonos y prefiero cuidar mi privacidad por ahora.`,
+        `${namePrefix(caso)}prefiero que sigamos conversando por aqui. No es por algo malo, solo me siento mejor conociendote un poco mas antes de compartir algo privado.`
+      ];
+
+    case "redes_externas":
+      if (activeConversation) {
+        return [
+          `${namePrefix(caso)}no desconfio de ti. Solo prefiero no mezclar cosas de fuera con lo que estamos construyendo aqui, al menos hasta sentir mas confianza.`,
+          `${namePrefix(caso)}puede que algo te haya dado curiosidad fuera de aqui, pero me gusta mas seguir esta conversacion donde empezo y dejar que fluya natural.`
+        ];
+      }
+
+      return [
+        `${namePrefix(caso)}puede que hayas visto algo fuera, pero prefiero que nos conozcamos por aqui primero. Me hace sentir mas tranquila y segura.`,
+        `${namePrefix(caso)}no es desconfianza, solo prefiero no mezclar espacios tan rapido. Si vamos a conocernos, me gusta que empiece de forma tranquila por aqui.`
+      ];
+
+    case "abandono_ritmo_contacto":
+      return [
+        `${namePrefix(caso)}entiendo que a veces este ritmo puede cansar. No quiero presionarte; prefiero que sigamos con calma por aqui y que se sienta natural.`,
+        `${namePrefix(caso)}si ahora necesitas ir mas despacio, lo entiendo. Para mi tiene mas sentido quedarnos aqui y conversar sin apurar ningun paso.`
       ];
 
     case "pregunta_pago_plataforma":
       return [
-        `${namePrefix(caso)}sobre como lo maneja la plataforma prefiero no inventarte nada. Lo que si me importa es que la charla se sienta real por aqui.`,
-        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser claro y seguir desde una conversacion mas humana.`
-      ];
-
-    case "redes_externas":
-      return [
-        `${namePrefix(caso)}aunque hayas visto algo fuera, prefiero que lo llevemos por aqui y sin mezclar cosas. Me interesa conocerte desde esta conversacion.`,
-        `${namePrefix(caso)}yo mantendria la charla por este chat para que sea mas simple y natural. Si algo te dio curiosidad, podemos hablarlo aqui con calma.`
+        `${namePrefix(caso)}sobre como funciona la plataforma prefiero no inventarte nada. Lo que si puedo decirte es que me gusta que hablemos con calma por aqui.`,
+        `${namePrefix(caso)}no quiero darte una respuesta dudosa sobre pagos o cuentas. Prefiero ser clara contigo y seguir desde una conversacion mas natural.`
       ];
 
     case "desconfianza_realidad":
       return [
-        `${namePrefix(caso)}te respondo simple y claro: prefiero que esto suene natural antes que perfecto. Si algo te genera duda, dimelo directo y lo hablamos.`,
-        `${namePrefix(caso)}no me interesa sonar armado ni vender una imagen rara. Prefiero una conversacion clara y normal, de esas que se sostienen solas.`
+        `${namePrefix(caso)}no desconfio de ti. Solo me gusta cuidar mi privacidad y dejar que la confianza crezca de forma natural mientras hablamos.`,
+        `${namePrefix(caso)}entiendo que puedas preguntarlo. No es desconfianza; prefiero que la confianza se note en como conversamos, sin apurar ningun paso.`
       ];
 
     default:
       return [];
   }
 }
-
 function fallbackSuggestions(caso = {}) {
   const risk = fallbackRiskSuggestions(caso);
   if (risk.length) return risk;
@@ -3103,7 +3281,7 @@ function emergencySuggestions(caso = {}) {
 
   if (caso.modoAyuda === "enganche") {
     return [
-      `${namePrefix(caso)}quise escribirte algo mas real que un saludo comun. Me dio curiosidad tu perfil y preferi empezar sin sonar como un mensaje copiado.`,
+      `${namePrefix(caso)}quise escribirte algo mas real que un saludo comun. Por lo que compartes, se siente que puede haber una conversacion interesante aqui.`,
       `${namePrefix(caso)}prefiero empezar con algo sencillo y honesto. A veces una buena charla no necesita presion, solo una entrada que se sienta natural.`
     ];
   }
@@ -3119,11 +3297,16 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
 
   const pushClean = (text = "") => {
     const clean = cleanSuggestion(text);
+    const n = normalizeText(clean);
+
     if (!clean) return;
     if (INTERNAL_LABEL_REGEX.test(clean)) return;
-    if (DISALLOWED_CONTACT_REGEX.test(normalizeText(clean))) return;
-    if (DISALLOWED_MEET_REGEX.test(normalizeText(clean))) return;
-    if (FALSE_FAMILIARITY_REGEX.test(normalizeText(clean)) && caso.modoAyuda === "enganche") return;
+
+    if (DISALLOWED_CONTACT_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return;
+    if (DISALLOWED_MEET_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return;
+
+    if (FALSE_FAMILIARITY_REGEX.test(n) && caso.modoAyuda === "enganche") return;
+    if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return;
 
     if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return;
 
@@ -3148,12 +3331,17 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
 
   while (final.length < 2) {
     const emergency = emergencySuggestions(caso);
-    const fallback = emergency[final.length] || emergency[0] || "Prefiero responderte de una forma clara, natural y sin presion para que la conversacion siga comoda.";
+    const fallback =
+      emergency[final.length] ||
+      emergency[0] ||
+      "Prefiero responderte de una forma clara, natural y sin presion para que la conversacion siga comoda.";
 
     if (!final.some((x) => isPairTooSimilar(x, fallback, caso))) {
       final.push(fallback);
     } else {
-      final.push(`Lo que quiero decirte es simple: prefiero que esta conversacion se sienta tranquila, honesta y sin presion, para que podamos ver si realmente hay algo natural entre los dos.`);
+      final.push(
+        "Lo que quiero decirte es simple: prefiero que esta conversacion se sienta tranquila, honesta y sin presion, para que podamos ver si realmente hay algo natural entre los dos."
+      );
     }
   }
 
@@ -3165,8 +3353,14 @@ function ensureExactlyTwoSuggestions(selected = [], caso = {}) {
 
     const alternative = alternatives.find((item) => {
       const clean = cleanSuggestion(item);
+      const n = normalizeText(clean);
+
       if (!clean) return false;
+      if (DISALLOWED_CONTACT_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return false;
+      if (DISALLOWED_MEET_REGEX.test(n) && !isSafeBoundaryAboutExternalContact(clean)) return false;
+      if (caso.modoAyuda === "enganche" && isProfileAsMainSubjectOpening(clean)) return false;
       if (caso.pageType !== "mail" && countChars(clean) > CHAT_MAX_CHARS) return false;
+
       return !isPairTooSimilar(final[0], clean, caso);
     });
 
@@ -5175,16 +5369,19 @@ if (!hasAnyInput) {
             target_language,
             target_language_code
           })),
-      meta: {
+  meta: {
   tipo,
   modo_ayuda,
   page_type,
+  risk_mode: resultado.caso?.risk?.primary?.key || null,
+  risk_label: resultado.caso?.risk?.primary?.label || null,
+  conversation_depth: resultado.caso ? getConversationDepthLabel(resultado.caso) : null,
   variation_angle: resultado.caso?.variationPlan?.key || null,
   variation_label: resultado.caso?.variationPlan?.label || null,
   used_fallback_only: Boolean(resultado.usedFallbackOnly),
-        second_pass_used: Boolean(resultado.secondPassUsed),
-        openai_error: resultado.openAiError || null
-      }
+  second_pass_used: Boolean(resultado.secondPassUsed),
+  openai_error: resultado.openAiError || null
+}
     });
   } catch (err) {
     registerConsumptionAsync({
