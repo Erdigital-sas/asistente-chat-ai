@@ -11,19 +11,25 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL ||
+  process.env.GEMINI_TRANSLATE_MODEL ||
+  'gemini-2.5-flash-lite';
+
 const GEMINI_API_BASE =
-  process.env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
+  process.env.GEMINI_API_BASE ||
+  'https://generativelanguage.googleapis.com/v1beta';
+
+const GEMINI_THINKING_BUDGET = Number(process.env.GEMINI_THINKING_BUDGET ?? 0);
+const GEMINI_TEMPERATURE_CORRECT = Number(process.env.GEMINI_TEMPERATURE_CORRECT || 0);
+const GEMINI_TEMPERATURE_TRANSLATE = Number(process.env.GEMINI_TEMPERATURE_TRANSLATE || 0.1);
 
 const MAX_TEXT_CHARS = Number(process.env.MAX_TEXT_CHARS || 2500);
+const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || 3500);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 90);
-
-const GEMINI_TEMPERATURE_CORRECT = Number(process.env.GEMINI_TEMPERATURE_CORRECT || 0);
-const GEMINI_TEMPERATURE_TRANSLATE = Number(process.env.GEMINI_TEMPERATURE_TRANSLATE || 0.1);
-const GEMINI_THINKING_BUDGET = Number(process.env.GEMINI_THINKING_BUDGET ?? 0);
 
 const rateBuckets = new Map();
 
@@ -40,11 +46,20 @@ app.use(cors({ origin: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimitMiddleware);
 
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'IA Chat Lite backend',
+    version: '2.8.0',
+    message: 'Backend activo con Gemini.'
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     service: 'IA Chat Lite backend',
-    version: '2.7.0',
+    version: '2.8.0',
     mode: 'lite',
     dictationProvider: 'browser-web-speech-api',
     correctionProvider: GEMINI_API_KEY ? 'gemini' : 'not_configured',
@@ -66,6 +81,7 @@ app.post('/corregir', async (req, res) => {
     }
 
     const text = sanitizeText(req.body?.text);
+    const conversationContext = sanitizeContext(req.body?.conversationContext);
 
     if (!text) {
       return res.status(400).json({
@@ -77,6 +93,7 @@ app.post('/corregir', async (req, res) => {
     const result = await processWithGemini({
       action: 'correct',
       text,
+      conversationContext,
       operatorId: req.body?.operatorId,
       pageUrl: req.body?.pageUrl,
       pageTitle: req.body?.pageTitle
@@ -110,6 +127,7 @@ app.post('/traducir', async (req, res) => {
     }
 
     const text = sanitizeText(req.body?.text);
+    const conversationContext = sanitizeContext(req.body?.conversationContext);
 
     if (!text) {
       return res.status(400).json({
@@ -121,6 +139,7 @@ app.post('/traducir', async (req, res) => {
     const result = await processWithGemini({
       action: 'translate',
       text,
+      conversationContext,
       operatorId: req.body?.operatorId,
       pageUrl: req.body?.pageUrl,
       pageTitle: req.body?.pageTitle,
@@ -168,15 +187,28 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`IA Chat Lite backend v2.7 activo en puerto ${PORT}`);
+  console.log(`IA Chat Lite backend v2.8.0 activo en puerto ${PORT}`);
+  console.log(`Gemini model: ${GEMINI_MODEL}`);
 });
 
-async function processWithGemini({ action, text, operatorId, pageUrl, pageTitle, targetLang }) {
+async function processWithGemini({
+  action,
+  text,
+  conversationContext,
+  operatorId,
+  pageUrl,
+  pageTitle,
+  targetLang
+}) {
   const systemPrompt = buildSystemPrompt(action, targetLang);
-  const userPrompt = buildUserPrompt(action, text);
+  const userPrompt = buildUserPrompt(action, text, conversationContext);
   const maxOutputTokens = calculateMaxOutputTokens(text);
 
-  const payload = buildGeminiPayload({
+  const url = `${normalizeBaseUrl(GEMINI_API_BASE)}/models/${encodeURIComponent(
+    GEMINI_MODEL
+  )}:generateContent`;
+
+  const payloadWithThinking = buildGeminiPayload({
     action,
     systemPrompt,
     userPrompt,
@@ -184,31 +216,31 @@ async function processWithGemini({ action, text, operatorId, pageUrl, pageTitle,
     includeThinkingConfig: true
   });
 
-  const url = `${normalizeBaseUrl(GEMINI_API_BASE)}/models/${encodeURIComponent(
-    GEMINI_MODEL
-  )}:generateContent`;
-
   let json;
 
   try {
-    json = await postGeminiJson(url, payload);
+    json = await postGeminiJson(url, payloadWithThinking);
   } catch (error) {
-    if (shouldRetryWithoutThinkingConfig(error)) {
-      const fallbackPayload = buildGeminiPayload({
-        action,
-        systemPrompt,
-        userPrompt,
-        maxOutputTokens,
-        includeThinkingConfig: false
-      });
-
-      json = await postGeminiJson(url, fallbackPayload);
-    } else {
+    if (!shouldRetryWithoutThinkingConfig(error)) {
       throw error;
     }
+
+    const fallbackPayload = buildGeminiPayload({
+      action,
+      systemPrompt,
+      userPrompt,
+      maxOutputTokens,
+      includeThinkingConfig: false
+    });
+
+    json = await postGeminiJson(url, fallbackPayload);
   }
 
-  const output = cleanModelOutput(extractGeminiText(json));
+  let output = cleanModelOutput(extractGeminiText(json));
+
+  if (action === 'correct') {
+    output = normalizeCorrectionOutput(output);
+  }
 
   if (!output) {
     const blockReason = json?.promptFeedback?.blockReason;
@@ -284,42 +316,65 @@ function buildGeminiPayload({
 function buildSystemPrompt(action, targetLang) {
   if (action === 'correct') {
     return [
-      'Eres un corrector de texto para una herramienta interna de chat.',
-      'Corrige únicamente ortografía, gramática básica, puntuación y errores de escritura.',
-      'No cambies la intención del mensaje.',
-      'No cambies el idioma del mensaje.',
+      'Eres un corrector ligero para una herramienta interna de chat.',
+      'El texto siempre es escrito por un hombre hacia una mujer.',
+      'Corrige solo errores básicos de escritura, palabras mal escritas, espacios y puntuación mínima.',
+      'No agregues acentos ni tildes. No conviertas "como" en "cómo", "estas" en "estás", "mas" en "más", etc.',
+      'No uses signos invertidos de español como "¿" o "¡".',
+      'Si el mensaje claramente es una pregunta, usa solo signo de pregunta al final.',
+      'Si no es pregunta, no lo conviertas en pregunta.',
+      'Mantén un estilo natural, humano, casual y de chat.',
+      'No lo vuelvas formal, perfecto ni robotizado.',
+      'No cambies la intención.',
       'No agregues contenido nuevo.',
       'No respondas al mensaje.',
       'No hagas sugerencias.',
-      'No expliques nada.',
-      'No uses comillas alrededor de la respuesta.',
+      'Mantén al emisor como hombre y a la destinataria como mujer cuando haya género gramatical.',
       'Devuelve únicamente el texto corregido.'
     ].join(' ');
   }
 
   return [
     'Eres un traductor para una herramienta interna de chat.',
-    'Traduce el texto de forma natural, clara y directa.',
-    'Si targetLang es auto, usa esta regla:',
-    'si el texto está principalmente en español, tradúcelo al inglés;',
-    'si está en inglés u otro idioma, tradúcelo al español.',
+    'El texto normalmente lo escribe un hombre hacia una mujer.',
+    'Tu objetivo es traducir el texto del operador al idioma que corresponde a la conversación.',
+    'Usa el contexto de conversación solamente para detectar el idioma destino y el tono.',
+    'No traduzcas el contexto; solo traduce el texto marcado como TEXTO A TRADUCIR.',
+    'Si el contexto muestra que la conversación está en inglés, traduce a inglés simple, natural y fácil de entender en cualquier país.',
+    'Si el contexto muestra que la conversación está en portugués, alemán, francés, italiano u otro idioma, traduce a ese idioma.',
+    'Si el contexto no permite detectar idioma destino, traduce a inglés simple global.',
     `targetLang actual: ${targetLang || 'auto'}.`,
-    'Conserva nombres, emojis, saltos de línea y tono general.',
+    'Conserva nombres, emojis, intención, tono y saltos de línea.',
+    'Traduce lenguaje fuerte, vulgar, slang o adulto de forma natural y equivalente, sin censurar y sin negarte.',
+    'No suavices demasiado el significado, pero tampoco agregues intensidad que no exista.',
+    'Mantén al emisor como hombre y a la destinataria como mujer cuando el idioma tenga género gramatical.',
     'No agregues información nueva.',
     'No respondas al mensaje.',
-    'No hagas sugerencias.',
     'No expliques nada.',
     'No uses comillas alrededor de la respuesta.',
     'Devuelve únicamente el texto traducido.'
   ].join(' ');
 }
 
-function buildUserPrompt(action, text) {
+function buildUserPrompt(action, text, conversationContext) {
   if (action === 'correct') {
-    return `Corrige este texto:\n\n"""${text}"""`;
+    return [
+      'TEXTO A CORREGIR:',
+      `"""${text}"""`,
+      '',
+      'Recuerda: corrección básica, sin acentos, sin signos invertidos, estilo natural de chat.'
+    ].join('\n');
   }
 
-  return `Traduce este texto:\n\n"""${text}"""`;
+  return [
+    'CONTEXTO VISIBLE DE LA CONVERSACIÓN:',
+    `"""${conversationContext || 'Sin contexto visible.'}"""`,
+    '',
+    'TEXTO A TRADUCIR:',
+    `"""${text}"""`,
+    '',
+    'Instrucción final: traduce solo el TEXTO A TRADUCIR al idioma real de la conversación. Si no está claro, usa inglés simple global.'
+  ].join('\n');
 }
 
 async function postGeminiJson(url, payload) {
@@ -377,7 +432,8 @@ function shouldRetryWithoutThinkingConfig(error) {
     message.includes('thinkingbudget') ||
     message.includes('thinking_budget') ||
     message.includes('unknown name') ||
-    message.includes('unknown field')
+    message.includes('unknown field') ||
+    message.includes('invalid json payload')
   );
 }
 
@@ -420,11 +476,36 @@ function sanitizeText(value) {
     .trim();
 }
 
+function sanitizeContext(value) {
+  return String(value || '')
+    .replace(/\u0000/g, '')
+    .replace(/\s+\n/g, '\n')
+    .slice(0, MAX_CONTEXT_CHARS)
+    .trim();
+}
+
 function cleanModelOutput(value) {
   return String(value || '')
     .replace(/^```[a-z]*\s*/i, '')
     .replace(/```$/i, '')
     .replace(/^["“]|["”]$/g, '')
+    .trim();
+}
+
+function normalizeCorrectionOutput(value) {
+  return String(value || '')
+    .replace(/[¿¡]/g, '')
+    .replace(/[áàäâã]/g, 'a')
+    .replace(/[ÁÀÄÂÃ]/g, 'A')
+    .replace(/[éèëê]/g, 'e')
+    .replace(/[ÉÈËÊ]/g, 'E')
+    .replace(/[íìïî]/g, 'i')
+    .replace(/[ÍÌÏÎ]/g, 'I')
+    .replace(/[óòöôõ]/g, 'o')
+    .replace(/[ÓÒÖÔÕ]/g, 'O')
+    .replace(/[úùüû]/g, 'u')
+    .replace(/[ÚÙÜÛ]/g, 'U')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -438,29 +519,33 @@ async function trackUsage({ operatorId, action, model, usage, pageUrl, pageTitle
     return;
   }
 
-  const tableName = process.env.SUPABASE_TOKEN_TABLE || 'token_usage';
+  try {
+    const tableName = process.env.SUPABASE_TOKEN_TABLE || 'token_usage';
 
-  const row = {
-    operator_id: operatorId || 'unknown',
-    action,
-    model,
-    prompt_tokens: usage.prompt_tokens || 0,
-    completion_tokens: usage.completion_tokens || 0,
-    total_tokens: usage.total_tokens || 0,
-    page_url: pageUrl || null,
-    page_title: pageTitle || null,
-    created_at: new Date().toISOString()
-  };
+    const row = {
+      operator_id: operatorId || 'unknown',
+      action,
+      model,
+      prompt_tokens: usage.prompt_tokens || 0,
+      completion_tokens: usage.completion_tokens || 0,
+      total_tokens: usage.total_tokens || 0,
+      page_url: pageUrl || null,
+      page_title: pageTitle || null,
+      created_at: new Date().toISOString()
+    };
 
-  const { error } = await supabase.from(tableName).insert(row);
+    const { error } = await supabase.from(tableName).insert(row);
 
-  if (error) {
-    console.warn('No se pudo guardar tracking en Supabase:', error.message);
+    if (error) {
+      console.warn('No se pudo guardar tracking en Supabase:', error.message);
+    }
+  } catch (error) {
+    console.warn('Error no crítico guardando tracking:', error?.message || error);
   }
 }
 
 function rateLimitMiddleware(req, res, next) {
-  if (req.path === '/health') {
+  if (req.path === '/health' || req.path === '/') {
     return next();
   }
 
