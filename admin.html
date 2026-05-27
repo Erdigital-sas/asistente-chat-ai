@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>IA Chat Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Arial,sans-serif;background:#07111d;color:#e5eefb}
+    .wrap{max-width:1300px;margin:0 auto;padding:24px}
+    .card{background:#0f172a;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:0 14px 34px rgba(0,0,0,.25)}
+    h1,h2,h3{margin:0 0 12px}
+    p{color:#94a3b8}
+    input,textarea,select{width:100%;padding:11px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:#0b1220;color:#e5eefb;margin-bottom:8px}
+    button{border:0;border-radius:10px;padding:10px 14px;cursor:pointer;font-weight:800;color:#07111d;background:#38bdf8;margin:3px}
+    button.green{background:#22c55e}
+    button.red{background:#ef4444;color:white}
+    button.yellow{background:#f59e0b}
+    button.gray{background:#94a3b8}
+    .hidden{display:none!important}
+    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:9px;text-align:left}
+    th{color:#93c5fd}
+    .pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#111827}
+    .ok{color:#4ade80}.bad{color:#f87171}.muted{color:#94a3b8}
+    .flash{position:fixed;right:20px;bottom:20px;background:#111827;border:1px solid rgba(255,255,255,.15);padding:12px 14px;border-radius:12px;display:none}
+    .flash.show{display:block}
+    @media(max-width:900px){.grid,.grid2{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section id="login-view" class="card">
+      <h1>IA Chat · Admin</h1>
+      <p>Inicia sesión para gestionar operadores y monitorear consumo.</p>
+      <input id="adminUser" placeholder="Usuario admin" />
+      <input id="adminPass" placeholder="Clave admin" type="password" />
+      <button id="btnAdminLogin" class="green">Entrar</button>
+      <div id="loginMsg" class="muted"></div>
+    </section>
+
+    <section id="app-view" class="hidden">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+          <div>
+            <h1>Panel administrativo</h1>
+            <p id="sessionInfo">Sesión activa</p>
+          </div>
+          <div>
+            <button id="btnRefresh">Actualizar</button>
+            <button id="btnLogout" class="red">Salir</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card"><p>Requests</p><h2 id="statRequests">0</h2></div>
+        <div class="card"><p>Correcciones</p><h2 id="statCorrections">0</h2></div>
+        <div class="card"><p>Traducciones</p><h2 id="statTranslations">0</h2></div>
+        <div class="card"><p>Warnings</p><h2 id="statWarnings">0</h2></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h2>Crear operador</h2>
+          <input id="opUsername" placeholder="usuario: maria01" />
+          <input id="opDisplay" placeholder="nombre: Maria" />
+          <input id="opPassword" placeholder="clave: 2026" />
+          <button id="btnCreateOperator" class="green">Crear operador</button>
+        </div>
+
+        <div class="card">
+          <h2>Crear en masa</h2>
+          <textarea id="bulkText" placeholder="maria01, Maria&#10;juan02, Juan"></textarea>
+          <input id="bulkPassword" placeholder="clave general: 2026" />
+          <button id="btnBulk" class="yellow">Crear / actualizar lista</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Operadores</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Usuario</th>
+              <th>Nombre</th>
+              <th>Estado</th>
+              <th>Último login</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="operatorsBody"></tbody>
+        </table>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h2>Consumo por operador</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Operador</th>
+                <th>Requests</th>
+                <th>Correcciones</th>
+                <th>Traducciones</th>
+                <th>Tokens</th>
+              </tr>
+            </thead>
+            <tbody id="usageBody"></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h2>Warnings top</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Operador</th>
+                <th>Frase</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="warningsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="flash" class="flash"></div>
+  <script src="/admin.js"></script>
+</body>
+</html>
