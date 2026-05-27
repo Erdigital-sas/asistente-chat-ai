@@ -1,4 +1,4 @@
-""use strict";
+"use strict";
 
 const TOKEN_KEY = "ia_chat_admin_token_v31";
 const USER_KEY = "ia_chat_admin_user_v31";
