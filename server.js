@@ -14,10 +14,15 @@ const PORT = Number(process.env.PORT || 3000);
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
-const GEMINI_API_BASE = process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1beta";
+const GEMINI_API_BASE =
+  process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1beta";
+
 const GEMINI_THINKING_BUDGET = Number(process.env.GEMINI_THINKING_BUDGET ?? 0);
 const GEMINI_TEMPERATURE_CORRECT = Number(process.env.GEMINI_TEMPERATURE_CORRECT || 0);
 const GEMINI_TEMPERATURE_TRANSLATE = Number(process.env.GEMINI_TEMPERATURE_TRANSLATE || 0.05);
+
+const GEMINI_INPUT_COST_PER_1M = Number(process.env.GEMINI_INPUT_COST_PER_1M || 0.10);
+const GEMINI_OUTPUT_COST_PER_1M = Number(process.env.GEMINI_OUTPUT_COST_PER_1M || 0.40);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_KEY =
@@ -32,7 +37,8 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || "change_admin_secret";
 const ADMIN_TOKEN_TTL_HOURS = Number(process.env.ADMIN_TOKEN_TTL_HOURS || 12);
 
-const OPERATOR_SESSION_SECRET = process.env.OPERATOR_SESSION_SECRET || "change_operator_secret";
+const OPERATOR_SESSION_SECRET =
+  process.env.OPERATOR_SESSION_SECRET || "change_operator_secret";
 const OPERATOR_SESSION_TTL_HOURS = Number(process.env.OPERATOR_SESSION_TTL_HOURS || 12);
 const OPERATOR_SHARED_KEY = process.env.OPERATOR_SHARED_KEY || "";
 
@@ -44,9 +50,17 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 const rateBuckets = new Map();
 
-if (!GEMINI_API_KEY) console.warn("WARNING: Falta GEMINI_API_KEY.");
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) console.warn("WARNING: Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.");
-if (!ADMIN_PASSWORD) console.warn("WARNING: Falta ADMIN_PASSWORD.");
+if (!GEMINI_API_KEY) {
+  console.warn("WARNING: Falta GEMINI_API_KEY.");
+}
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.warn("WARNING: Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.");
+}
+
+if (!ADMIN_PASSWORD) {
+  console.warn("WARNING: Falta ADMIN_PASSWORD.");
+}
 
 const supabase =
   SUPABASE_URL && SUPABASE_SERVICE_KEY
@@ -57,11 +71,15 @@ app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(rateLimitMiddleware);
 
+/* =========================================================
+ * HEALTH
+ * ======================================================= */
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.0.0",
+    version: "3.1.0",
     admin: "/admin"
   });
 });
@@ -70,7 +88,7 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.0.0",
+    version: "3.1.0",
     mode: "lite",
     adminEnabled: true,
     operatorAuthEnabled: true,
@@ -84,9 +102,9 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* =========================
+/* =========================================================
  * ADMIN STATIC
- * ======================= */
+ * ======================================================= */
 
 app.get("/admin", (req, res) => {
   res.sendFile(path.join(__dirname, "admin.html"));
@@ -96,9 +114,9 @@ app.get("/admin.js", (req, res) => {
   res.sendFile(path.join(__dirname, "admin.js"));
 });
 
-/* =========================
+/* =========================================================
  * ADMIN AUTH
- * ======================= */
+ * ======================================================= */
 
 app.post("/admin-api/login", async (req, res) => {
   try {
@@ -106,11 +124,17 @@ app.post("/admin-api/login", async (req, res) => {
     const password = String(req.body?.password || "");
 
     if (!username || !password) {
-      return res.status(400).json({ ok: false, error: "Usuario y clave requeridos." });
+      return res.status(400).json({
+        ok: false,
+        error: "Usuario y clave requeridos."
+      });
     }
 
     if (username !== ADMIN_USER || password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ ok: false, error: "Credenciales invalidas." });
+      return res.status(401).json({
+        ok: false,
+        error: "Credenciales invalidas."
+      });
     }
 
     const expiresAt = Date.now() + ADMIN_TOKEN_TTL_HOURS * 60 * 60 * 1000;
@@ -131,7 +155,10 @@ app.post("/admin-api/login", async (req, res) => {
       expiresAt
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: "No se pudo iniciar sesion admin." });
+    res.status(500).json({
+      ok: false,
+      error: "No se pudo iniciar sesion admin."
+    });
   }
 });
 
@@ -142,9 +169,9 @@ app.get("/admin-api/session", requireAdmin, async (req, res) => {
   });
 });
 
-/* =========================
+/* =========================================================
  * ADMIN OPERATORS
- * ======================= */
+ * ======================================================= */
 
 app.get("/admin-api/operators", requireAdmin, async (req, res) => {
   try {
@@ -152,7 +179,9 @@ app.get("/admin-api/operators", requireAdmin, async (req, res) => {
 
     const { data, error } = await supabase
       .from("operators")
-      .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at")
+      .select(
+        "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+      )
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -171,7 +200,10 @@ app.get("/admin-api/operators", requireAdmin, async (req, res) => {
       summary
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudieron cargar operadores." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudieron cargar operadores."
+    });
   }
 });
 
@@ -180,22 +212,40 @@ app.post("/admin-api/operators", requireAdmin, async (req, res) => {
     ensureSupabase();
 
     const username = normalizeUsername(req.body?.username);
-    const displayName = String(req.body?.display_name || req.body?.displayName || username).trim();
-    const password = String(req.body?.password || req.body?.clave || OPERATOR_SHARED_KEY || "").trim();
+    const displayName = String(
+      req.body?.display_name ||
+      req.body?.displayName ||
+      username
+    ).trim();
+    const password = String(
+      req.body?.password ||
+      req.body?.clave ||
+      OPERATOR_SHARED_KEY ||
+      ""
+    ).trim();
     const status = String(req.body?.status || "active").trim();
     const role = String(req.body?.role || "operator").trim();
     const notes = String(req.body?.notes || "").trim();
 
     if (!username) {
-      return res.status(400).json({ ok: false, error: "Usuario requerido." });
+      return res.status(400).json({
+        ok: false,
+        error: "Usuario requerido."
+      });
     }
 
     if (!displayName) {
-      return res.status(400).json({ ok: false, error: "Nombre requerido." });
+      return res.status(400).json({
+        ok: false,
+        error: "Nombre requerido."
+      });
     }
 
     if (!password) {
-      return res.status(400).json({ ok: false, error: "Clave requerida." });
+      return res.status(400).json({
+        ok: false,
+        error: "Clave requerida."
+      });
     }
 
     const passwordHash = hashPassword(password);
@@ -211,7 +261,9 @@ app.post("/admin-api/operators", requireAdmin, async (req, res) => {
         notes,
         updated_at: new Date().toISOString()
       })
-      .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at")
+      .select(
+        "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+      )
       .single();
 
     if (error) throw error;
@@ -221,7 +273,10 @@ app.post("/admin-api/operators", requireAdmin, async (req, res) => {
       operator: data
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo crear operador." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo crear operador."
+    });
   }
 });
 
@@ -230,14 +285,25 @@ app.post("/admin-api/operators/bulk", requireAdmin, async (req, res) => {
     ensureSupabase();
 
     const raw = String(req.body?.text || req.body?.operators || "").trim();
-    const defaultPassword = String(req.body?.password || req.body?.clave || OPERATOR_SHARED_KEY || "").trim();
+    const defaultPassword = String(
+      req.body?.password ||
+      req.body?.clave ||
+      OPERATOR_SHARED_KEY ||
+      ""
+    ).trim();
 
     if (!raw) {
-      return res.status(400).json({ ok: false, error: "Lista vacia." });
+      return res.status(400).json({
+        ok: false,
+        error: "Lista vacia."
+      });
     }
 
     if (!defaultPassword) {
-      return res.status(400).json({ ok: false, error: "Clave general requerida." });
+      return res.status(400).json({
+        ok: false,
+        error: "Clave general requerida."
+      });
     }
 
     const passwordHash = hashPassword(defaultPassword);
@@ -247,7 +313,11 @@ app.post("/admin-api/operators/bulk", requireAdmin, async (req, res) => {
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        const parts = line.split(/[,\t;]/).map((x) => x.trim()).filter(Boolean);
+        const parts = line
+          .split(/[,\t;]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+
         const username = normalizeUsername(parts[0] || "");
         const displayName = parts[1] || parts[0] || username;
 
@@ -263,13 +333,18 @@ app.post("/admin-api/operators/bulk", requireAdmin, async (req, res) => {
       .filter((row) => row.username);
 
     if (!rows.length) {
-      return res.status(400).json({ ok: false, error: "No hay operadores validos." });
+      return res.status(400).json({
+        ok: false,
+        error: "No hay operadores validos."
+      });
     }
 
     const { data, error } = await supabase
       .from("operators")
       .upsert(rows, { onConflict: "username" })
-      .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at");
+      .select(
+        "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+      );
 
     if (error) throw error;
 
@@ -279,7 +354,10 @@ app.post("/admin-api/operators/bulk", requireAdmin, async (req, res) => {
       operators: data || []
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudieron crear operadores." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudieron crear operadores."
+    });
   }
 });
 
@@ -291,7 +369,10 @@ app.patch("/admin-api/operators/:id/status", requireAdmin, async (req, res) => {
     const status = String(req.body?.status || "").trim();
 
     if (!["active", "inactive", "blocked"].includes(status)) {
-      return res.status(400).json({ ok: false, error: "Estado invalido." });
+      return res.status(400).json({
+        ok: false,
+        error: "Estado invalido."
+      });
     }
 
     const { data, error } = await supabase
@@ -301,7 +382,9 @@ app.patch("/admin-api/operators/:id/status", requireAdmin, async (req, res) => {
         updated_at: new Date().toISOString()
       })
       .eq("id", id)
-      .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at")
+      .select(
+        "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+      )
       .single();
 
     if (error) throw error;
@@ -311,7 +394,10 @@ app.patch("/admin-api/operators/:id/status", requireAdmin, async (req, res) => {
       operator: data
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo actualizar operador." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo actualizar operador."
+    });
   }
 });
 
@@ -323,7 +409,10 @@ app.patch("/admin-api/operators/:id/password", requireAdmin, async (req, res) =>
     const password = String(req.body?.password || "").trim();
 
     if (!password) {
-      return res.status(400).json({ ok: false, error: "Clave requerida." });
+      return res.status(400).json({
+        ok: false,
+        error: "Clave requerida."
+      });
     }
 
     const { data, error } = await supabase
@@ -333,7 +422,9 @@ app.patch("/admin-api/operators/:id/password", requireAdmin, async (req, res) =>
         updated_at: new Date().toISOString()
       })
       .eq("id", id)
-      .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at")
+      .select(
+        "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+      )
       .single();
 
     if (error) throw error;
@@ -343,7 +434,10 @@ app.patch("/admin-api/operators/:id/password", requireAdmin, async (req, res) =>
       operator: data
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo cambiar clave." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo cambiar clave."
+    });
   }
 });
 
@@ -364,88 +458,155 @@ app.delete("/admin-api/operators/:id", requireAdmin, async (req, res) => {
       ok: true
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo eliminar operador." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo eliminar operador."
+    });
   }
 });
 
-/* =========================
- * ADMIN DASHBOARD
- * ======================= */
+/* =========================================================
+ * ADMIN DASHBOARD V3.1
+ * ======================================================= */
 
 app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
   try {
     ensureSupabase();
 
-    const from = String(req.query.from || firstDayOfMonth()).slice(0, 10);
-    const to = String(req.query.to || today()).slice(0, 10);
-    const startIso = `${from}T00:00:00.000Z`;
-    const endIso = `${addDays(to, 1)}T00:00:00.000Z`;
+    const range = buildDateRange(req.query.from, req.query.to);
 
-    const { data: usageRows, error: usageError } = await supabase
-      .from(SUPABASE_TOKEN_TABLE)
-      .select("*")
-      .gte("created_at", startIso)
-      .lt("created_at", endIso)
-      .order("created_at", { ascending: false })
-      .limit(5000);
+    const [{ data: usageRows, error: usageError }, operatorsResult, warningsResult] =
+      await Promise.all([
+        supabase
+          .from(SUPABASE_TOKEN_TABLE)
+          .select("*")
+          .gte("created_at", range.startIso)
+          .lt("created_at", range.endExclusiveIso)
+          .order("created_at", { ascending: false })
+          .limit(10000),
+
+        supabase
+          .from("operators")
+          .select("id, username, display_name, status, role, last_login_at"),
+
+        supabase
+          .from("warning_events")
+          .select("*")
+          .gte("created_at", range.startIso)
+          .lt("created_at", range.endExclusiveIso)
+          .order("created_at", { ascending: false })
+          .limit(10000)
+      ]);
 
     if (usageError) throw usageError;
 
-    const { data: warningRows, error: warningError } = await supabase
-      .from("warning_events")
-      .select("*")
-      .gte("created_at", startIso)
-      .lt("created_at", endIso)
-      .order("created_at", { ascending: false })
-      .limit(5000);
+    const operators = operatorsResult?.data || [];
+    const operatorMap = new Map();
 
-    if (warningError && !String(warningError.message || "").includes("does not exist")) {
-      throw warningError;
+    for (const operator of operators) {
+      operatorMap.set(String(operator.id), operator);
+      operatorMap.set(String(operator.username), operator);
+    }
+
+    let warningRows = [];
+
+    if (!warningsResult?.error) {
+      warningRows = warningsResult?.data || [];
+    } else if (!String(warningsResult.error.message || "").includes("does not exist")) {
+      throw warningsResult.error;
     }
 
     const rows = usageRows || [];
-    const warnings = warningRows || [];
 
     const summary = {
       requests_total: rows.length,
       correction_total: rows.filter((x) => x.action === "correct").length,
       translation_total: rows.filter((x) => x.action === "translate").length,
+      prompt_tokens: rows.reduce((sum, x) => sum + Number(x.prompt_tokens || 0), 0),
+      completion_tokens: rows.reduce((sum, x) => sum + Number(x.completion_tokens || 0), 0),
       total_tokens: rows.reduce((sum, x) => sum + Number(x.total_tokens || 0), 0),
-      warnings_total: warnings.length
+      estimated_cost_usd: 0,
+      warnings_total: warningRows.length
     };
 
-    const operatorMap = new Map();
+    summary.estimated_cost_usd = estimateGeminiCost(
+      summary.prompt_tokens,
+      summary.completion_tokens
+    );
+
+    const operatorStatsMap = new Map();
 
     for (const row of rows) {
-      const key = row.operator_id || "unknown";
+      const rawOperatorId = String(row.operator_id || "unknown");
+      const operator = operatorMap.get(rawOperatorId);
 
-      if (!operatorMap.has(key)) {
-        operatorMap.set(key, {
+      const key = operator ? String(operator.id) : rawOperatorId;
+      const label = operator
+        ? operator.display_name || operator.username
+        : getLegacyOperatorLabel(rawOperatorId);
+
+      const username = operator ? operator.username : rawOperatorId;
+
+      if (!operatorStatsMap.has(key)) {
+        operatorStatsMap.set(key, {
           operator_id: key,
+          operator_label: label,
+          operator_username: username,
+          display_name: operator?.display_name || label,
+          username: operator?.username || username,
+          is_legacy: !operator,
           requests: 0,
           corrections: 0,
           translations: 0,
-          total_tokens: 0
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0
         });
       }
 
-      const item = operatorMap.get(key);
+      const item = operatorStatsMap.get(key);
+
       item.requests += 1;
+      item.prompt_tokens += Number(row.prompt_tokens || 0);
+      item.completion_tokens += Number(row.completion_tokens || 0);
       item.total_tokens += Number(row.total_tokens || 0);
 
       if (row.action === "correct") item.corrections += 1;
       if (row.action === "translate") item.translations += 1;
     }
 
+    for (const item of operatorStatsMap.values()) {
+      item.estimated_cost_usd = estimateGeminiCost(
+        item.prompt_tokens,
+        item.completion_tokens
+      );
+    }
+
     const warningMap = new Map();
 
-    for (const row of warnings) {
-      const key = `${row.operator_username || "unknown"}|${row.phrase || row.warning_type || "warning"}`;
+    for (const row of warningRows) {
+      const operator =
+        row.operator_id && operatorMap.get(String(row.operator_id))
+          ? operatorMap.get(String(row.operator_id))
+          : row.operator_username && operatorMap.get(String(row.operator_username))
+            ? operatorMap.get(String(row.operator_username))
+            : null;
+
+      const operatorLabel = operator
+        ? operator.display_name || operator.username
+        : row.operator_username || "Legacy / sin operador";
+
+      const phrase = row.phrase || row.warning_type || "warning";
+      const key = `${operatorLabel}|${phrase}`;
 
       if (!warningMap.has(key)) {
         warningMap.set(key, {
-          operator_username: row.operator_username || "unknown",
-          phrase: row.phrase || row.warning_type || "warning",
+          operator_id: operator?.id || row.operator_id || null,
+          operator_label: operatorLabel,
+          operator_username: operator?.username || row.operator_username || "legacy",
+          phrase,
+          warning_type: row.warning_type || "warning",
           total: 0
         });
       }
@@ -453,26 +614,82 @@ app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
       warningMap.get(key).total += 1;
     }
 
+    const dailyMap = new Map();
+
+    for (const row of rows) {
+      const day = String(row.created_at || "").slice(0, 10);
+
+      if (!day) continue;
+
+      if (!dailyMap.has(day)) {
+        dailyMap.set(day, {
+          day,
+          requests: 0,
+          corrections: 0,
+          translations: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0
+        });
+      }
+
+      const item = dailyMap.get(day);
+
+      item.requests += 1;
+      item.prompt_tokens += Number(row.prompt_tokens || 0);
+      item.completion_tokens += Number(row.completion_tokens || 0);
+      item.total_tokens += Number(row.total_tokens || 0);
+
+      if (row.action === "correct") item.corrections += 1;
+      if (row.action === "translate") item.translations += 1;
+    }
+
+    for (const item of dailyMap.values()) {
+      item.estimated_cost_usd = estimateGeminiCost(
+        item.prompt_tokens,
+        item.completion_tokens
+      );
+    }
+
     res.json({
       ok: true,
       generated_at: new Date().toISOString(),
-      range: { from, to },
+      range: {
+        from: range.from,
+        to: range.to
+      },
       summary,
-      operator_stats: Array.from(operatorMap.values()).sort((a, b) => b.total_tokens - a.total_tokens),
-      warning_top: Array.from(warningMap.values()).sort((a, b) => b.total - a.total).slice(0, 30),
+      operators,
+      operator_stats: Array.from(operatorStatsMap.values()).sort(
+        (a, b) => b.total_tokens - a.total_tokens
+      ),
+      warning_top: Array.from(warningMap.values())
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 50),
+      daily_series: Array.from(dailyMap.values()).sort((a, b) =>
+        a.day.localeCompare(b.day)
+      ),
       pricing: {
-        gemini_input_per_1m: 0.10,
-        gemini_output_per_1m: 0.40
+        provider: "gemini",
+        model: GEMINI_MODEL,
+        input_per_1m: GEMINI_INPUT_COST_PER_1M,
+        output_per_1m: GEMINI_OUTPUT_COST_PER_1M
       }
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo cargar dashboard." });
+    console.error("Error /admin-api/dashboard:", error);
+
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo cargar dashboard."
+    });
   }
 });
 
-/* =========================
+/* =========================================================
  * OPERATOR AUTH
- * ======================= */
+ * ======================================================= */
 
 app.post("/auth/operator-login", async (req, res) => {
   try {
@@ -482,7 +699,10 @@ app.post("/auth/operator-login", async (req, res) => {
     const password = String(req.body?.password || req.body?.clave || "").trim();
 
     if (!username || !password) {
-      return res.status(400).json({ ok: false, error: "Usuario y clave requeridos." });
+      return res.status(400).json({
+        ok: false,
+        error: "Usuario y clave requeridos."
+      });
     }
 
     const { data: operator, error } = await supabase
@@ -494,27 +714,37 @@ app.post("/auth/operator-login", async (req, res) => {
     if (error) throw error;
 
     if (!operator) {
-      return res.status(401).json({ ok: false, error: "Operador no existe." });
+      return res.status(401).json({
+        ok: false,
+        error: "Operador no existe."
+      });
     }
 
     if (operator.status !== "active") {
-      return res.status(403).json({ ok: false, error: "Operador inactivo o bloqueado." });
+      return res.status(403).json({
+        ok: false,
+        error: "Operador inactivo o bloqueado."
+      });
     }
 
-    const validPassword =
-      operator.password_hash
-        ? verifyPassword(password, operator.password_hash)
-        : operator.shared_key
-          ? safeCompare(password, operator.shared_key)
-          : OPERATOR_SHARED_KEY
-            ? safeCompare(password, OPERATOR_SHARED_KEY)
-            : false;
+    const validPassword = operator.password_hash
+      ? verifyPassword(password, operator.password_hash)
+      : operator.shared_key
+        ? safeCompare(password, operator.shared_key)
+        : OPERATOR_SHARED_KEY
+          ? safeCompare(password, OPERATOR_SHARED_KEY)
+          : false;
 
     if (!validPassword) {
-      return res.status(401).json({ ok: false, error: "Clave invalida." });
+      return res.status(401).json({
+        ok: false,
+        error: "Clave invalida."
+      });
     }
 
-    const expiresAt = new Date(Date.now() + OPERATOR_SESSION_TTL_HOURS * 60 * 60 * 1000);
+    const expiresAt = new Date(
+      Date.now() + OPERATOR_SESSION_TTL_HOURS * 60 * 60 * 1000
+    );
     const rawToken = crypto.randomBytes(32).toString("hex");
     const tokenHash = hashToken(rawToken);
 
@@ -532,7 +762,10 @@ app.post("/auth/operator-login", async (req, res) => {
 
     await supabase
       .from("operators")
-      .update({ last_login_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({
+        last_login_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
       .eq("id", operator.id);
 
     const signedToken = signToken(
@@ -553,7 +786,10 @@ app.post("/auth/operator-login", async (req, res) => {
       expiresAt: expiresAt.toISOString()
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message || "No se pudo iniciar sesion." });
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo iniciar sesion."
+    });
   }
 });
 
@@ -579,20 +815,26 @@ app.post("/auth/operator-logout", requireOperator, async (req, res) => {
   }
 });
 
-/* =========================
- * GEMINI TEXT ACTIONS
- * ======================= */
+/* =========================================================
+ * TEXT ACTIONS GEMINI
+ * ======================================================= */
 
 app.post("/corregir", requireOptionalOperator, async (req, res) => {
   try {
     if (!GEMINI_API_KEY) {
-      return res.status(503).json({ ok: false, error: "GEMINI_API_KEY no configurada." });
+      return res.status(503).json({
+        ok: false,
+        error: "GEMINI_API_KEY no configurada."
+      });
     }
 
     const text = sanitizeText(req.body?.text);
 
     if (!text) {
-      return res.status(400).json({ ok: false, error: "Texto vacio." });
+      return res.status(400).json({
+        ok: false,
+        error: "Texto vacio."
+      });
     }
 
     const result = await processWithGemini({
@@ -615,20 +857,30 @@ app.post("/corregir", requireOptionalOperator, async (req, res) => {
     });
   } catch (error) {
     console.error("Error /corregir:", error);
-    res.status(500).json({ ok: false, error: "No se pudo corregir el texto." });
+
+    res.status(500).json({
+      ok: false,
+      error: "No se pudo corregir el texto."
+    });
   }
 });
 
 app.post("/traducir", requireOptionalOperator, async (req, res) => {
   try {
     if (!GEMINI_API_KEY) {
-      return res.status(503).json({ ok: false, error: "GEMINI_API_KEY no configurada." });
+      return res.status(503).json({
+        ok: false,
+        error: "GEMINI_API_KEY no configurada."
+      });
     }
 
     const text = sanitizeText(req.body?.text);
 
     if (!text) {
-      return res.status(400).json({ ok: false, error: "Texto vacio." });
+      return res.status(400).json({
+        ok: false,
+        error: "Texto vacio."
+      });
     }
 
     const result = await processWithGemini({
@@ -654,9 +906,17 @@ app.post("/traducir", requireOptionalOperator, async (req, res) => {
     });
   } catch (error) {
     console.error("Error /traducir:", error);
-    res.status(500).json({ ok: false, error: "No se pudo traducir el texto." });
+
+    res.status(500).json({
+      ok: false,
+      error: "No se pudo traducir el texto."
+    });
   }
 });
+
+/* =========================================================
+ * WARNINGS
+ * ======================================================= */
 
 app.post("/warnings", requireOptionalOperator, async (req, res) => {
   try {
@@ -669,29 +929,46 @@ app.post("/warnings", requireOptionalOperator, async (req, res) => {
     const operator = req.operator || null;
 
     if (!warnings.length) {
-      return res.json({ ok: true, inserted: 0 });
+      return res.json({
+        ok: true,
+        inserted: 0
+      });
     }
 
-    const rows = warnings.slice(0, 20).map((item) => ({
+    const rows = warnings.slice(0, 50).map((item) => ({
       operator_id: operator?.id || null,
       operator_username: operator?.username || req.body?.operatorUsername || null,
       month_key: monthKey,
       warning_type: String(item.type || item.warning_type || "warning").slice(0, 80),
       phrase: item.phrase ? String(item.phrase).slice(0, 160) : null,
-      message_preview: item.message_preview ? String(item.message_preview).slice(0, 300) : null,
+      message_preview: item.message_preview
+        ? String(item.message_preview).slice(0, 300)
+        : null,
       page_url: pageUrl,
       page_title: pageTitle
     }));
 
-    const { error } = await supabase.from("warning_events").insert(rows);
+    const { error } = await supabase
+      .from("warning_events")
+      .insert(rows);
 
     if (error) throw error;
 
-    res.json({ ok: true, inserted: rows.length });
+    res.json({
+      ok: true,
+      inserted: rows.length
+    });
   } catch (error) {
-    res.status(500).json({ ok: false, error: "No se pudieron guardar warnings." });
+    res.status(500).json({
+      ok: false,
+      error: "No se pudieron guardar warnings."
+    });
   }
 });
+
+/* =========================================================
+ * DISABLED SUGGESTIONS
+ * ======================================================= */
 
 app.post("/sugerencias", (req, res) => {
   res.status(410).json({
@@ -708,18 +985,21 @@ app.post("/suggestions", (req, res) => {
 });
 
 app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "Endpoint no encontrado." });
+  res.status(404).json({
+    ok: false,
+    error: "Endpoint no encontrado."
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`IA Chat v3.0 activo en puerto ${PORT}`);
-  console.log(`Admin: /admin`);
+  console.log(`IA Chat v3.1 activo en puerto ${PORT}`);
+  console.log("Admin: /admin");
   console.log(`Gemini model: ${GEMINI_MODEL}`);
 });
 
-/* =========================
+/* =========================================================
  * GEMINI
- * ======================= */
+ * ======================================================= */
 
 async function processWithGemini({
   action,
@@ -751,7 +1031,9 @@ async function processWithGemini({
 
   const maxOutputTokens = calculateMaxOutputTokens(text);
 
-  const url = `${normalizeBaseUrl(GEMINI_API_BASE)}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+  const url = `${normalizeBaseUrl(GEMINI_API_BASE)}/models/${encodeURIComponent(
+    GEMINI_MODEL
+  )}:generateContent`;
 
   const payload = {
     systemInstruction: {
@@ -764,7 +1046,10 @@ async function processWithGemini({
       }
     ],
     generationConfig: {
-      temperature: action === "correct" ? GEMINI_TEMPERATURE_CORRECT : GEMINI_TEMPERATURE_TRANSLATE,
+      temperature:
+        action === "correct"
+          ? GEMINI_TEMPERATURE_CORRECT
+          : GEMINI_TEMPERATURE_TRANSLATE,
       topP: 0.9,
       maxOutputTokens,
       responseMimeType: "text/plain",
@@ -849,7 +1134,13 @@ function buildSystemPrompt(action, detectedTargetLanguage) {
   ].join(" ");
 }
 
-function buildUserPrompt({ action, text, conversationContext, lastConversationMessage, detectedTargetLanguage }) {
+function buildUserPrompt({
+  action,
+  text,
+  conversationContext,
+  lastConversationMessage,
+  detectedTargetLanguage
+}) {
   if (action === "correct") {
     return [
       "TEXTO A CORREGIR:",
@@ -911,8 +1202,13 @@ async function postGeminiJson(url, payload) {
 
 function extractGeminiText(json) {
   const parts = json?.candidates?.[0]?.content?.parts;
+
   if (!Array.isArray(parts)) return "";
-  return parts.map((part) => part?.text || "").join("").trim();
+
+  return parts
+    .map((part) => part?.text || "")
+    .join("")
+    .trim();
 }
 
 function normalizeGeminiUsage(usageMetadata) {
@@ -921,7 +1217,9 @@ function normalizeGeminiUsage(usageMetadata) {
   const promptTokens = usageMetadata.promptTokenCount || 0;
   const completionTokens = usageMetadata.candidatesTokenCount || 0;
   const thoughtsTokens = usageMetadata.thoughtsTokenCount || 0;
-  const totalTokens = usageMetadata.totalTokenCount || promptTokens + completionTokens + thoughtsTokens;
+  const totalTokens =
+    usageMetadata.totalTokenCount ||
+    promptTokens + completionTokens + thoughtsTokens;
 
   return {
     prompt_tokens: promptTokens,
@@ -931,9 +1229,9 @@ function normalizeGeminiUsage(usageMetadata) {
   };
 }
 
-/* =========================
- * TOKEN / AUTH HELPERS
- * ======================= */
+/* =========================================================
+ * AUTH HELPERS
+ * ======================================================= */
 
 function signToken(payload, secret) {
   const header = base64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
@@ -948,6 +1246,7 @@ function signToken(payload, secret) {
 
 function verifyToken(token, secret) {
   const parts = String(token || "").split(".");
+
   if (parts.length !== 3) return null;
 
   const [header, body, signature] = parts;
@@ -973,7 +1272,10 @@ function requireAdmin(req, res, next) {
   const payload = verifyToken(token, ADMIN_TOKEN_SECRET);
 
   if (!payload || payload.type !== "admin") {
-    return res.status(401).json({ ok: false, error: "No autorizado." });
+    return res.status(401).json({
+      ok: false,
+      error: "No autorizado."
+    });
   }
 
   req.admin = payload;
@@ -985,15 +1287,21 @@ async function requireOperator(req, res, next) {
     const operator = await getOperatorFromRequest(req);
 
     if (!operator) {
-      return res.status(401).json({ ok: false, error: "Operador no autorizado." });
+      return res.status(401).json({
+        ok: false,
+        error: "Operador no autorizado."
+      });
     }
 
     req.operator = operator.operator;
     req.sessionTokenHash = operator.sessionTokenHash;
 
     next();
-  } catch (error) {
-    res.status(401).json({ ok: false, error: "Sesion invalida." });
+  } catch (_error) {
+    res.status(401).json({
+      ok: false,
+      error: "Sesion invalida."
+    });
   }
 }
 
@@ -1039,7 +1347,9 @@ async function getOperatorFromRequest(req) {
 
   const { data: operator, error: operatorError } = await supabase
     .from("operators")
-    .select("id, username, display_name, status, role, notes, created_at, updated_at, last_login_at")
+    .select(
+      "id, username, display_name, status, role, notes, created_at, updated_at, last_login_at"
+    )
     .eq("id", session.operator_id)
     .maybeSingle();
 
@@ -1052,9 +1362,9 @@ async function getOperatorFromRequest(req) {
   };
 }
 
-/* =========================
+/* =========================================================
  * GENERAL HELPERS
- * ======================= */
+ * ======================================================= */
 
 function ensureSupabase() {
   if (!supabase) throw new Error("Supabase no configurado.");
@@ -1082,23 +1392,32 @@ function normalizeUsername(value) {
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
+  const hash = crypto
+    .pbkdf2Sync(String(password), salt, 120000, 32, "sha256")
+    .toString("hex");
+
   return `pbkdf2:${salt}:${hash}`;
 }
 
 function verifyPassword(password, stored) {
   const parts = String(stored || "").split(":");
+
   if (parts.length !== 3 || parts[0] !== "pbkdf2") return false;
 
   const salt = parts[1];
   const oldHash = parts[2];
-  const newHash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
+  const newHash = crypto
+    .pbkdf2Sync(String(password), salt, 120000, 32, "sha256")
+    .toString("hex");
 
   return safeCompare(oldHash, newHash);
 }
 
 function hashToken(value) {
-  return crypto.createHmac("sha256", OPERATOR_SESSION_SECRET).update(String(value)).digest("hex");
+  return crypto
+    .createHmac("sha256", OPERATOR_SESSION_SECRET)
+    .update(String(value))
+    .digest("hex");
 }
 
 function safeCompare(a, b) {
@@ -1119,11 +1438,17 @@ function base64Url(value) {
 }
 
 function sanitizeText(value) {
-  return String(value || "").replace(/\u0000/g, "").slice(0, MAX_TEXT_CHARS).trim();
+  return String(value || "")
+    .replace(/\u0000/g, "")
+    .slice(0, MAX_TEXT_CHARS)
+    .trim();
 }
 
 function sanitizeContext(value) {
-  return String(value || "").replace(/\u0000/g, "").slice(0, MAX_CONTEXT_CHARS).trim();
+  return String(value || "")
+    .replace(/\u0000/g, "")
+    .slice(0, MAX_CONTEXT_CHARS)
+    .trim();
 }
 
 function cleanModelOutput(value) {
@@ -1176,15 +1501,23 @@ async function trackUsage({ operatorId, action, model, usage, pageUrl, pageTitle
       created_at: new Date().toISOString()
     };
 
-    const { error } = await supabase.from(SUPABASE_TOKEN_TABLE).insert(row);
+    const { error } = await supabase
+      .from(SUPABASE_TOKEN_TABLE)
+      .insert(row);
+
     if (error) console.warn("No se pudo guardar token_usage:", error.message);
   } catch (error) {
     console.warn("Tracking no critico:", error.message);
   }
 }
 
-function detectTargetLanguage({ explicitTargetLang, lastConversationMessage, conversationContext }) {
+function detectTargetLanguage({
+  explicitTargetLang,
+  lastConversationMessage,
+  conversationContext
+}) {
   const explicit = String(explicitTargetLang || "").trim();
+
   if (explicit && explicit.toLowerCase() !== "auto") return explicit;
 
   const fromLast = detectLikelyLanguage(lastConversationMessage);
@@ -1198,6 +1531,7 @@ function detectTargetLanguage({ explicitTargetLang, lastConversationMessage, con
 
 function detectLikelyLanguage(value) {
   const text = normalizeProbe(value);
+
   const scores = {
     English: 0,
     Spanish: 0,
@@ -1207,18 +1541,103 @@ function detectLikelyLanguage(value) {
     Italian: 0
   };
 
-  scoreMarkers(scores, "Portuguese", text, ["voce", "você", "nao", "não", "acho", "ela", "uma", "muito", "obrigada", "adoraria", "incrivel", "tambem", "porque", "boa noite"]);
-  scoreMarkers(scores, "English", text, ["the", "you", "your", "are", "thank", "should", "have", "want", "why", "what", "where", "when", "how", "love", "because"]);
-  scoreMarkers(scores, "German", text, ["ich", "du", "nicht", "danke", "bitte", "wie", "was", "warum", "liebe", "schön", "und"]);
-  scoreMarkers(scores, "French", text, ["je", "tu", "vous", "pas", "suis", "avec", "merci", "pourquoi", "comment", "amour", "bonjour"]);
-  scoreMarkers(scores, "Italian", text, ["io", "tu", "non", "come", "cosa", "grazie", "amore", "molto", "perche", "vorrei"]);
-  scoreMarkers(scores, "Spanish", text, ["que", "como", "estas", "quiero", "gracias", "porque", "amor", "me gustaria", "buenas noches"]);
+  scoreMarkers(scores, "Portuguese", text, [
+    "voce",
+    "você",
+    "nao",
+    "não",
+    "acho",
+    "ela",
+    "uma",
+    "muito",
+    "obrigada",
+    "adoraria",
+    "incrivel",
+    "tambem",
+    "porque",
+    "boa noite"
+  ]);
+
+  scoreMarkers(scores, "English", text, [
+    "the",
+    "you",
+    "your",
+    "are",
+    "thank",
+    "should",
+    "have",
+    "want",
+    "why",
+    "what",
+    "where",
+    "when",
+    "how",
+    "love",
+    "because"
+  ]);
+
+  scoreMarkers(scores, "German", text, [
+    "ich",
+    "du",
+    "nicht",
+    "danke",
+    "bitte",
+    "wie",
+    "was",
+    "warum",
+    "liebe",
+    "schön",
+    "und"
+  ]);
+
+  scoreMarkers(scores, "French", text, [
+    "je",
+    "tu",
+    "vous",
+    "pas",
+    "suis",
+    "avec",
+    "merci",
+    "pourquoi",
+    "comment",
+    "amour",
+    "bonjour"
+  ]);
+
+  scoreMarkers(scores, "Italian", text, [
+    "io",
+    "tu",
+    "non",
+    "come",
+    "cosa",
+    "grazie",
+    "amore",
+    "molto",
+    "perche",
+    "vorrei"
+  ]);
+
+  scoreMarkers(scores, "Spanish", text, [
+    "que",
+    "como",
+    "estas",
+    "quiero",
+    "gracias",
+    "porque",
+    "amor",
+    "me gustaria",
+    "buenas noches"
+  ]);
 
   if (/[ãõç]/i.test(value)) scores.Portuguese += 3;
   if (/[äöüß]/i.test(value)) scores.German += 3;
 
   const sorted = Object.entries(scores).sort((a, b) => b[1] - a[1]);
-  return { language: sorted[0][0], confidence: sorted[0][1] };
+
+  return {
+    language: sorted[0][0],
+    confidence: sorted[0][1]
+  };
 }
 
 function normalizeProbe(value) {
@@ -1232,14 +1651,58 @@ function normalizeProbe(value) {
 function scoreMarkers(scores, language, text, markers) {
   for (const marker of markers) {
     const m = normalizeProbe(marker);
+
     if (!m) continue;
+
     const re = new RegExp(`(^|\\s)${escapeRegExp(m)}(\\s|$)`, "i");
+
     if (re.test(text)) scores[language] += m.includes(" ") ? 2 : 1;
   }
 }
 
 function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function estimateGeminiCost(promptTokens, completionTokens) {
+  const inputCost = (Number(promptTokens || 0) / 1_000_000) * GEMINI_INPUT_COST_PER_1M;
+  const outputCost =
+    (Number(completionTokens || 0) / 1_000_000) * GEMINI_OUTPUT_COST_PER_1M;
+
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
+function getLegacyOperatorLabel(value) {
+  const raw = String(value || "").trim();
+
+  if (!raw || raw === "unknown") return "Legacy / sin operador";
+  if (raw === "test_operator") return "Legacy / test_operator";
+  if (raw.startsWith("op_")) return "Legacy / sesión vieja";
+
+  return raw;
+}
+
+function buildDateRange(fromRaw, toRaw) {
+  const todayIso = today();
+  let from = isIsoDate(fromRaw) ? String(fromRaw).slice(0, 10) : firstDayOfMonth();
+  let to = isIsoDate(toRaw) ? String(toRaw).slice(0, 10) : todayIso;
+
+  if (from > to) {
+    const tmp = from;
+    from = to;
+    to = tmp;
+  }
+
+  return {
+    from,
+    to,
+    startIso: `${from}T00:00:00.000Z`,
+    endExclusiveIso: `${addDays(to, 1)}T00:00:00.000Z`
+  };
+}
+
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
 
 function today() {
@@ -1282,7 +1745,10 @@ function rateLimitMiddleware(req, res, next) {
   rateBuckets.set(key, bucket);
 
   if (bucket.count > RATE_LIMIT_MAX_REQUESTS) {
-    return res.status(429).json({ ok: false, error: "Demasiadas solicitudes." });
+    return res.status(429).json({
+      ok: false,
+      error: "Demasiadas solicitudes."
+    });
   }
 
   next();
