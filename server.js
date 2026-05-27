@@ -73,7 +73,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.2.0",
+    version: "3.3.0",
     admin: "/admin"
   });
 });
@@ -82,7 +82,7 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.2.0",
+    version: "3.3.0",
     mode: "lite",
     adminEnabled: true,
     operatorAuthEnabled: true,
@@ -92,6 +92,7 @@ app.get("/health", (req, res) => {
     translationProvider: GEMINI_API_KEY ? "gemini" : "not_configured",
     translationModel: GEMINI_MODEL,
     warningsProvider: "local-extension-and-supabase",
+    operatorWarningsSummaryEnabled: true,
     suggestionsEnabled: false
   });
 });
@@ -458,7 +459,7 @@ app.delete("/admin-api/operators/:id", requireAdmin, async (req, res) => {
 });
 
 /* =========================================================
- * ADMIN DASHBOARD V3.2
+ * ADMIN DASHBOARD V3.3
  * ======================================================= */
 
 app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
@@ -673,6 +674,89 @@ app.post("/auth/operator-logout", requireOperator, async (req, res) => {
 });
 
 /* =========================================================
+ * OPERATOR WARNINGS SUMMARY
+ * ======================================================= */
+
+app.get("/operator/warnings-summary", requireOperator, async (req, res) => {
+  try {
+    ensureSupabase();
+
+    const operator = req.operator;
+    const todayRange = buildDateRange(today(), today());
+    const weekStart = addDays(today(), -6);
+    const weekRange = buildDateRange(weekStart, today());
+    const monthRange = buildDateRange(firstDayOfMonth(), today());
+
+    const [todayResult, weekResult, monthResult] = await Promise.all([
+      fetchWarningsForOperator(operator.id, todayRange),
+      fetchWarningsForOperator(operator.id, weekRange),
+      fetchWarningsForOperator(operator.id, monthRange)
+    ]);
+
+    res.json({
+      ok: true,
+      operator,
+      today: summarizeWarnings(todayResult),
+      week: summarizeWarnings(weekResult),
+      month: summarizeWarnings(monthResult),
+      ranges: {
+        today: {
+          from: todayRange.from,
+          to: todayRange.to
+        },
+        week: {
+          from: weekRange.from,
+          to: weekRange.to
+        },
+        month: {
+          from: monthRange.from,
+          to: monthRange.to
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message || "No se pudo obtener resumen de warnings."
+    });
+  }
+});
+
+async function fetchWarningsForOperator(operatorId, range) {
+  const { data, error } = await supabase
+    .from("warning_events")
+    .select("*")
+    .eq("operator_id", operatorId)
+    .gte("created_at", range.startIso)
+    .lt("created_at", range.endExclusiveIso)
+    .order("created_at", { ascending: false })
+    .limit(5000);
+
+  if (error) throw error;
+
+  return data || [];
+}
+
+function summarizeWarnings(rows) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const phrase = row.phrase || row.warning_type || "warning";
+
+    if (!map.has(phrase)) {
+      map.set(phrase, {
+        phrase,
+        total: 0
+      });
+    }
+
+    map.get(phrase).total += 1;
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.total - a.total);
+}
+
+/* =========================================================
  * TEXT ACTIONS GEMINI
  * ======================================================= */
 
@@ -849,7 +933,7 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`IA Chat v3.2 activo en puerto ${PORT}`);
+  console.log(`IA Chat v3.3 activo en puerto ${PORT}`);
   console.log("Admin: /admin");
   console.log(`Gemini model: ${GEMINI_MODEL}`);
 });
