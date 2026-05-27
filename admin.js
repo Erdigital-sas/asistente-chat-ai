@@ -1,7 +1,7 @@
 "use strict";
 
-const TOKEN_KEY = "ia_chat_admin_token_v32";
-const USER_KEY = "ia_chat_admin_user_v32";
+const TOKEN_KEY = "ia_chat_admin_token_v33";
+const USER_KEY = "ia_chat_admin_user_v33";
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
@@ -79,14 +79,12 @@ function getTodayLocal() {
 
 function getFirstDayOfMonthLocal() {
   const now = new Date();
-
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
 function getStartOfLastNDays(days = 7) {
   const date = new Date();
   date.setDate(date.getDate() - (days - 1));
-
   return formatDateInputLocal(date);
 }
 
@@ -195,7 +193,6 @@ function logout() {
   state.operators = [];
   state.dashboard = null;
   state.operatorFilter = "all";
-
   setView(false);
 }
 
@@ -223,14 +220,11 @@ async function checkSession() {
 function initializeDefaultDates() {
   if (!$("dateFrom") || !$("dateTo")) return;
 
-  const currentFrom = $("dateFrom").value;
-  const currentTo = $("dateTo").value;
-
-  if (!currentFrom) {
+  if (!$("dateFrom").value) {
     $("dateFrom").value = getFirstDayOfMonthLocal();
   }
 
-  if (!currentTo) {
+  if (!$("dateTo").value) {
     $("dateTo").value = getTodayLocal();
   }
 
@@ -387,6 +381,16 @@ async function loadDashboard() {
   renderDashboard(data);
 }
 
+function findOperatorByFilter(value) {
+  return (state.operators || []).find((operator) => {
+    return (
+      String(operator.id) === String(value) ||
+      String(operator.username) === String(value) ||
+      String(operator.display_name) === String(value)
+    );
+  });
+}
+
 function getFilteredOperatorStats(items = []) {
   if (state.operatorFilter === "all") return items;
 
@@ -427,13 +431,27 @@ function getFilteredWarnings(items = []) {
   });
 }
 
-function findOperatorByFilter(value) {
-  return (state.operators || []).find((operator) => {
-    return (
-      String(operator.id) === String(value) ||
-      String(operator.username) === String(value) ||
-      String(operator.display_name) === String(value)
-    );
+function getFilteredDailyOperatorSeries(items = []) {
+  if (state.operatorFilter === "all") return items;
+
+  const selectedOperator = findOperatorByFilter(state.operatorFilter);
+
+  return items.filter((item) => {
+    const operatorId = String(item.operator_id || "");
+    const username = String(item.operator_username || "");
+    const label = String(item.operator_label || "");
+
+    if (operatorId === state.operatorFilter) return true;
+    if (username === state.operatorFilter) return true;
+    if (label === state.operatorFilter) return true;
+
+    if (selectedOperator) {
+      if (operatorId === selectedOperator.id) return true;
+      if (username === selectedOperator.username) return true;
+      if (label === selectedOperator.display_name) return true;
+    }
+
+    return false;
   });
 }
 
@@ -521,8 +539,11 @@ function renderOperators(summary = {}) {
 function renderDashboard(data) {
   const baseSummary = data.summary || {};
   const range = data.range || {};
+
   const filteredStats = getFilteredOperatorStats(data.operator_stats || []);
   const filteredWarnings = getFilteredWarnings(data.warning_top || []);
+  const filteredDaily = getFilteredDailyOperatorSeries(data.daily_operator_series || []);
+
   const summary = buildFilteredSummary(baseSummary, filteredStats, filteredWarnings);
 
   $("rangeInfo").textContent = `Rango actual: ${range.from || "-"} → ${range.to || "-"} · Operador: ${getCurrentOperatorFilterLabel()}`;
@@ -543,7 +564,7 @@ function renderDashboard(data) {
 
   renderUsageTable(filteredStats);
   renderWarningsTable(filteredWarnings);
-  renderDailyTable(data.daily_series || []);
+  renderDailyTable(state.operatorFilter === "all" ? data.daily_series || [] : filteredDaily);
 }
 
 function getCurrentOperatorFilterLabel() {
@@ -641,17 +662,6 @@ function renderDailyTable(items = []) {
 
   if (!body) return;
 
-  if (state.operatorFilter !== "all") {
-    body.innerHTML = `
-      <tr>
-        <td colspan="6" class="muted">
-          Vista diaria filtrada por operador pendiente de backend. Arriba ya tienes totales del operador seleccionado.
-        </td>
-      </tr>
-    `;
-    return;
-  }
-
   if (!items.length) {
     body.innerHTML = `
       <tr>
@@ -664,9 +674,17 @@ function renderDailyTable(items = []) {
   }
 
   body.innerHTML = items.map((item) => {
+    const operatorLabel =
+      state.operatorFilter === "all"
+        ? ""
+        : `<div class="muted">${escapeHtml(item.operator_label || item.operator_username || "")}</div>`;
+
     return `
       <tr>
-        <td>${escapeHtml(item.day || "-")}</td>
+        <td>
+          ${escapeHtml(item.day || "-")}
+          ${operatorLabel}
+        </td>
         <td class="right">${formatNumber(item.requests || 0)}</td>
         <td class="right">${formatNumber(item.corrections || 0)}</td>
         <td class="right">${formatNumber(item.translations || 0)}</td>
