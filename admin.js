@@ -1,13 +1,14 @@
 "use strict";
 
-const TOKEN_KEY = "ia_chat_admin_token_v31";
-const USER_KEY = "ia_chat_admin_user_v31";
+const TOKEN_KEY = "ia_chat_admin_token_v32";
+const USER_KEY = "ia_chat_admin_user_v32";
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   user: localStorage.getItem(USER_KEY) || "",
   operators: [],
   dashboard: null,
+  operatorFilter: "all",
   range: {
     from: "",
     to: ""
@@ -182,6 +183,7 @@ async function login() {
     $("loginMsg").textContent = "";
 
     initializeDefaultDates();
+    ensureOperatorFilterUI();
     await loadAll();
   } catch (error) {
     $("loginMsg").textContent = error.message || "Credenciales inválidas.";
@@ -192,6 +194,7 @@ function logout() {
   setSession("", "");
   state.operators = [];
   state.dashboard = null;
+  state.operatorFilter = "all";
 
   setView(false);
 }
@@ -210,6 +213,7 @@ async function checkSession() {
     $("sessionInfo").textContent = `Admin: ${data.user}`;
 
     initializeDefaultDates();
+    ensureOperatorFilterUI();
     await loadAll();
   } catch (_error) {
     logout();
@@ -236,6 +240,82 @@ function initializeDefaultDates() {
 function syncRangeFromInputs() {
   state.range.from = $("dateFrom")?.value || getFirstDayOfMonthLocal();
   state.range.to = $("dateTo")?.value || getTodayLocal();
+}
+
+function ensureOperatorFilterUI() {
+  if ($("operatorFilter")) return;
+
+  const filterRow = document.querySelector(".filter-row");
+
+  if (!filterRow) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = `
+    <label for="operatorFilter">Operador</label>
+    <select id="operatorFilter">
+      <option value="all">Todos los operadores</option>
+    </select>
+  `;
+
+  filterRow.insertBefore(wrapper, filterRow.children[2] || null);
+
+  $("operatorFilter").addEventListener("change", () => {
+    state.operatorFilter = $("operatorFilter").value || "all";
+
+    if (state.dashboard) {
+      renderDashboard(state.dashboard);
+    }
+  });
+}
+
+function updateOperatorFilterOptions() {
+  ensureOperatorFilterUI();
+
+  const select = $("operatorFilter");
+
+  if (!select) return;
+
+  const currentValue = state.operatorFilter || "all";
+  const options = new Map();
+
+  options.set("all", {
+    value: "all",
+    label: "Todos los operadores"
+  });
+
+  for (const operator of state.operators || []) {
+    options.set(String(operator.id), {
+      value: String(operator.id),
+      label: `${operator.display_name || operator.username} (${operator.username})`
+    });
+  }
+
+  for (const item of state.dashboard?.operator_stats || []) {
+    const value = String(item.operator_id || item.operator_username || "");
+
+    if (!value || options.has(value)) continue;
+
+    options.set(value, {
+      value,
+      label: `${item.operator_label || value} (${item.operator_username || "legacy"})`
+    });
+  }
+
+  select.innerHTML = Array.from(options.values()).map((item) => {
+    return `
+      <option value="${escapeHtml(item.value)}">
+        ${escapeHtml(item.label)}
+      </option>
+    `;
+  }).join("");
+
+  if (options.has(currentValue)) {
+    select.value = currentValue;
+    state.operatorFilter = currentValue;
+  } else {
+    select.value = "all";
+    state.operatorFilter = "all";
+  }
 }
 
 function setTodayRange() {
@@ -274,6 +354,12 @@ async function loadAll() {
     loadOperators(),
     loadDashboard()
   ]);
+
+  updateOperatorFilterOptions();
+
+  if (state.dashboard) {
+    renderDashboard(state.dashboard);
+  }
 }
 
 async function loadOperators() {
@@ -282,6 +368,7 @@ async function loadOperators() {
   state.operators = data.operators || [];
 
   renderOperators(data.summary || {});
+  updateOperatorFilterOptions();
 }
 
 async function loadDashboard() {
@@ -296,7 +383,91 @@ async function loadDashboard() {
 
   state.dashboard = data;
 
+  updateOperatorFilterOptions();
   renderDashboard(data);
+}
+
+function getFilteredOperatorStats(items = []) {
+  if (state.operatorFilter === "all") return items;
+
+  return items.filter((item) => {
+    const operatorId = String(item.operator_id || "");
+    const username = String(item.operator_username || item.username || "");
+    const label = String(item.operator_label || item.display_name || "");
+
+    return (
+      operatorId === state.operatorFilter ||
+      username === state.operatorFilter ||
+      label === state.operatorFilter
+    );
+  });
+}
+
+function getFilteredWarnings(items = []) {
+  if (state.operatorFilter === "all") return items;
+
+  const selectedOperator = findOperatorByFilter(state.operatorFilter);
+
+  return items.filter((item) => {
+    const operatorId = String(item.operator_id || "");
+    const username = String(item.operator_username || "");
+    const label = String(item.operator_label || "");
+
+    if (operatorId === state.operatorFilter) return true;
+    if (username === state.operatorFilter) return true;
+    if (label === state.operatorFilter) return true;
+
+    if (selectedOperator) {
+      if (username === selectedOperator.username) return true;
+      if (label === selectedOperator.display_name) return true;
+      if (operatorId === selectedOperator.id) return true;
+    }
+
+    return false;
+  });
+}
+
+function findOperatorByFilter(value) {
+  return (state.operators || []).find((operator) => {
+    return (
+      String(operator.id) === String(value) ||
+      String(operator.username) === String(value) ||
+      String(operator.display_name) === String(value)
+    );
+  });
+}
+
+function buildFilteredSummary(baseSummary, filteredStats, filteredWarnings) {
+  if (state.operatorFilter === "all") return baseSummary;
+
+  const summary = {
+    requests_total: 0,
+    correction_total: 0,
+    translation_total: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    estimated_cost_usd: 0,
+    warnings_total: 0
+  };
+
+  for (const item of filteredStats) {
+    summary.requests_total += Number(item.requests || 0);
+    summary.correction_total += Number(item.corrections || 0);
+    summary.translation_total += Number(item.translations || 0);
+    summary.prompt_tokens += Number(item.prompt_tokens || 0);
+    summary.completion_tokens += Number(item.completion_tokens || 0);
+    summary.total_tokens += Number(item.total_tokens || 0);
+    summary.estimated_cost_usd += Number(item.estimated_cost_usd || 0);
+  }
+
+  for (const item of filteredWarnings) {
+    summary.warnings_total += Number(item.total || 0);
+  }
+
+  summary.estimated_cost_usd = Number(summary.estimated_cost_usd.toFixed(6));
+
+  return summary;
 }
 
 function renderOperators(summary = {}) {
@@ -348,10 +519,13 @@ function renderOperators(summary = {}) {
 }
 
 function renderDashboard(data) {
-  const summary = data.summary || {};
+  const baseSummary = data.summary || {};
   const range = data.range || {};
+  const filteredStats = getFilteredOperatorStats(data.operator_stats || []);
+  const filteredWarnings = getFilteredWarnings(data.warning_top || []);
+  const summary = buildFilteredSummary(baseSummary, filteredStats, filteredWarnings);
 
-  $("rangeInfo").textContent = `Rango actual: ${range.from || "-"} → ${range.to || "-"}`;
+  $("rangeInfo").textContent = `Rango actual: ${range.from || "-"} → ${range.to || "-"} · Operador: ${getCurrentOperatorFilterLabel()}`;
 
   $("statRequests").textContent = formatNumber(summary.requests_total || 0);
   $("statCorrections").textContent = formatNumber(summary.correction_total || 0);
@@ -367,9 +541,29 @@ function renderDashboard(data) {
 
   $("statCostSub").textContent = `${pricing.model || "Gemini"} · input $${pricing.input_per_1m || 0}/1M · output $${pricing.output_per_1m || 0}/1M`;
 
-  renderUsageTable(data.operator_stats || []);
-  renderWarningsTable(data.warning_top || []);
+  renderUsageTable(filteredStats);
+  renderWarningsTable(filteredWarnings);
   renderDailyTable(data.daily_series || []);
+}
+
+function getCurrentOperatorFilterLabel() {
+  if (state.operatorFilter === "all") return "Todos";
+
+  const operator = findOperatorByFilter(state.operatorFilter);
+
+  if (operator) {
+    return `${operator.display_name || operator.username} (${operator.username})`;
+  }
+
+  const dashboardItem = (state.dashboard?.operator_stats || []).find((item) => {
+    return String(item.operator_id || "") === String(state.operatorFilter);
+  });
+
+  if (dashboardItem) {
+    return dashboardItem.operator_label || dashboardItem.operator_username || state.operatorFilter;
+  }
+
+  return state.operatorFilter;
 }
 
 function renderUsageTable(items = []) {
@@ -381,7 +575,7 @@ function renderUsageTable(items = []) {
     body.innerHTML = `
       <tr>
         <td colspan="9" class="muted">
-          No hay consumo en este rango.
+          No hay consumo para este operador en este rango.
         </td>
       </tr>
     `;
@@ -421,7 +615,7 @@ function renderWarningsTable(items = []) {
     body.innerHTML = `
       <tr>
         <td colspan="4" class="muted">
-          No hay warnings en este rango.
+          No hay warnings para este operador en este rango.
         </td>
       </tr>
     `;
@@ -446,6 +640,17 @@ function renderDailyTable(items = []) {
   const body = $("dailyBody");
 
   if (!body) return;
+
+  if (state.operatorFilter !== "all") {
+    body.innerHTML = `
+      <tr>
+        <td colspan="6" class="muted">
+          Vista diaria filtrada por operador pendiente de backend. Arriba ya tienes totales del operador seleccionado.
+        </td>
+      </tr>
+    `;
+    return;
+  }
 
   if (!items.length) {
     body.innerHTML = `
@@ -493,6 +698,7 @@ async function createOperator() {
 
     showFlash("Operador creado.");
     await loadOperators();
+    await loadDashboard();
   } catch (error) {
     showFlash(error.message || "No se pudo crear operador.");
   }
@@ -513,6 +719,7 @@ async function bulkOperators() {
 
     showFlash(`Operadores procesados: ${data.created || 0}.`);
     await loadOperators();
+    await loadDashboard();
   } catch (error) {
     showFlash(error.message || "No se pudieron crear operadores.");
   }
