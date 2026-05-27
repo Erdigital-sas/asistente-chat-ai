@@ -45,22 +45,16 @@ const OPERATOR_SHARED_KEY = process.env.OPERATOR_SHARED_KEY || "";
 const MAX_TEXT_CHARS = Number(process.env.MAX_TEXT_CHARS || 2500);
 const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || 3500);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
-const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 90);
+const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120);
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 const rateBuckets = new Map();
 
-if (!GEMINI_API_KEY) {
-  console.warn("WARNING: Falta GEMINI_API_KEY.");
-}
-
+if (!GEMINI_API_KEY) console.warn("WARNING: Falta GEMINI_API_KEY.");
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.warn("WARNING: Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.");
 }
-
-if (!ADMIN_PASSWORD) {
-  console.warn("WARNING: Falta ADMIN_PASSWORD.");
-}
+if (!ADMIN_PASSWORD) console.warn("WARNING: Falta ADMIN_PASSWORD.");
 
 const supabase =
   SUPABASE_URL && SUPABASE_SERVICE_KEY
@@ -79,7 +73,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.1.0",
+    version: "3.2.0",
     admin: "/admin"
   });
 });
@@ -88,7 +82,7 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "IA Chat Lite backend",
-    version: "3.1.0",
+    version: "3.2.0",
     mode: "lite",
     adminEnabled: true,
     operatorAuthEnabled: true,
@@ -120,7 +114,7 @@ app.get("/admin.js", (req, res) => {
 
 app.post("/admin-api/login", async (req, res) => {
   try {
-    const username = String(req.body?.username || "").trim();
+    const username = String(req.body?.username || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
 
     if (!username || !password) {
@@ -130,7 +124,7 @@ app.post("/admin-api/login", async (req, res) => {
       });
     }
 
-    if (username !== ADMIN_USER || password !== ADMIN_PASSWORD) {
+    if (username !== String(ADMIN_USER).toLowerCase() || password !== ADMIN_PASSWORD) {
       return res.status(401).json({
         ok: false,
         error: "Credenciales invalidas."
@@ -188,16 +182,14 @@ app.get("/admin-api/operators", requireAdmin, async (req, res) => {
 
     const operators = data || [];
 
-    const summary = {
-      total: operators.length,
-      activos: operators.filter((x) => x.status === "active").length,
-      inactivos: operators.filter((x) => x.status !== "active").length
-    };
-
     res.json({
       ok: true,
       operators,
-      summary
+      summary: {
+        total: operators.length,
+        activos: operators.filter((x) => x.status === "active").length,
+        inactivos: operators.filter((x) => x.status !== "active").length
+      }
     });
   } catch (error) {
     res.status(500).json({
@@ -217,12 +209,14 @@ app.post("/admin-api/operators", requireAdmin, async (req, res) => {
       req.body?.displayName ||
       username
     ).trim();
+
     const password = String(
       req.body?.password ||
       req.body?.clave ||
       OPERATOR_SHARED_KEY ||
       ""
     ).trim();
+
     const status = String(req.body?.status || "active").trim();
     const role = String(req.body?.role || "operator").trim();
     const notes = String(req.body?.notes || "").trim();
@@ -248,14 +242,12 @@ app.post("/admin-api/operators", requireAdmin, async (req, res) => {
       });
     }
 
-    const passwordHash = hashPassword(password);
-
     const { data, error } = await supabase
       .from("operators")
       .insert({
         username,
         display_name: displayName,
-        password_hash: passwordHash,
+        password_hash: hashPassword(password),
         status,
         role,
         notes,
@@ -466,7 +458,7 @@ app.delete("/admin-api/operators/:id", requireAdmin, async (req, res) => {
 });
 
 /* =========================================================
- * ADMIN DASHBOARD V3.1
+ * ADMIN DASHBOARD V3.2
  * ======================================================= */
 
 app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
@@ -475,182 +467,51 @@ app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
 
     const range = buildDateRange(req.query.from, req.query.to);
 
-    const [{ data: usageRows, error: usageError }, operatorsResult, warningsResult] =
-      await Promise.all([
-        supabase
-          .from(SUPABASE_TOKEN_TABLE)
-          .select("*")
-          .gte("created_at", range.startIso)
-          .lt("created_at", range.endExclusiveIso)
-          .order("created_at", { ascending: false })
-          .limit(10000),
+    const [usageResult, operatorsResult, warningsResult] = await Promise.all([
+      supabase
+        .from(SUPABASE_TOKEN_TABLE)
+        .select("*")
+        .gte("created_at", range.startIso)
+        .lt("created_at", range.endExclusiveIso)
+        .order("created_at", { ascending: false })
+        .limit(20000),
 
-        supabase
-          .from("operators")
-          .select("id, username, display_name, status, role, last_login_at"),
+      supabase
+        .from("operators")
+        .select("id, username, display_name, status, role, last_login_at"),
 
-        supabase
-          .from("warning_events")
-          .select("*")
-          .gte("created_at", range.startIso)
-          .lt("created_at", range.endExclusiveIso)
-          .order("created_at", { ascending: false })
-          .limit(10000)
-      ]);
+      supabase
+        .from("warning_events")
+        .select("*")
+        .gte("created_at", range.startIso)
+        .lt("created_at", range.endExclusiveIso)
+        .order("created_at", { ascending: false })
+        .limit(20000)
+    ]);
 
-    if (usageError) throw usageError;
-
-    const operators = operatorsResult?.data || [];
-    const operatorMap = new Map();
-
-    for (const operator of operators) {
-      operatorMap.set(String(operator.id), operator);
-      operatorMap.set(String(operator.username), operator);
-    }
+    if (usageResult.error) throw usageResult.error;
+    if (operatorsResult.error) throw operatorsResult.error;
 
     let warningRows = [];
 
-    if (!warningsResult?.error) {
-      warningRows = warningsResult?.data || [];
+    if (!warningsResult.error) {
+      warningRows = warningsResult.data || [];
     } else if (!String(warningsResult.error.message || "").includes("does not exist")) {
       throw warningsResult.error;
     }
 
-    const rows = usageRows || [];
+    const usageRows = usageResult.data || [];
+    const operators = operatorsResult.data || [];
+    const operatorMap = buildOperatorMap(operators);
 
-    const summary = {
-      requests_total: rows.length,
-      correction_total: rows.filter((x) => x.action === "correct").length,
-      translation_total: rows.filter((x) => x.action === "translate").length,
-      prompt_tokens: rows.reduce((sum, x) => sum + Number(x.prompt_tokens || 0), 0),
-      completion_tokens: rows.reduce((sum, x) => sum + Number(x.completion_tokens || 0), 0),
-      total_tokens: rows.reduce((sum, x) => sum + Number(x.total_tokens || 0), 0),
-      estimated_cost_usd: 0,
-      warnings_total: warningRows.length
-    };
+    const summary = buildUsageSummary(usageRows);
+    summary.warnings_total = warningRows.length;
 
-    summary.estimated_cost_usd = estimateGeminiCost(
-      summary.prompt_tokens,
-      summary.completion_tokens
-    );
-
-    const operatorStatsMap = new Map();
-
-    for (const row of rows) {
-      const rawOperatorId = String(row.operator_id || "unknown");
-      const operator = operatorMap.get(rawOperatorId);
-
-      const key = operator ? String(operator.id) : rawOperatorId;
-      const label = operator
-        ? operator.display_name || operator.username
-        : getLegacyOperatorLabel(rawOperatorId);
-
-      const username = operator ? operator.username : rawOperatorId;
-
-      if (!operatorStatsMap.has(key)) {
-        operatorStatsMap.set(key, {
-          operator_id: key,
-          operator_label: label,
-          operator_username: username,
-          display_name: operator?.display_name || label,
-          username: operator?.username || username,
-          is_legacy: !operator,
-          requests: 0,
-          corrections: 0,
-          translations: 0,
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0,
-          estimated_cost_usd: 0
-        });
-      }
-
-      const item = operatorStatsMap.get(key);
-
-      item.requests += 1;
-      item.prompt_tokens += Number(row.prompt_tokens || 0);
-      item.completion_tokens += Number(row.completion_tokens || 0);
-      item.total_tokens += Number(row.total_tokens || 0);
-
-      if (row.action === "correct") item.corrections += 1;
-      if (row.action === "translate") item.translations += 1;
-    }
-
-    for (const item of operatorStatsMap.values()) {
-      item.estimated_cost_usd = estimateGeminiCost(
-        item.prompt_tokens,
-        item.completion_tokens
-      );
-    }
-
-    const warningMap = new Map();
-
-    for (const row of warningRows) {
-      const operator =
-        row.operator_id && operatorMap.get(String(row.operator_id))
-          ? operatorMap.get(String(row.operator_id))
-          : row.operator_username && operatorMap.get(String(row.operator_username))
-            ? operatorMap.get(String(row.operator_username))
-            : null;
-
-      const operatorLabel = operator
-        ? operator.display_name || operator.username
-        : row.operator_username || "Legacy / sin operador";
-
-      const phrase = row.phrase || row.warning_type || "warning";
-      const key = `${operatorLabel}|${phrase}`;
-
-      if (!warningMap.has(key)) {
-        warningMap.set(key, {
-          operator_id: operator?.id || row.operator_id || null,
-          operator_label: operatorLabel,
-          operator_username: operator?.username || row.operator_username || "legacy",
-          phrase,
-          warning_type: row.warning_type || "warning",
-          total: 0
-        });
-      }
-
-      warningMap.get(key).total += 1;
-    }
-
-    const dailyMap = new Map();
-
-    for (const row of rows) {
-      const day = String(row.created_at || "").slice(0, 10);
-
-      if (!day) continue;
-
-      if (!dailyMap.has(day)) {
-        dailyMap.set(day, {
-          day,
-          requests: 0,
-          corrections: 0,
-          translations: 0,
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0,
-          estimated_cost_usd: 0
-        });
-      }
-
-      const item = dailyMap.get(day);
-
-      item.requests += 1;
-      item.prompt_tokens += Number(row.prompt_tokens || 0);
-      item.completion_tokens += Number(row.completion_tokens || 0);
-      item.total_tokens += Number(row.total_tokens || 0);
-
-      if (row.action === "correct") item.corrections += 1;
-      if (row.action === "translate") item.translations += 1;
-    }
-
-    for (const item of dailyMap.values()) {
-      item.estimated_cost_usd = estimateGeminiCost(
-        item.prompt_tokens,
-        item.completion_tokens
-      );
-    }
+    const operatorStats = buildOperatorStats(usageRows, operatorMap);
+    const warningTop = buildWarningTop(warningRows, operatorMap);
+    const dailySeries = buildDailySeries(usageRows);
+    const dailyOperatorSeries = buildDailyOperatorSeries(usageRows, operatorMap);
+    const dailyWarningSeries = buildDailyWarningSeries(warningRows, operatorMap);
 
     res.json({
       ok: true,
@@ -661,15 +522,11 @@ app.get("/admin-api/dashboard", requireAdmin, async (req, res) => {
       },
       summary,
       operators,
-      operator_stats: Array.from(operatorStatsMap.values()).sort(
-        (a, b) => b.total_tokens - a.total_tokens
-      ),
-      warning_top: Array.from(warningMap.values())
-        .sort((a, b) => b.total - a.total)
-        .slice(0, 50),
-      daily_series: Array.from(dailyMap.values()).sort((a, b) =>
-        a.day.localeCompare(b.day)
-      ),
+      operator_stats: operatorStats,
+      warning_top: warningTop,
+      daily_series: dailySeries,
+      daily_operator_series: dailyOperatorSeries,
+      daily_warning_series: dailyWarningSeries,
       pricing: {
         provider: "gemini",
         model: GEMINI_MODEL,
@@ -992,7 +849,7 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`IA Chat v3.1 activo en puerto ${PORT}`);
+  console.log(`IA Chat v3.2 activo en puerto ${PORT}`);
   console.log("Admin: /admin");
   console.log(`Gemini model: ${GEMINI_MODEL}`);
 });
@@ -1227,6 +1084,259 @@ function normalizeGeminiUsage(usageMetadata) {
     total_tokens: totalTokens,
     thoughts_tokens: thoughtsTokens
   };
+}
+
+/* =========================================================
+ * DASHBOARD HELPERS
+ * ======================================================= */
+
+function buildOperatorMap(operators) {
+  const map = new Map();
+
+  for (const operator of operators || []) {
+    map.set(String(operator.id), operator);
+    map.set(String(operator.username), operator);
+  }
+
+  return map;
+}
+
+function buildUsageSummary(rows) {
+  const summary = {
+    requests_total: rows.length,
+    correction_total: rows.filter((x) => x.action === "correct").length,
+    translation_total: rows.filter((x) => x.action === "translate").length,
+    prompt_tokens: rows.reduce((sum, x) => sum + Number(x.prompt_tokens || 0), 0),
+    completion_tokens: rows.reduce((sum, x) => sum + Number(x.completion_tokens || 0), 0),
+    total_tokens: rows.reduce((sum, x) => sum + Number(x.total_tokens || 0), 0),
+    estimated_cost_usd: 0,
+    warnings_total: 0
+  };
+
+  summary.estimated_cost_usd = estimateGeminiCost(
+    summary.prompt_tokens,
+    summary.completion_tokens
+  );
+
+  return summary;
+}
+
+function buildOperatorStats(rows, operatorMap) {
+  const stats = new Map();
+
+  for (const row of rows || []) {
+    const rawOperatorId = String(row.operator_id || "unknown");
+    const operator = operatorMap.get(rawOperatorId);
+
+    const key = operator ? String(operator.id) : rawOperatorId;
+    const label = operator
+      ? operator.display_name || operator.username
+      : getLegacyOperatorLabel(rawOperatorId);
+    const username = operator ? operator.username : rawOperatorId;
+
+    if (!stats.has(key)) {
+      stats.set(key, {
+        operator_id: key,
+        operator_label: label,
+        operator_username: username,
+        display_name: operator?.display_name || label,
+        username: operator?.username || username,
+        is_legacy: !operator,
+        requests: 0,
+        corrections: 0,
+        translations: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        estimated_cost_usd: 0
+      });
+    }
+
+    const item = stats.get(key);
+
+    item.requests += 1;
+    item.prompt_tokens += Number(row.prompt_tokens || 0);
+    item.completion_tokens += Number(row.completion_tokens || 0);
+    item.total_tokens += Number(row.total_tokens || 0);
+
+    if (row.action === "correct") item.corrections += 1;
+    if (row.action === "translate") item.translations += 1;
+  }
+
+  for (const item of stats.values()) {
+    item.estimated_cost_usd = estimateGeminiCost(
+      item.prompt_tokens,
+      item.completion_tokens
+    );
+  }
+
+  return Array.from(stats.values()).sort((a, b) => b.total_tokens - a.total_tokens);
+}
+
+function buildWarningTop(rows, operatorMap) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const operator =
+      row.operator_id && operatorMap.get(String(row.operator_id))
+        ? operatorMap.get(String(row.operator_id))
+        : row.operator_username && operatorMap.get(String(row.operator_username))
+          ? operatorMap.get(String(row.operator_username))
+          : null;
+
+    const operatorLabel = operator
+      ? operator.display_name || operator.username
+      : row.operator_username || "Legacy / sin operador";
+
+    const phrase = row.phrase || row.warning_type || "warning";
+    const key = `${operatorLabel}|${row.operator_username || ""}|${phrase}`;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        operator_id: operator?.id || row.operator_id || null,
+        operator_label: operatorLabel,
+        operator_username: operator?.username || row.operator_username || "legacy",
+        phrase,
+        warning_type: row.warning_type || "warning",
+        total: 0
+      });
+    }
+
+    map.get(key).total += 1;
+  }
+
+  return Array.from(map.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 100);
+}
+
+function buildDailySeries(rows) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const day = String(row.created_at || "").slice(0, 10);
+
+    if (!day) continue;
+
+    if (!map.has(day)) {
+      map.set(day, createDailyItem({ day }));
+    }
+
+    addUsageToDailyItem(map.get(day), row);
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.day.localeCompare(b.day));
+}
+
+function buildDailyOperatorSeries(rows, operatorMap) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const day = String(row.created_at || "").slice(0, 10);
+
+    if (!day) continue;
+
+    const rawOperatorId = String(row.operator_id || "unknown");
+    const operator = operatorMap.get(rawOperatorId);
+    const operatorId = operator ? String(operator.id) : rawOperatorId;
+    const operatorLabel = operator
+      ? operator.display_name || operator.username
+      : getLegacyOperatorLabel(rawOperatorId);
+    const operatorUsername = operator ? operator.username : rawOperatorId;
+
+    const key = `${operatorId}|${day}`;
+
+    if (!map.has(key)) {
+      map.set(key, createDailyItem({
+        day,
+        operator_id: operatorId,
+        operator_label: operatorLabel,
+        operator_username: operatorUsername,
+        is_legacy: !operator
+      }));
+    }
+
+    addUsageToDailyItem(map.get(key), row);
+  }
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.day !== b.day) return a.day.localeCompare(b.day);
+    return String(a.operator_label || "").localeCompare(String(b.operator_label || ""));
+  });
+}
+
+function buildDailyWarningSeries(rows, operatorMap) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const day = String(row.created_at || "").slice(0, 10);
+
+    if (!day) continue;
+
+    const operator =
+      row.operator_id && operatorMap.get(String(row.operator_id))
+        ? operatorMap.get(String(row.operator_id))
+        : row.operator_username && operatorMap.get(String(row.operator_username))
+          ? operatorMap.get(String(row.operator_username))
+          : null;
+
+    const operatorId = operator ? String(operator.id) : String(row.operator_id || row.operator_username || "legacy");
+    const operatorLabel = operator
+      ? operator.display_name || operator.username
+      : row.operator_username || "Legacy / sin operador";
+    const operatorUsername = operator ? operator.username : row.operator_username || "legacy";
+
+    const key = `${operatorId}|${day}`;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        day,
+        operator_id: operatorId,
+        operator_label: operatorLabel,
+        operator_username: operatorUsername,
+        warnings: 0
+      });
+    }
+
+    map.get(key).warnings += 1;
+  }
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.day !== b.day) return a.day.localeCompare(b.day);
+    return String(a.operator_label || "").localeCompare(String(b.operator_label || ""));
+  });
+}
+
+function createDailyItem(extra = {}) {
+  return {
+    day: extra.day,
+    operator_id: extra.operator_id || null,
+    operator_label: extra.operator_label || null,
+    operator_username: extra.operator_username || null,
+    is_legacy: Boolean(extra.is_legacy),
+    requests: 0,
+    corrections: 0,
+    translations: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    estimated_cost_usd: 0
+  };
+}
+
+function addUsageToDailyItem(item, row) {
+  item.requests += 1;
+  item.prompt_tokens += Number(row.prompt_tokens || 0);
+  item.completion_tokens += Number(row.completion_tokens || 0);
+  item.total_tokens += Number(row.total_tokens || 0);
+
+  if (row.action === "correct") item.corrections += 1;
+  if (row.action === "translate") item.translations += 1;
+
+  item.estimated_cost_usd = estimateGeminiCost(
+    item.prompt_tokens,
+    item.completion_tokens
+  );
 }
 
 /* =========================================================
